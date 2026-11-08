@@ -2,7 +2,7 @@
 
 图解学习笔记，大图少字。在线阅读：https://archeu.github.io/study-notes/
 
-每个主题一个目录，首页 `index.html` 按主题分组列出所有页面。
+每个主题一个目录。首页 `index.html` 按技术栈分层（架构与性能、框架、存储与消息、Java 平台、网络）列出所有页面，有技术栈地图、最近新增和搜索。
 
 ## Spring
 
