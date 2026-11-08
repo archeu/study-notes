@@ -14,7 +14,7 @@
 
 | # | 页面 | 内容 |
 |---|------|------|
-| 00 | [Java 后端架构学习地图](https://archeu.github.io/study-notes/java/roadmap.html) | 从高级工程师到架构师：三个等级、十六站路线（116 个知识点，J06 含 PostgreSQL 对照、过关检验、待做页）、25 份招聘要求统计和已有页面的缺口、交易靶场贯穿、两段式安排（AI 主线期间按需补，走完后约 15 周系统学）、版本基线，先定位搜索 |
+| 00 | [Java 后端架构学习地图](https://archeu.github.io/study-notes/java/roadmap.html) | 从高级工程师到架构师：三个等级、十六站路线（117 个知识点，J06 含 PostgreSQL 对照，J11 含 TiDB、OceanBase、GoldenDB、过关检验、待做页）、25 份招聘要求统计和已有页面的缺口、交易靶场贯穿、两段式安排（AI 主线期间按需补，走完后约 15 周系统学）、版本基线，先定位搜索 |
 
 ## Spring
 
