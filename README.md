@@ -8,13 +8,13 @@
 
 | # | 页面 | 内容 |
 |---|------|------|
-| 00 | [AI Agent 学习地图](https://archeu.github.io/study-notes/agent/roadmap.html) | 从 Java 后端到 AI Agent 工程师（v2，对照 26 份招聘要求修订）：四个等级、十二站路线（99 个知识点、过关检验、补给站）、招聘要求统计图、贯穿项目值班助手、17 个 AI 概念的 Java 比方、每周 26 小时的节奏和 30 周时间表、已有 44 篇的去向，先定位搜索 |
+| 00 | [AI Agent 学习地图](https://archeu.github.io/study-notes/agent/roadmap.html) | 从 Java 后端到 AI Agent 工程师（v2.1，对照 26 份招聘要求修订，每站先看场景全景）：四个等级、十二站路线（99 个知识点、过关检验、补给站）、招聘要求统计图、贯穿项目值班助手、17 个 AI 概念的 Java 比方、每周 26 小时的节奏和 30 周时间表、已有 44 篇的去向，先定位搜索 |
 
 # Java 后端架构（补给库）
 
 | # | 页面 | 内容 |
 |---|------|------|
-| 00 | [Java 后端架构学习地图](https://archeu.github.io/study-notes/java/roadmap.html) | 从高级工程师到架构师：三个等级、十六站路线（117 个知识点，J06 含 PostgreSQL 对照，J11 含 TiDB、OceanBase、GoldenDB、过关检验、待做页）、25 份招聘要求统计和已有页面的缺口、交易靶场贯穿、两段式安排（AI 主线期间按需补，走完后约 15 周系统学）、版本基线，先定位搜索 |
+| 00 | [Java 后端架构学习地图](https://archeu.github.io/study-notes/java/roadmap.html) | 从高级工程师到架构师（每站先看场景全景，J04 用“从输入 URL 到页面展示”）：三个等级、十六站路线（117 个知识点，J06 含 PostgreSQL 对照，J11 含 TiDB、OceanBase、GoldenDB、过关检验、待做页）、25 份招聘要求统计和已有页面的缺口、交易靶场贯穿、两段式安排（AI 主线期间按需补，走完后约 15 周系统学）、版本基线，先定位搜索 |
 
 ## Spring
 
