@@ -8,7 +8,7 @@
 
 | # | 页面 | 内容 |
 |---|------|------|
-| 00 | [AI Agent 学习地图](https://archeu.github.io/study-notes/agent/roadmap.html) | 从 Java 后端到 AI Agent 工程师：四个等级、十站路线（74 个知识点、过关检验、补给站）、贯穿项目值班助手、AI 概念的 Java 比方、每周 26 小时的节奏和时间表、已有 44 篇的去向，先定位搜索 |
+| 00 | [AI Agent 学习地图](https://archeu.github.io/study-notes/agent/roadmap.html) | 从 Java 后端到 AI Agent 工程师（v2，对照 26 份招聘要求修订）：四个等级、十二站路线（99 个知识点、过关检验、补给站）、招聘要求统计图、贯穿项目值班助手、17 个 AI 概念的 Java 比方、每周 26 小时的节奏和 30 周时间表、已有 44 篇的去向，先定位搜索 |
 
 # Java 后端架构（补给库）
 
