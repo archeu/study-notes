@@ -9,6 +9,7 @@
 | # | 页面 | 内容 |
 |---|------|------|
 | 00 | [AI Agent 学习地图](https://archeu.github.io/study-notes/agent/roadmap.html) | 从 Java 后端到 AI Agent 工程师（v2.1，对照 26 份招聘要求修订，每站先看场景全景）：四个等级、十二站路线（99 个知识点、过关检验、补给站）、招聘要求统计图、贯穿项目值班助手、17 个 AI 概念的 Java 比方、每周 26 小时的节奏和 30 周时间表、已有 44 篇的去向，先定位搜索 |
+| 01 | [全景：一个 FastAPI 请求的一生](https://archeu.github.io/study-notes/agent/pano-01-fastapi-request.html) | 站 01 的场景全景：一条 curl 进 FastAPI，经过 uv、uvicorn、路由、参数校验、端点协程、gather、事件循环、解析日志、响应模型、pytest 十站，每站挂上 Python 速成的知识点和 Java 对照；并发与串行耗时实测、order-04 超时、阻塞调用卡住事件循环，分步演示 |
 
 # Java 后端架构（补给库）
 
