@@ -12,6 +12,7 @@
 | 01 | [全景：一个 FastAPI 请求的一生](https://archeu.github.io/study-notes/agent/pano-01-fastapi-request.html) | 站 01 的场景全景：一条 curl 进 FastAPI，经过 uv、uvicorn、路由、参数校验、端点协程、gather、事件循环、解析日志、响应模型、pytest 十站，每站挂上 Python 速成的知识点和 Java 对照；并发与串行耗时实测、order-04 超时、阻塞调用卡住事件循环，分步演示 |
 | 02 | [uv 管环境和依赖（对照 Maven）](https://archeu.github.io/study-notes/agent/python-uv.html) | 站 01 第 1 个知识点：pyproject 写意图、uv.lock 钉死整棵依赖树、.venv 按锁算出来并从全局缓存硬链接；对照 Maven 的 classpath 和最近者优先，pip 与 uv 建环境耗时实测，九个坑、团队规范、CI 与 Docker 写法，uv run 先猜再跑实验台 |
 | 03 | [全景：一句话怎么变成模型的回答](https://archeu.github.io/study-notes/agent/pano-02-prompt-to-answer.html) | 站 02 的场景全景：值班助手把 order-04 的 GC 日志交给模型，经过拼请求、分词、上下文窗口、查向量表、读完输入（注意力与 KV 缓存）、算概率、采样、逐 token 循环、停下、结算核对十站，每站挂上知识点和 Java 对照；本机小模型实测分词、候选概率、温度 0 和 1、输入长度与耗时、前缀缓存、幻觉，分步演示 |
+| 04 | [语法对照：列表、字典、推导式、切片](https://archeu.github.io/study-notes/agent/python-collections.html) | 站 01 第 2 个知识点：对照 Java 讲列表和字典的内存布局、推导式和生成器、切片为什么复制而不是视图、8 个坑、推导式与生成器的速度和内存实测，切片实验台 |
 
 # Java 后端架构（补给库）
 
