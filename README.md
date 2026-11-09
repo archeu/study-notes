@@ -107,6 +107,7 @@
 | 07 | [synchronized 与锁升级、CAS 与原子类](https://archeu.github.io/study-notes/juc/synchronized-cas-atomic.html) | 对象头 mark word 的几种状态（JOL 实测无锁、thin lock、fat lock、偏向）、monitorenter / monitorexit 和异常表、轻量级锁和膨胀成 ObjectMonitor、wait / notify、偏向锁为什么被拿掉、CAS 在 ARM 和 x86 上的指令、ABA 实测、原子类和 LongAdder，五种写法吞吐实测（JDK 17，2 核 ARM），锁升级分步演示 |
 | 08 | [AQS 下一圈：读写锁、StampedLock、Semaphore 与 JFR 找锁竞争](https://archeu.github.io/study-notes/juc/aqs-rwlock-jfr.html) | AQS 的下一圈：读写锁把 state 劈成两半、readerShouldBlock 和写锁饥饿、锁降级和升级死锁、StampedLock 乐观读和 validate、Semaphore 舱壁、JFR 的 jdk.JavaMonitorEnter / jdk.ThreadPark；JDK 17 实测四把锁读吞吐（读短时读写锁比普通锁慢、公平读写锁慢 75 倍、乐观读最快）、用 JFR 抓出锁里慢 SQL、Semaphore 限并发，先猜再看的实验台 |
 | 09 | [ConcurrentHashMap 与阻塞队列](https://archeu.github.io/study-notes/juc/chm-blocking-queue.html) | HashMap 并发 put 丢数据实测（丢 4%～16%）、ConcurrentHashMap 的桶数组和三种特殊节点、putVal 的几条路（空桶 CAS、锁桶头、协助扩容）、TreeBin、分格计数、只保证单个方法原子（get 再 put 实测丢更新、merge 不丢）、Recursive update、初始容量，阻塞队列家族和 DelayQueue，JDK 17 反射实测，putVal 路径演示 |
+| 10 | [线程池下一圈：怎么配、拒绝策略、动态调参与监控](https://archeu.github.io/study-notes/juc/threadpool-tuning.html) | 线程池的下一圈：用利特尔法则和 CPU 占比算线程数、按可接受排队时间定队列、四种拒绝策略把代价给了谁（实测 100 条通知三种策略丢 86 条、CallerRuns 让提交方慢 40 倍）、运行中先调最大再调核心（实测 2→16 积压 1 秒消完）、监控五个数、优雅关闭三步，参数计算器 |
 
 ## 网络
 
