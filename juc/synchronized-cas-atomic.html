@@ -1,0 +1,1092 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>synchronized 与 CAS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a mechanism topic (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), depth 懂设计, JDK 17 + JOL 0.17; J02 knowledge point 3. Roles: pd blue = thin lock / synchronized fast path, cg purple = fat lock / ObjectMonitor, g2 brown = biased locking and WAITING, bk teal = CAS and atomics, neutral grey = unlocked / rejected design, bad red = pitfalls and BLOCKED, good green = right way.
+   Interaction (one): lock-inflation stepper in ④-3 (mark word hex from JOL, three threads' states, ObjectMonitor owner / entry queue / WaitSet), with a toggle for -XX:+UseBiasedLocking. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:1.6}
+.lk{display:flex;flex-direction:column;gap:14px;outline:none}
+.lk-tog{display:inline-flex;align-items:center;gap:6px;font-size:14px;color:var(--ink);cursor:pointer}
+.lk-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) minmax(0,1fr);gap:14px}
+.lk-card{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.lk-card h4{font-size:15px;color:var(--muted)}
+.lk-card.off{opacity:.55;border-style:dashed}
+.lk-hex code{font-size:14px;overflow-wrap:anywhere}
+.lk-small{font-size:13.5px;color:var(--muted)}
+.chip{display:inline-block;font-family:var(--font-mono);font-size:13px;font-weight:700;padding:2px 10px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--paper)}
+.chip.free{border-color:var(--neutral);background:var(--neutral-tint);color:var(--neutral)}
+.chip.thin{border-color:var(--pd);background:var(--pd-tint);color:var(--pd)}
+.chip.fat{border-color:var(--cg);background:var(--cg-tint);color:var(--cg)}
+.chip.bias{border-color:var(--g2);background:var(--g2-tint);color:var(--g2)}
+.lk-threads{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.lk-threads li{display:grid;grid-template-columns:5.2em minmax(0,1fr);gap:8px;font-size:13.5px;padding:4px 8px;border-radius:8px;align-items:baseline}
+.lk-threads li.own{background:var(--pd-tint)}
+.lk-threads li.bl{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.lk-threads li.wt{background:var(--g2-tint)}
+.lk-mon{display:grid;grid-template-columns:5.4em minmax(0,1fr);gap:6px 10px;margin:0;font-size:14px}
+.lk-mon dt{color:var(--muted);font-size:13px;font-weight:700}
+.lk-mon dd{margin:0;font-family:var(--font-mono);font-size:13px}
+.lk-note{font-size:15px;background:var(--bk-tint);border-radius:10px;padding:10px 14px;min-height:3.2em}
+table.runs td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+@media (max-width:860px){.lk-grid{grid-template-columns:minmax(0,1fr)}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 并发</span><span aria-hidden="true">/</span><span class="tb-here">synchronized 与锁升级、CAS 与原子类</span></div></nav>
+<main>
+
+<header class="hero">
+  <p class="kicker">对象头 · mark word · JOL · monitorenter / monitorexit · ACC_SYNCHRONIZED · 轻量级锁 · ObjectMonitor · 膨胀 · 偏向锁 · wait / notify · CAS · LSE · ABA · AtomicInteger · AtomicStampedReference · LongAdder · 锁粗化</p>
+  <h1>synchronized 与 CAS：一个先排队再干活，一个先干活、失败了再来</h1>
+  <p class="lead">synchronized 的锁<b>就记在对象头里那 8 个字节上</b>：没人抢时，一次 CAS 把对象头换成“我在用”的标记就算加锁；有人抢了，就给这个对象配一个 ObjectMonitor，抢不到的线程挂起排队，状态变成 BLOCKED。CAS 是另一种思路：不排队，读出旧值、算好新值，用一条 CPU 指令“如果还是旧值就换成新值”，失败了重来。全景第 6 站和第 7 站就是这两条路。本页在 JDK 17 上用 JOL 看对象头怎么变，用五种写法比吞吐，看清各自在什么时候赢。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j02-order-in-threadpool.html#s-6">一个下单请求在线程池里 · 第 6、7 站</a></span><span>地图：<a href="../java/roadmap.html#j02">J02 · synchronized 与锁升级、CAS 与原子类（第 3 个知识点）</a></span><span>实验：JDK 17.0.20，JOL 0.17，2 核 ARM <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div>
+    <h2><span class="sn">①</span>为什么需要：全景第 6、7 站留下的问题</h2>
+    <p class="lead">在全景第 6 站，这一步要解决的是：把“读库存、判断、写回”变成别的线程插不进来的一段。synchronized 做到了，100 件正好卖 100 件，但压测时最多 47 个线程同时 BLOCKED 在这把锁上。第 7 站换成 <code>AtomicInteger</code> 的 CAS，同样卖对了，失败重试 0 次。于是有了这几个问题：</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>问题</th><th>本页在哪讲</th></tr></thead>
+      <tbody>
+        <tr><th>synchronized 到底把锁记在哪？没人抢的时候也很重吗？</th><td>④-1 对象头、④-3 锁升级、⑤ JOL</td></tr>
+        <tr><th>为什么线程转储里卡在 synchronized 上的是 BLOCKED，卡在 ReentrantLock 上的是 WAITING？</th><td>④-3 ObjectMonitor</td></tr>
+        <tr><th>CAS 凭什么不用锁也不会卖重？什么时候它反而更慢？</th><td>④-4、⑤ 吞吐对比</td></tr>
+        <tr><th>面试常问的“偏向锁 → 轻量级锁 → 重量级锁”，JDK 17 上还对吗？</th><td>④-5、⑥ 第三圈</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="scene"><b>需求</b><span>地图上这一项的深度是“懂设计”：能用对象头讲清 synchronized 的几种状态和升级的原因，能说出 CAS 在硬件上是什么、ABA 是什么，能按“有没有竞争、临界区多长、要不要等待”在 synchronized、ReentrantLock、原子类、LongAdder 之间做选择。</span></div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div>
+    <h2><span class="sn">②</span>没有它会怎样：读、判断、写回被插队</h2>
+  </div>
+  <div class="bars" aria-label="不加锁的库存扣减超卖比例，jcstress 实测">
+    <p class="tip"><span class="tag-real">实测</span> jcstress，JDK 17，2 核 ARM：库存只剩 1 件，两个线程同时扣，统计两个人都抢到的比例（见 <a href="jmm-jcstress-cache.html#s5">JMM 下一圈</a>）。</p>
+    <div class="bar" data-role="bad"><span>普通 int</span><span class="track"><span class="fill" style="width:44%"></span></span><span class="val">14.8% 超卖</span></div>
+    <div class="bar" data-role="bad"><span>volatile int</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="val">33.6% 超卖</span></div>
+    <div class="bar" data-role="done"><span>AtomicInteger CAS</span><span class="track"><span class="fill" style="width:1%"></span></span><span class="val">2.47 亿次里 0 次</span></div>
+  </div>
+  <ul class="pains">
+    <li>“读、判断、写回”是三步，任何两步之间都可能换另一个线程上来（<a href="thread-state-context-switch.html#m-13">上下文切换</a>），或者两个核真的同时在跑。</li>
+    <li>volatile 只保证每次读都是最新的，不保证三步连在一起（<a href="jmm-jcstress-cache.html#p-half">JMM 下一圈坑 4</a>）。</li>
+    <li class="ok">缺的那一块：<b>让“检查”和“修改”成为一个整体</b>。要么让别的线程在外面等（锁），要么让修改在“检查结果还成立”时才生效、否则重来（CAS）。</li>
+  </ul>
+  <p class="mismatch">不懂这一点时的典型误用：每次调用都 <code>synchronized (new Object())</code>，或者锁一个 <code>Integer</code> 库存值。前者每个线程锁的是自己新建的对象，等于没锁；后者库存一变，锁的就是另一个对象了（⑥ 坑 1）。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div>
+    <h2><span class="sn">③</span>相邻方案：让“检查 + 修改”成为整体的五种做法</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>思路</th><th>抢不到时</th><th>适合</th></tr></thead>
+      <tbody>
+        <tr class="hl"><th>synchronized</th><td>悲观：先拿锁再干活</td><td>先自旋一小会儿，再挂起，BLOCKED</td><td>临界区里有好几步、要改好几个字段；日常首选</td></tr>
+        <tr><th>ReentrantLock</th><td>悲观，基于 AQS</td><td>排进 AQS 队列 park，WAITING；可超时、可中断、可公平</td><td>要 <code>tryLock(超时)</code>、多个条件队列、可中断（<a href="aqs.html">AQS 页</a>）</td></tr>
+        <tr class="hl"><th>CAS / 原子类</th><td>乐观：先算，提交时核对</td><td>重读、重算、重试，不挂起</td><td>只改一个变量，临界区极短</td></tr>
+        <tr><th>LongAdder</th><td>分散：每个线程加到自己那一格</td><td>换一格再试</td><td>多线程高频累加、偶尔读总数的计数器</td></tr>
+        <tr><th>数据库条件更新</th><td>把检查和修改放进一条 SQL</td><td>行锁排队</td><td>多台机器共享的数据（全景第 8 站）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line">选择规则：先看数据在哪：多台机器共享就交给数据库或 Redis；只在一个 JVM 里，只改一个数就用原子类，改好几样就用 synchronized，要超时或可中断再换 ReentrantLock。<b>本页学 synchronized 和 CAS 原子类</b>，ReentrantLock 见 AQS 页。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div>
+    <h2><span class="sn">④</span>原理：锁记在对象头里，抢的人多了才去找操作系统</h2>
+  </div>
+  <div class="todo">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>CAS 指令</b>：CPU 提供的“比较并交换”：给一个地址、一个期望值、一个新值，地址里还是期望值就换成新值并返回成功，否则什么也不做返回失败。整个过程不可分割（<a href="jmm-jcstress-cache.html#m-arch">JMM 下一圈 ④-2</a>）。</li>
+      <li><b>park / unpark</b>：让线程睡下、叫醒线程，要进内核，几微秒一次（<a href="thread-state-context-switch.html#m-13">线程页 ④-3</a>）。</li>
+      <li><b>安全点</b>：JVM 让所有 Java 线程停在一个“可以检查”的位置，GC 和一些锁操作要用它。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-header"><span class="sn">④-1</span>对象头：每个对象开头 8 个字节的 mark word</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 290" role="img" aria-label="64 位 mark word 的四种样子：无锁时放哈希值、分代年龄，最低两位 01；轻量级锁时是指向持锁线程栈上锁记录的指针，最低两位 00；重量级锁时是指向 ObjectMonitor 的指针，最低两位 10；偏向锁时放偏向的线程、epoch、年龄，最低三位 101。">
+        <g class="t-s">
+          <text x="16" y="30" class="t-b">mark word（64 位）：最低两位说明“剩下的位是什么意思”</text>
+          <text x="16" y="64" class="t-b">无锁</text>
+          <rect x="130" y="46" width="520" height="30" rx="5" class="b-neu"/><text x="142" y="66">没用到 25 位 · identityHashCode 31 位（算过才有）· 分代年龄 4 位 · 0</text>
+          <rect x="660" y="46" width="70" height="30" rx="5" class="b-neu"/><text x="682" y="66" class="t-mono t-b">01</text>
+          <text x="748" y="66" class="t-xs">实测 0x…0001</text>
+
+          <text x="16" y="114" class="t-b">轻量级锁</text>
+          <rect x="130" y="96" width="520" height="30" rx="5" class="b-pd"/><text x="142" y="116">指针 → 持锁线程栈上的“锁记录”（原来的对象头搬到那里）</text>
+          <rect x="660" y="96" width="70" height="30" rx="5" class="b-pd"/><text x="682" y="116" class="t-mono t-b">00</text>
+          <text x="748" y="116" class="t-xs">实测 thin lock</text>
+
+          <text x="16" y="164" class="t-b">重量级锁</text>
+          <rect x="130" y="146" width="520" height="30" rx="5" class="b-cg"/><text x="142" y="166">指针 → ObjectMonitor（C++ 对象：owner、入口队列、WaitSet）</text>
+          <rect x="660" y="146" width="70" height="30" rx="5" class="b-cg"/><text x="682" y="166" class="t-mono t-b">10</text>
+          <text x="748" y="166" class="t-xs">实测 fat lock</text>
+
+          <text x="16" y="214" class="t-b">偏向锁</text>
+          <rect x="130" y="196" width="520" height="30" rx="5" class="b-g2"/><text x="142" y="216">偏向的线程 54 位 · epoch 2 位 · 年龄 4 位 · 1</text>
+          <rect x="660" y="196" width="70" height="30" rx="5" class="b-g2"/><text x="682" y="216" class="t-mono t-b">01</text>
+          <text x="748" y="216" class="t-xs">JDK 17 默认关</text>
+        </g>
+        <text x="16" y="256" class="t-s">两个后果：<tspan class="t-b">算过 identityHashCode 的对象就不能再偏向</tspan>（位置被哈希占了）；轻量级锁和重量级锁时，哈希值和年龄被“搬走”了，放在锁记录或 ObjectMonitor 里。</text>
+        <text x="16" y="278" class="t-xs">按 64 位 HotSpot、JDK 17、默认的栈上锁记录实现；JDK 23 起默认的新轻量级锁不再往对象头里放栈地址（⑥ 第三圈）。</text>
+      </svg>
+    </div>
+  </figure>
+
+  <h3 id="m-bytecode"><span class="sn">④-2</span>编译之后：同步块是一对指令，同步方法只是一个标志</h3>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">javap</span><b>takeBlock()：synchronized (lock) { … }</b></div>
+<pre><code> 6: monitorenter                  <span class="cm">// 拿锁</span>
+ 7: … if (left &lt; 1) …
+16: aload_1
+17: monitorexit                   <span class="cm">// return 0 前放锁</span>
+18: ireturn
+19: … left--
+31: monitorexit                   <span class="cm">// return 1 前放锁</span>
+32: ireturn
+33: astore_2                      <span class="cm">// 中间抛了异常：</span>
+35: monitorexit                   <span class="cm">// 先放锁</span>
+37: athrow                        <span class="cm">// 再接着抛</span>
+Exception table:
+   from    to  target type
+     7    18    33   any
+    19    32    33   any</code></pre>
+    </div>
+    <div>
+      <div class="codebox">
+        <div class="code-bar"><span class="n">javap</span><b>takeMethod()：synchronized 方法</b></div>
+<pre><code>synchronized int takeMethod();
+  flags: (0x0020) ACC_SYNCHRONIZED
+  Code: … 没有 monitorenter / monitorexit</code></pre>
+      </div>
+      <ul class="callouts">
+        <li><b>1</b><span><span class="tag-real">实测</span> 同步块里每个出口都有一条 <code>monitorexit</code>，还多了一张异常表：不管正常返回还是抛异常，锁一定放掉。这是 synchronized 不会“忘了解锁”的原因，也是 ReentrantLock 必须写 <code>try / finally</code> 的原因。</span></li>
+        <li><b>2</b><span>同步方法由 JVM 在调用和返回时自动加锁、放锁，锁的是 <code>this</code>（静态方法锁的是 <code>Class</code> 对象）。</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 id="m-inflate"><span class="sn">④-3</span>锁升级：一步一步看对象头和 ObjectMonitor</h3>
+  <p class="lead">一个库存对象 <code>stock</code>，main、exec-17、exec-23 三个线程轮流对它加锁。每一步的对象头取自 JOL 实测。打开右上角的开关，换成 JDK 17 加 <code>-XX:+UseBiasedLocking</code> 的版本。</p>
+  <div class="lab lk" id="lk" tabindex="0" aria-label="锁升级分步演示，左右方向键切换">
+    <div class="ctrl">
+      <button class="btn" type="button" id="lk-prev">← 上一步</button>
+      <button class="btn primary" type="button" id="lk-next">下一步 →</button>
+      <button class="btn" type="button" id="lk-reset">从头来</button>
+      <label class="lk-tog"><input type="checkbox" id="lk-biased"> 打开偏向锁（JDK 17 加参数）</label>
+      <span class="cnt" id="lk-cnt" aria-live="polite"></span>
+    </div>
+    <div class="lk-grid">
+      <div class="lk-card">
+        <h4>stock 的 mark word</h4>
+        <p class="lk-hex"><code id="lk-hex"></code></p>
+        <p><span class="chip" id="lk-tag"></span></p>
+        <p class="lk-small" id="lk-meaning"></p>
+      </div>
+      <div class="lk-card">
+        <h4>三个线程</h4>
+        <ul class="lk-threads" id="lk-threads"></ul>
+      </div>
+      <div class="lk-card" id="lk-mon-card">
+        <h4>ObjectMonitor</h4>
+        <dl class="lk-mon" id="lk-mon"></dl>
+      </div>
+    </div>
+    <p class="lk-note" id="lk-note"></p>
+  </div>
+  <ul class="callouts">
+    <li><b>1</b><span><b>轻量级锁就是一次 CAS。</b>线程在自己的栈帧里放一个“锁记录”，把对象头原样复制进去，再用 CAS 把对象头换成指向这个锁记录的指针。放锁时 CAS 换回来。没人抢的锁，加一次放一次，两次 CAS。</span></li>
+    <li><b>2</b><span><b>CAS 失败说明有人抢，就膨胀成重量级锁。</b>JVM 分配一个 ObjectMonitor，对象头改成指向它。抢不到的线程先自旋一会儿（适应性自旋：上次自旋成功过，这次就多转几圈），还不行就进入口队列 park，这就是 BLOCKED。</span></li>
+    <li><b>3</b><span><b>wait / notify 只能用在重量级锁上。</b>持锁线程调 <code>wait()</code>：放开 monitor，进 WaitSet，状态 WAITING；别人 <code>notify()</code> 只是把它从 WaitSet 挪到入口队列，要等通知的那个线程放锁、再抢到锁，<code>wait()</code> 才返回。</span></li>
+    <li><b>4</b><span><span class="tag-real">实测</span> 两个线程都走了，对象头还是 fat lock：ObjectMonitor 不会立刻拆掉，由后台的 MonitorDeflationThread 过一阵子统一回收（JDK 15 起）。</span></li>
+  </ul>
+
+  <h3 id="m-cas"><span class="sn">④-4</span>CAS 和原子类：不排队，提交时核对</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 220" role="img" aria-label="CAS 循环：读出当前值 cur，算出新值 cur 减 1，执行 compareAndSet(cur, cur-1)：内存里还是 cur 就写入并成功，否则失败，回到第一步重读。">
+        <g class="t-s">
+          <rect x="20" y="40" width="180" height="70" rx="12" class="b-pd"/><text x="34" y="68" class="t-b">① 读</text><text x="34" y="92" class="t-mono">cur = left.get()</text>
+          <rect x="240" y="40" width="180" height="70" rx="12" class="b-pd"/><text x="254" y="68" class="t-b">② 算</text><text x="254" y="92" class="t-mono">next = cur - 1</text>
+          <rect x="460" y="40" width="260" height="70" rx="12" class="b-bk"/><text x="474" y="68" class="t-b">③ compareAndSet(cur, next)</text><text x="474" y="92">一条原子指令：还是 cur 才写</text>
+          <rect x="760" y="20" width="180" height="50" rx="12" class="b-good"/><text x="774" y="50" class="t-b">成功：扣到了</text>
+          <rect x="760" y="92" width="180" height="50" rx="12" class="b-bad"/><text x="774" y="122" class="t-b">失败：有人先改了</text>
+        </g>
+        <g class="e-ink"><line x1="200" y1="75" x2="236" y2="75" marker-end="url(#ar3)"/><line x1="420" y1="75" x2="456" y2="75" marker-end="url(#ar3)"/><line x1="720" y1="62" x2="756" y2="48" marker-end="url(#ar3)"/><line x1="720" y1="90" x2="756" y2="112" marker-end="url(#ar3)"/></g>
+        <path d="M850,142 V180 H110 V114" class="e-badd" fill="none" marker-end="url(#ar3)"/>
+        <text x="480" y="200" class="t-s t-bad" text-anchor="middle">回到 ① 重读：不挂起、不切换，只是再算一遍</text>
+        <defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+      </svg>
+    </div>
+    <figcaption>③ 在 ARM v8.1 以上是一条 <code>cas</code> 类指令（本机 <code>UseLSE=true</code>），老 ARM 是“独占读 + 条件写”的小循环，x86 是 <code>lock cmpxchg</code>。原子类的 <code>incrementAndGet</code> 在 JDK 17 源码里是 <code>U.getAndAddInt(this, VALUE, 1) + 1</code>，HotSpot 把它换成一条原子加指令（ARM 上 <code>ldadd</code> 一类、x86 上 <code>lock xadd</code>），根本不会失败重试（按 HotSpot 实现，本页没看汇编）。</figcaption>
+  </figure>
+  <ul class="callouts">
+    <li><b>1</b><span><b>ABA：</b>CAS 只比较值。订单状态 PAID → REFUNDING → PAID，值回到了原样，CAS 看不出中间变过。<span class="tag-real">实测</span> <code>AtomicReference</code> 照样把它改成了 SHIPPED；<code>AtomicStampedReference</code> 带一个版本号，版本从 0 变成了 2，CAS 被拒绝。数值累加不怕 ABA，状态机和无锁链表才怕。</span></li>
+    <li><b>2</b><span><b>LongAdder：</b>一个 <code>base</code> 加一组 <code>Cell</code>。没冲突时 CAS 加到 base；冲突了，每个线程按自己的探针值挑一个 Cell 去加，<code>sum()</code> 时再把所有格子加起来。写快、读慢、读到的不是某一瞬间的精确快照。</span></li>
+  </ul>
+
+  <h3 id="m-design"><span class="sn">④-5</span>为什么这样设计：大多数锁根本没人抢</h3>
+  <div class="design">
+    <div class="way" data-role="pd">
+      <h4>分级：先用最便宜的办法<small>HotSpot 的 synchronized</small></h4>
+      <ul class="pains">
+        <li class="ok">没人抢：两次 CAS，不碰操作系统，不分配任何东西</li>
+        <li class="ok">真有人抢：才分配 ObjectMonitor，挂起线程，不让抢不到的线程空转浪费 CPU</li>
+        <li class="ok">锁就是对象自己，任何对象都能当锁，不用另外建锁对象</li>
+        <li>代价：每个对象头都要留出这些位；升级、撤销、回收 monitor 让 JVM 很复杂</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>被放弃的：每次都找操作系统要互斥量<small>早期 JDK 1.0～1.5 的做法</small></h4>
+      <ul class="pains">
+        <li class="ok">实现简单，行为好懂</li>
+        <li>没人抢也要进内核，每次加锁几百纳秒到微秒，Vector、Hashtable、StringBuffer 这些到处是 synchronized 的类会很慢</li>
+        <li>“synchronized 很重”的印象就是那时候留下的</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict">决定胜负的约束：<b>实测下来，绝大多数被加锁的对象只被一个线程用过</b>（HotSpot 团队的统计，也是偏向锁当年的依据）。所以快路径要尽量便宜，慢路径才付代价。偏向锁把“没人抢”再往下压到连 CAS 都不用，但现代 CPU 的 CAS 已经很便宜，撤销偏向又要停在安全点，JDK 15 起默认关掉（JEP 374），JDK 18 起参数作废。</p>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">API</span><b>最少要会的几行</b></div>
+<pre><code>private final Object stockLock = new Object();       <span class="cm">// 私有、final、专门用来当锁</span>
+synchronized (stockLock) { if (left &lt; 1) return false; left--; }
+synchronized (stockLock) { while (!paid) stockLock.wait(); }   <span class="cm">// 等条件：一定写在 while 里</span>
+synchronized (stockLock) { paid = true; stockLock.notifyAll(); }
+
+AtomicInteger left = new AtomicInteger(100);
+left.decrementAndGet();                              <span class="cm">// 一步完成，不会失败</span>
+left.compareAndSet(cur, cur - 1);                    <span class="cm">// 自己写“检查 + 修改”时用</span>
+left.updateAndGet(v -&gt; v &gt; 0 ? v - 1 : v);           <span class="cm">// 带判断的更新，内部就是 CAS 循环</span>
+LongAdder sold = new LongAdder(); sold.increment(); sold.sum();
+AtomicStampedReference&lt;String&gt; st = new AtomicStampedReference&lt;&gt;("PAID", 0);</code></pre>
+  </div>
+  <p class="tip">锁粗化、锁消除、偏向锁的历史、monitor 回收、JDK 21 以后的新加锁方式，这些放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div>
+    <h2><span class="sn">⑤</span>亲眼看到：对象头、字节码、ABA 和五种写法的吞吐</h2>
+    <p class="lead">四个小程序，<code>--release 8</code> 编译，JDK 17 运行。完整代码：<a href="https://github.com/archeu/study-labs/tree/main/java/juc/synchronized-cas-atomic">study-labs/java/juc/synchronized-cas-atomic →</a></p>
+  </div>
+  <div class="two">
+<pre class="console"><span class="w">$ java -cp … MarkWord        （JDK 17 默认）</span>
+1. 刚 new 出来       0x…0001 (non-biasable)
+2. main 拿着锁       0x0000fe80e872e1e0 (<b>thin lock</b>)
+3. 放开锁以后         0x…0001 (non-biasable)
+4. exec-17 拿着锁，exec-23 等（BLOCKED）
+                     0x0000fe8098001502 (<span class="r">fat lock</span>)
+5. 两个都走了         0x0000fe8098001502 (<span class="r">fat lock</span>)
+6. 算过 identityHashCode
+                     0x0000004b4523f801 (hash: 0x4b4523f8)
+7. 再对它加锁         0x0000fe80e872e1e0 (<b>thin lock</b>)</pre>
+<pre class="console"><span class="w">$ java -XX:+UseBiasedLocking \
+       -XX:BiasedLockingStartupDelay=0 -cp … MarkWord</span>
+1. 刚 new 出来       0x…0005 (<b>biasable</b>)
+2. main 拿着锁       0x0000f98fe4017805
+                     (<b>biased</b>: 0x…3e63f9005e; epoch: 0)
+3. 放开锁以后         同上，<b>还偏向 main</b>
+4. exec-17 拿着锁，exec-23 等（BLOCKED）
+                     0x0000f98f98001502 (<span class="r">fat lock</span>)
+5. 两个都走了         (<span class="r">fat lock</span>)
+6. 算过 identityHashCode
+                     0x0000001f28c15201 (hash: …)
+7. 再对它加锁         (<b>thin lock</b>，不再偏向)</pre>
+  </div>
+  <ul class="callouts">
+    <li><b>1</b><span>默认模式：没人抢时是 thin lock，地址 <code>0x0000fe80e872e1e0</code> 是 main 线程栈上的锁记录；放锁后对象头原样还原。偏向模式：放锁后对象头<b>不变</b>，还写着 main，下次 main 再来连 CAS 都不用。</span></li>
+    <li><b>2</b><span>第 6、7 步：算过 identityHashCode，哈希值占了对象头，偏向模式下这个对象也不能再偏向，加锁直接走 thin lock。</span></li>
+  </ul>
+<pre class="console"><span class="w">$ java -cp … Aba</span>
+AtomicReference：       CAS(PAID → SHIPPED) = <span class="r">true</span>，现在 SHIPPED（中间被退款过，它看不出来）
+AtomicStampedReference：CAS(PAID@0 → SHIPPED) = <b>false</b>，现在 PAID@2（版本号变了，拒绝）</pre>
+
+  <h3>五种写法的吞吐：同一个计数，1 / 2 / 4 个线程</h3>
+  <div class="tbl-wrap">
+    <table class="t runs">
+      <thead><tr><th>写法</th><th class="num">1 线程</th><th class="num">2 线程</th><th class="num">4 线程</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><th>synchronized</th><td class="num">59.0</td><td class="num">17.9</td><td class="num">29.6</td><td>没人抢时两次 CAS；有人抢就挂起、唤醒</td></tr>
+        <tr><th>ReentrantLock</th><td class="num">53.4</td><td class="num">11.2</td><td class="num">35.2</td><td>和 synchronized 一个量级</td></tr>
+        <tr class="hl"><th>AtomicInteger.incrementAndGet</th><td class="num">148.4</td><td class="num">123.5</td><td class="num">75.5</td><td>一条原子加指令，不会失败</td></tr>
+        <tr><th>手写 CAS 循环</th><td class="num">110.1</td><td class="num">23.8</td><td class="num">29.9</td><td class="bad">有竞争时失败重试 4214 万次</td></tr>
+        <tr class="hl"><th>LongAdder</th><td class="num">90.7</td><td class="num good">166.4</td><td class="num good">177.3</td><td>线程越多越快：各加各的格子</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip"><span class="tag-real">实测</span> 单位：百万次/秒。2 核 ARM，JDK 17，每格 2000 万次、3 轮取最快，加了 <code>-XX:-EliminateLocks</code>（关掉锁粗化，见 ⑥ 第三圈）。普通 main 程序，不是 JMH；4 个线程有时比 2 个线程快，是因为 2 核上 4 个线程有一半时间在轮流跑、反而撞得少，这类数字只看量级。</p>
+  <ul class="callouts">
+    <li><b>1</b><span><b>没人抢时（1 线程）：</b>synchronized 每秒 5900 万次，一次约 17 纳秒；“synchronized 很重”在单线程下不成立。</span></li>
+    <li><b>2</b><span><b>有人抢时：</b>原子类和 LongAdder 比两种锁快 2.5～15 倍；手写的 CAS 循环却和锁差不多慢，因为大量失败重试，每次失败还要把缓存行从另一个核抢回来。能用 <code>incrementAndGet</code>、<code>addAndGet</code> 这类一步完成的方法，就别自己写循环。</span></li>
+    <li><b>3</b><span>全景第 7 站 CAS 重试 0 次，是因为那里的 CAS 夹在 HTTP 请求和数据库调用之间，两个线程几乎碰不上；这里是两个线程不停地对同一个地址做 CAS，冲突密集。</span></li>
+  </ul>
+  <div class="done-box"><b>到这里已经能交差了：</b>你能看懂对象头的几种状态，知道 synchronized 没人抢时很便宜、有人抢时挂起排队，能写出正确的 CAS、知道 ABA 和 LongAdder 用在哪，能按场景在锁和原子类之间选。<br><b>已知还没处理的细节：</b>锁错对象（<a href="#p-obj">⑥ 坑 1</a>）、锁里做慢操作（<a href="#p-slow">⑥ 坑 2</a>）、高竞争下的手写 CAS（<a href="#p-spin">⑥ 坑 3</a>）、wait 的写法（<a href="#p-wait">⑥ 坑 4</a>）、虚拟线程 pinning（<a href="#p-pin">⑥ 坑 5</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div>
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-obj"><b><em>坑 1</em>锁错了对象<a class="root" href="#m-header">← ④-1 锁记在对象自己的头上</a></b>
+      <dl><dt>现象</dt><dd>加了 synchronized 照样超卖。</dd>
+      <dt>根源</dt><dd>锁就是那个对象的对象头。<code>synchronized (new Object())</code> 每次一个新对象；锁 <code>Integer left</code>，<code>left--</code> 之后变量指向了另一个 Integer；锁字符串常量，整个 JVM 里同值的字符串是同一个对象，可能和别的库抢同一把锁。</dd>
+      <dt>做法</dt><dd class="fix">用 <code>private final Object lock = new Object()</code>；要锁“这个商品”就从 <code>ConcurrentHashMap&lt;Long, Object&gt;</code> 里取同一个锁对象。</dd></dl></div>
+    <div class="pit" id="p-slow"><b><em>坑 2</em>锁里做慢操作<a class="root" href="#m-inflate">← ④-3 抢不到就挂起排队</a></b>
+      <dl><dt>现象</dt><dd>接口 RT 飙升，线程转储里几十个线程 BLOCKED 在同一个地址上。<span class="seen">全景第 6 站：最多 47 个 BLOCKED</span></dd>
+      <dt>根源</dt><dd>锁里有一次数据库调用或 HTTP 调用，持锁时间从纳秒变成毫秒，别的线程全在入口队列里等。</dd>
+      <dt>做法</dt><dd class="fix">锁里只放必须一起改的那几行；IO 挪到锁外；同一个 JVM 多台部署时，本来就该交给数据库条件更新。</dd></dl></div>
+    <div class="pit" id="p-spin"><b><em>坑 3</em>高竞争下手写 CAS 循环<a class="root" href="#m-cas">← ④-4 失败就重来</a></b>
+      <dl><dt>现象</dt><dd>改成“无锁”以后 CPU 打满、吞吐没涨。<span class="seen">⑤：失败重试 4214 万次，吞吐和锁差不多</span></dd>
+      <dt>根源</dt><dd>冲突越多，失败越多，每次失败都要重读、重算、再抢一次缓存行，CPU 都花在空转上。</dd>
+      <dt>做法</dt><dd class="fix">计数用 <code>LongAdder</code>；累加用 <code>getAndAdd</code> 一步完成；冲突大、临界区长的就老老实实用锁。</dd></dl></div>
+    <div class="pit" id="p-wait"><b><em>坑 4</em>wait 写在 if 里、不在锁里调用<a class="root" href="#m-inflate">← ④-3 wait 要放锁、重新抢锁</a></b>
+      <dl><dt>现象</dt><dd>偶发条件没满足就往下走；或者直接抛 <code>IllegalMonitorStateException</code>。</dd>
+      <dt>根源</dt><dd>wait 返回时要重新抢锁，抢到之前条件可能又被别人改掉；JVM 也允许“虚假唤醒”。没持有这个对象的锁就调 wait / notify，没有 monitor 可操作。</dd>
+      <dt>做法</dt><dd class="fix"><code>while (!条件) lock.wait();</code>，并且在 <code>synchronized (lock)</code> 里；一般用 <code>notifyAll</code>。新代码更推荐 <code>ReentrantLock</code> 的 <code>Condition</code> 或阻塞队列。</dd></dl></div>
+    <div class="pit" id="p-pin"><b><em>坑 5</em>虚拟线程在 synchronized 里阻塞<a class="root" href="#m-header">← ④-1 thin lock 指向线程栈</a></b>
+      <dl><dt>现象</dt><dd>JDK 21 开了虚拟线程，吞吐反而掉到接近串行。</dd>
+      <dt>根源</dt><dd>JDK 21～23 的实现里，synchronized 的锁和所在的平台线程（载体线程）绑在一起，虚拟线程在锁里阻塞时卸不下来，把载体线程钉住了（pinning）。</dd>
+      <dt>做法</dt><dd class="fix">JDK 21～23 上锁里有 IO 的地方换成 ReentrantLock；JDK 24 起（JEP 491）synchronized 不再钉住。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>锁对象私有、final、专用</b><p>不锁 <code>this</code> 暴露给外面的对象，不锁字符串、包装类、Class（除非有意）。</p><p class="guard">坑 1，以及外部代码拿你的对象加锁造成死锁。</p></div>
+    <div class="rl"><b>临界区只放必须一起改的东西</b><p>能先在锁外算好的先算好，锁里只做“检查 + 写入”。</p><p class="guard">坑 2。</p></div>
+    <div class="rl"><b>单个变量用原子类，计数器用 LongAdder</b><p>需要“读到精确值再决定”的（库存）用 AtomicInteger；只累加、偶尔看总数的（销量、QPS）用 LongAdder。</p><p class="guard">坑 3。</p></div>
+    <div class="rl"><b>状态机的 CAS 带版本</b><p>订单状态、无锁结构里的指针用 <code>AtomicStampedReference</code>，或者数据库里用版本号做乐观锁。</p><p class="guard">ABA。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：JIT 和 JVM 还在背后做了什么</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="pd"><h4>锁粗化和锁消除</h4>
+      <p>C2 编译器会把循环里反复对同一个对象加锁、放锁的代码合并成一次大锁（锁粗化），对不会逃出线程的对象的锁直接删掉（锁消除）。<span class="tag-real">实测</span> 默认参数下单线程 synchronized 每秒 2.33 亿次，关掉（<code>-XX:-EliminateLocks</code>）后是 5900 万次，差 4 倍。所以写微基准测锁的开销，要么关掉它，要么用 JMH 并让结果“逃逸”出去。</p></div>
+    <div class="dp" data-role="g2"><h4>偏向锁：快在哪，为什么被拿掉</h4>
+      <p><span class="tag-real">实测</span> JDK 17 加 <code>-XX:+UseBiasedLocking</code>，单线程 synchronized 每秒 3.2 亿次（默认 5900 万次）：偏向以后连 CAS 都省了。但一旦第二个线程来，就要在安全点上撤销偏向；2、4 个线程时偏向锁一点不占便宜（19.6、26.5 百万次/秒）。它当年是为 Vector、Hashtable 这种“到处 synchronized、其实只有一个线程用”的老代码准备的。JEP 374 的理由：现代 CPU 上 CAS 已经很便宜，新代码多用 j.u.c 的类，偏向锁的撤销逻辑又让 JVM 里很多地方变复杂，所以 JDK 15 默认关闭，JDK 18 起参数作废。</p></div>
+    <div class="dp" data-role="cg"><h4>版本差异</h4>
+      <div class="tbl-wrap"><table class="t" style="min-width:0"><tbody>
+        <tr><th>JDK 6</th><td>引入偏向锁、轻量级锁、适应性自旋，“synchronized 很重”从此不成立</td></tr>
+        <tr><th>JDK 8</th><td><code>LongAdder</code>、<code>@sun.misc.Contended</code>；偏向锁默认开，启动后延迟 4 秒才生效</td></tr>
+        <tr><th>JDK 15</th><td>偏向锁默认关闭（JEP 374）；ObjectMonitor 改由 MonitorDeflationThread 异步回收</td></tr>
+        <tr><th>JDK 17</th><td>本页实测版本：还能用 <code>-XX:+UseBiasedLocking</code> 打开（会提示已废弃）</td></tr>
+        <tr><th>JDK 18</th><td><code>UseBiasedLocking</code> 参数作废</td></tr>
+        <tr><th>JDK 21</th><td>新增 <code>-XX:LockingMode</code>，可选新的轻量级加锁：不往对象头里放栈地址，改用线程自己的锁栈</td></tr>
+        <tr><th>JDK 23</th><td>新的轻量级加锁成为默认</td></tr>
+        <tr><th>JDK 24</th><td>JEP 491：虚拟线程在 synchronized 里阻塞不再钉住载体线程</td></tr>
+      </tbody></table></div>
+      <p class="tip">JDK 21 以后的几条按 JEP 和发布说明，本机没跑。</p></div>
+    <div class="dp" data-role="bk"><h4>面试官会怎么问</h4>
+      <div class="faq">
+        <details><summary>synchronized 的锁升级过程？</summary><p>JDK 17 默认：无锁 → 轻量级锁（一次 CAS 把对象头换成指向栈上锁记录的指针）→ 有人抢、CAS 失败，膨胀成重量级锁（对象头指向 ObjectMonitor，抢不到的线程自旋后挂起）。偏向锁在 JDK 15 起默认关闭。锁一般不降级，monitor 由后台线程异步回收（④-3、⑥ 第三圈）。</p></details>
+        <details><summary>synchronized 和 ReentrantLock 怎么选？</summary><p>功能上 ReentrantLock 多了超时、可中断、公平、多个 Condition；性能上同一量级（⑤）。默认用 synchronized，写法简单、不会忘了解锁；需要那些额外功能，或 JDK 21～23 上用虚拟线程时，换 ReentrantLock（③、坑 5）。</p></details>
+        <details><summary>CAS 有什么问题？</summary><p>ABA（用版本号解决）；高竞争下自旋浪费 CPU（用 LongAdder 分散或者用锁）；只能保证一个变量（多个变量要合成一个对象，用 AtomicReference，或者用锁）（④-4、坑 3）。</p></details>
+        <details><summary>LongAdder 为什么比 AtomicLong 快？</summary><p>冲突时各线程加到不同的 Cell，Cell 带 @Contended 避免伪共享；代价是 sum() 要遍历、而且不是精确快照（④-4、⑤）。</p></details>
+      </div></div>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span></div>
+  <ul class="next">
+    <li>HotSpot 源码：<code>ObjectSynchronizer::enter</code>、<code>ObjectMonitor::enter</code> 的自旋和入队，cxq 和 EntryList 两条队</li>
+    <li>JDK 21 的 <code>-XX:LockingMode=2</code>：线程锁栈怎么取代栈上锁记录，用 JOL 看对象头的差别</li>
+    <li>JMH 正式测：锁粗化、偏向锁、LongAdder 在多核机器上的曲线</li>
+    <li>VarHandle：比原子类更底层的 CAS 和各种内存序（<a href="java-memory-model.html">JMM 页第三圈</a>）</li>
+    <li>AQS：ReentrantLock 怎么用 CAS 加一个队列搭出来（J02 下一个知识点，已有页）</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div>
+    <h2><span class="sn">↺</span>回到⑤：改造你的案例</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="pd"><h4>1. 按商品分锁</h4><p>把全景靶场的 <code>sync</code> 模式从一把全局锁改成每个商品一把（<code>ConcurrentHashMap&lt;Long, Object&gt;</code> 的 <code>computeIfAbsent</code>）。压两个不同商品，看 BLOCKED 的线程数降了多少。</p><p class="uses">用到：坑 1、坑 2</p></div>
+    <div class="exc" data-role="g2"><h4>2. 用 updateAndGet 写“有库存才扣”</h4><p>把 <code>cas</code> 模式的手写循环换成 <code>left.getAndUpdate(v -&gt; v &gt; 0 ? v - 1 : v)</code>，返回值大于 0 才算抢到。对比两种写法的代码量和结果。</p><p class="uses">用到：④-4、规范 3</p></div>
+    <div class="exc" data-role="bk"><h4>3. 销量计数换 LongAdder</h4><p>全景靶场里的 <code>sold</code> 是 AtomicInteger。改成 LongAdder，用 <code>Bench</code> 的写法在 4 个线程下对比，再想想页面上“已售”该怎么显示才不会看到不一致的数。</p><p class="uses">用到：④-4、⑤ 吞吐</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这页的精华。</summary><p>synchronized 把锁记在对象头里，没人抢时一两次 CAS 就完事，有人抢才膨胀成 ObjectMonitor 让线程挂起排队；CAS 不排队，提交时核对、失败重来，冲突少时最快，冲突多时该换 LongAdder 或锁。</p></details>
+    <details><summary>2. 不加任何同步，扣库存疼在哪？</summary><p>“读、判断、写回”三步之间会被插队；volatile 也挡不住，jcstress 实测 33.6% 超卖（②）。</p></details>
+    <details><summary>3. 线程转储里一堆 BLOCKED，根源是 ④ 的哪一部分？</summary><p>④-3：有人抢时锁膨胀成 ObjectMonitor，抢不到的线程自旋后进入口队列挂起，Java 状态就是 BLOCKED。说明锁被长时间持有，先看持锁的那个线程在干什么（坑 2）。</p></details>
+    <details><summary>4. 预测：JDK 17 默认参数，一个对象先 <code>System.identityHashCode(o)</code>，再被两个线程激烈争抢，最后两个线程都走了。这时 JOL 打出来的对象头是什么？哈希值去哪了？</summary><p>fat lock（⑤ 第 5 步：两个线程走了 monitor 也不会马上回收）。哈希值被搬进了 ObjectMonitor 里保存的原始对象头，等 MonitorDeflationThread 回收 monitor 时再写回对象头（④-1、④-3）。</p></details>
+    <details><summary>5. 预测：在 2 核机器上，把手写 CAS 循环的线程数从 2 加到 64，失败重试次数和吞吐怎么变？换成 LongAdder 呢？</summary><p>同一时刻最多 2 个线程在跑，所以冲突不会无限增加，但被切走的线程回来时读到的值更可能已经过期，重试还会增多；吞吐大体和 2 线程同一量级或更差。LongAdder 冲突后各加各的格子，吞吐基本保持（④-4、⑤、<a href="thread-state-context-switch.html#m-14">线程页 ④-4</a>）。</p></details>
+    <details><summary>6. 放回全景：第 6 站换成 synchronized 以后，第 5 站的超卖修好了。如果锁的是 <code>this</code>（OrderService 是 Spring 单例），而有人在第 9 站的 <code>userOrders</code> 写入也用 <code>synchronized (this)</code>，会怎样？</summary><p>两段毫不相干的逻辑抢同一把锁：下单扣库存要等写订单列表，写订单列表也要等扣库存，BLOCKED 的线程更多，第 2 站的线程池更快被占满。各用各的私有锁对象（规范 1），扣库存那段最好再交给第 8 站的数据库条件更新。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。实验在本机 2 核 ARM（Neoverse-N1，<code>UseLSE=true</code>），JDK 17.0.20，JOL 0.17：<code>MarkWord</code> 默认和打开偏向锁各跑一次；<code>SyncBytecode</code> 用 javap 看；<code>Aba</code> 跑一次；<code>Bench</code> 默认跑两次、<code>-XX:-EliminateLocks</code> 跑一次（页面表格用这次）、再加偏向锁跑一次，每格 3 轮取最快。标“实测”的都来自这几次运行；Bench 是普通 main 程序，只看量级。</p>
+  <p>按源码（本机 JDK 17）：<code>AtomicInteger.incrementAndGet</code> 调 <code>U.getAndAddInt</code>；<code>Striped64.Cell</code> 带 <code>@Contended</code>。按文档：JEP 374（偏向锁）、JEP 491（虚拟线程和 synchronized）、HotSpot 关于 mark word 布局和 ObjectMonitor 的说明、JDK 21 / 23 的 LockingMode 发布说明、JVM 规范里 monitorenter / monitorexit 和 ACC_SYNCHRONIZED 的定义。</p>
+  <p>相关：<a href="../java/pano-j02-order-in-threadpool.html">全景：一个下单请求在线程池里</a> · <a href="thread-state-context-switch.html">线程、线程状态与上下文切换</a> · <a href="jmm-jcstress-cache.html">JMM 下一圈：jcstress、CPU 缓存与伪共享</a> · <a href="aqs.html">AQS 源码</a> · <a href="../java/roadmap.html#j02">Java 地图 J02</a></p>
+</footer>
+
+</main>
+<script>
+/*SIM-START*/
+// 锁升级分步演示。对象头的十六进制取自 JOL 实测（JDK 17，2 核 ARM）。
+// 每一步：mark word、标签、三个线程的状态、ObjectMonitor（null 表示还没有）、说明
+function lockSteps(biased) {
+  const T = (m, e17, e23) => ({ main: m, "exec-17": e17, "exec-23": e23 });
+  const pre = biased ? [
+    { hex: "0x0000000000000005", tag: "biasable", cls: "bias", meaning: "可偏向，还没偏向谁（最低三位 101）。", th: T("RUNNABLE", "NEW", "NEW"), mon: null,
+      note: "打开偏向锁后，新对象一出生就是“可偏向”。" },
+    { hex: "0x0000f98fe4017805", tag: "biased", cls: "bias", meaning: "偏向 main：对象头里写着 main 线程。", th: T("RUNNABLE · 持锁", "NEW", "NEW"), mon: null,
+      note: "main 第一次加锁：一次 CAS 把自己的线程指针写进对象头。" },
+    { hex: "0x0000f98fe4017805", tag: "biased", cls: "bias", meaning: "放锁后对象头不变，仍然偏向 main。", th: T("RUNNABLE", "NEW", "NEW"), mon: null,
+      note: "main 放锁什么也不用做；下次 main 再加锁，只比较一下“是不是偏向我”，连 CAS 都省了。实测单线程每秒 3.2 亿次。" },
+    { hex: "0x0000f98fe4017805", tag: "biased → 撤销", cls: "bias", meaning: "别的线程来了，偏向要撤销。", th: T("RUNNABLE", "RUNNABLE · 想加锁", "NEW"), mon: null,
+      note: "exec-17 发现对象偏向 main：要在安全点上停住线程，检查 main 还在不在锁里，撤销偏向后再走轻量级锁。这一步很贵，也是偏向锁被拿掉的原因之一。" }
+  ] : [
+    { hex: "0x0000000000000001", tag: "无锁 01", cls: "free", meaning: "无锁：没算过哈希，年龄 0（最低两位 01）。", th: T("RUNNABLE", "NEW", "NEW"), mon: null,
+      note: "JDK 17 默认没有偏向锁，新对象就是普通的无锁状态。" },
+    { hex: "0x0000fe80e872e1e0", tag: "thin lock 00", cls: "thin", meaning: "指向 main 栈上的锁记录，原来的对象头 0x…01 存在那里。", th: T("RUNNABLE · 持锁", "NEW", "NEW"), mon: null,
+      note: "main 加锁：在栈上建锁记录、复制对象头，一次 CAS 把对象头换成锁记录的地址。没人抢，就这么简单。" },
+    { hex: "0x0000000000000001", tag: "无锁 01", cls: "free", meaning: "放锁：一次 CAS 把原来的对象头换回来。", th: T("RUNNABLE", "NEW", "NEW"), mon: null,
+      note: "加锁一次 CAS、放锁一次 CAS。实测单线程每秒 5900 万次。" },
+    { hex: "0x0000fe…（exec-17 的栈）", tag: "thin lock 00", cls: "thin", meaning: "exec-17 拿到轻量级锁。", th: T("RUNNABLE", "RUNNABLE · 持锁", "NEW"), mon: null,
+      note: "exec-17 加锁，和 main 刚才一样。它拿着锁去睡 300 ms。" }
+  ];
+  const mon = (owner, entry, wait) => ({ owner, entry, wait });
+  const post = [
+    { hex: "0x0000fe8098001502", tag: "fat lock 10", cls: "fat", meaning: "指向 ObjectMonitor。", th: T("RUNNABLE", "TIMED_WAITING · 持锁（在锁里 sleep）", "BLOCKED"), mon: mon("exec-17", ["exec-23"], []),
+      note: "exec-23 来抢：CAS 失败，自旋一会儿还是拿不到，JVM 分配 ObjectMonitor，对象头改成指向它（膨胀）。exec-23 进入口队列挂起，状态 BLOCKED。实测就是这个对象头。" },
+    { hex: "0x0000fe8098001502", tag: "fat lock 10", cls: "fat", meaning: "还是那个 ObjectMonitor。", th: T("RUNNABLE", "WAITING（Object.wait）", "RUNNABLE · 持锁"), mon: mon("exec-23", [], ["exec-17"]),
+      note: "假设 exec-17 醒来后发现要等支付结果，调 stock.wait()：放开 monitor、进 WaitSet，状态 WAITING。exec-23 从入口队列里被叫醒，成了 owner。" },
+    { hex: "0x0000fe8098001502", tag: "fat lock 10", cls: "fat", meaning: "还是那个 ObjectMonitor。", th: T("RUNNABLE", "BLOCKED（被通知，等锁）", "RUNNABLE · 持锁"), mon: mon("exec-23", ["exec-17"], []),
+      note: "exec-23 调 stock.notifyAll()：exec-17 从 WaitSet 挪到入口队列。它还拿不到锁，因为 exec-23 还没放，所以是 BLOCKED，wait() 还没返回。" },
+    { hex: "0x0000fe8098001502", tag: "fat lock 10", cls: "fat", meaning: "owner 换成 exec-17。", th: T("RUNNABLE", "RUNNABLE · 持锁（wait 返回）", "TERMINATED"), mon: mon("exec-17", [], []),
+      note: "exec-23 放锁、结束；exec-17 抢到 monitor，wait() 这才返回，接着检查条件（所以 wait 要写在 while 里）。" },
+    { hex: "0x0000fe8098001502", tag: "fat lock 10", cls: "fat", meaning: "没人用了，但对象头还指向 monitor。", th: T("RUNNABLE", "TERMINATED", "TERMINATED"), mon: mon("（空）", [], []),
+      note: "两个都走了，对象头还是 fat lock（实测）。ObjectMonitor 要等后台的 MonitorDeflationThread 过一阵子回收，那时对象头才变回无锁。" }
+  ];
+  return pre.concat(post);
+}
+function clampLk(i, n) { return Math.max(0, Math.min(n - 1, i | 0)); }
+/*SIM-END*/
+
+(() => {
+  const $ = s => document.querySelector(s);
+  const box = $("#lk");
+  if (!box) return;
+  let biased = false, steps = lockSteps(false), cur = 0;
+  function render() {
+    const s = steps[cur];
+    $("#lk-hex").textContent = s.hex;
+    const tag = $("#lk-tag");
+    tag.textContent = s.tag;
+    tag.className = "chip " + s.cls;
+    $("#lk-meaning").textContent = s.meaning;
+    const ul = $("#lk-threads");
+    ul.textContent = "";
+    Object.keys(s.th).forEach(k => {
+      const li = document.createElement("li");
+      const st = s.th[k];
+      li.className = /BLOCKED/.test(st) ? "bl" : /WAITING/.test(st) ? "wt" : /持锁/.test(st) ? "own" : "";
+      li.innerHTML = "<code></code><span></span>";
+      li.querySelector("code").textContent = k;
+      li.querySelector("span").textContent = st;
+      ul.append(li);
+    });
+    const dl = $("#lk-mon");
+    dl.textContent = "";
+    $("#lk-mon-card").classList.toggle("off", !s.mon);
+    if (!s.mon) {
+      const p = document.createElement("dd");
+      p.textContent = "还没有：没人抢，用不着它。";
+      dl.append(p);
+    } else {
+      [["owner", s.mon.owner], ["入口队列", s.mon.entry.join("、") || "（空）"], ["WaitSet", s.mon.wait.join("、") || "（空）"]].forEach(([k, v]) => {
+        const dt = document.createElement("dt"); dt.textContent = k;
+        const dd = document.createElement("dd"); dd.textContent = v;
+        dl.append(dt, dd);
+      });
+    }
+    $("#lk-note").textContent = s.note;
+    $("#lk-cnt").textContent = "第 " + (cur + 1) + " / " + steps.length + " 步";
+    $("#lk-prev").disabled = cur === 0;
+    $("#lk-next").disabled = cur === steps.length - 1;
+  }
+  function go(i) { cur = clampLk(i, steps.length); render(); }
+  $("#lk-prev").addEventListener("click", () => go(cur - 1));
+  $("#lk-next").addEventListener("click", () => go(cur + 1));
+  $("#lk-reset").addEventListener("click", () => go(0));
+  $("#lk-biased").addEventListener("change", e => { biased = e.target.checked; steps = lockSteps(biased); go(0); });
+  box.addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") { go(cur + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { go(cur - 1); e.preventDefault(); }
+  });
+  go(0);
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
