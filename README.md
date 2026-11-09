@@ -103,6 +103,7 @@
 | 03 | [AQS 源码](https://archeu.github.io/study-notes/juc/aqs.html) | state 加等待队列、独占和共享、Condition 的两条队、公平与非公平、JDK 8 和 17 / 21 两代源码对照、日常开发里哪些框架和 JDK 类用到了它，三个 JDK 实测和实验台 |
 | 04 | [Java 内存模型](https://archeu.github.io/study-notes/juc/java-memory-model.html) | 写了不等于别人看到：重排序从哪来、happens-before 规则和推导、为什么只保证没有数据竞争的程序、volatile / synchronized / final 各保证什么、内存屏障和 VarHandle，可见性和重排序实测（JDK 17，ARM），双重检查锁分步推演 |
 | 05 | [线程、线程状态与上下文切换](https://archeu.github.io/study-notes/juc/thread-state-context-switch.html) | Java 线程和内核线程 1:1、线程创建成本、六种状态和内核状态对照（RUNNABLE 也可能在 IO 里睡着）、读线程转储、两种上下文切换和怎么数、线程数公式、中断和守护线程，JDK 17 实测（/proc 对照、512 线程慢 36%、一次交接 3.9 微秒、新建线程 82 微秒），线程状态机实验台 |
+| 06 | [JMM 下一圈：jcstress、CPU 缓存与伪共享](https://archeu.github.io/study-notes/juc/jmm-jcstress-cache.html) | Java 内存模型的下一圈：存储缓冲和失效队列、缓存一致性只管同一地址、x86 TSO 和 ARM 放宽了哪些重排序、volatile 和 CAS 在两种 CPU 上的指令、AQS 和 ConcurrentHashMap 里 volatile 读加 CAS 的模式、伪共享和 LongAdder；jcstress 0.16 在 ARM 上实测库存超卖（volatile 33.6%）、SB、MP（看到标志没看到数据 0.07%）和禁止结果 0 次，伪共享实测，先猜再看结果的实验台 |
 
 ## 网络
 
