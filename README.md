@@ -16,6 +16,7 @@
 | 05 | [函数是一等公民：闭包和装饰器](https://archeu.github.io/study-notes/agent/python-closure-decorator.html) | 站 01 第 3 个知识点：函数是对象、闭包的 cell 和迟绑定、装饰器就是 f = deco(f) 且在 import 时从下往上执行、monkeypatch 改的是哪个模块的名字；对照 Java lambda 和 Spring AOP 代理，8 个坑本机复现，装饰器实验台（顺序 × wraps × 同步异步，8 种组合 FastAPI 实测） |
 | 06 | [类型标注和 Pydantic 数据模型](https://archeu.github.io/study-notes/agent/python-pydantic.html) | 站 01 第 4 个知识点：类型标注是运行时不检查的元数据、Pydantic 在类定义时编译出校验器、宽松和严格模式、FastAPI 入口 422 与出口 response_model 过滤；对照 Java 编译器、Jackson 和 Bean Validation，8 个坑本机复现，校验耗时实测，Pydantic 实验台（10 种输入 × 两种模式） |
 | 07 | [asyncio：事件循环、async/await、并发请求](https://archeu.github.io/study-notes/agent/python-asyncio.html) | 站 01 第 5 个知识点：协程是能在 await 处暂停的函数、事件循环用一个线程加 epoll 同时等很多 socket、gather 与 TaskGroup 出错时的区别、超时和取消是协作式的；对照 Java 线程池、Netty 和虚拟线程，阻塞与 GIL 实测，8 个坑，“一个线程的时间线”实验台 |
+| 08 | [FastAPI 写接口（对照 Spring MVC）](https://archeu.github.io/study-notes/agent/python-fastapi.html) | 站 01 第 6 个知识点：uvicorn、Starlette、FastAPI 三层分工，签名决定参数从路径、查询串、请求体还是依赖来，Depends、lifespan 共享连接池、def 端点的 40 线程上限；值班助手加假日志代理的真服务实测，7 个坑，“参数从哪来”实验台 |
 
 # Java 后端架构（补给库）
 
