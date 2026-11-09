@@ -1,0 +1,1123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>HashMap 哈希扩容树化</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a mechanism topic (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), depth 懂设计, JDK 17; J01 过关题 (put 全过程、扩容为什么 2 倍). Roles: g2 brown = key 与订单, pd blue = hashCode 与扰动, cg purple = 定位与桶, bk teal = 扩容与阈值、ConcurrentHashMap, rn pink = 树化与高位链, neutral grey = 老办法和没选的设计（Hashtable）, bad red = 坑、丢数据, good green = 选定的设计、低位链. Interactions: one put simulator (输入整数 key 或选 4 个预设，画出桶数组、链表 / 树，列出这次 put 走了哪几步；规则与 JDK 17 一致，node 校验过). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+pre.codebox{padding:14px 18px}
+h3[id]{scroll-margin-top:64px}
+.pit[id],.rl[id],.dp[id]{scroll-margin-top:64px}
+.presets button{line-height:1.35}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.hstat{font-size:14.5px;font-family:var(--font-mono)}
+.hgrid{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px}
+.hc{min-height:54px;border:1.5px solid var(--line);border-radius:8px;padding:4px 6px;display:flex;flex-direction:column;gap:2px;background:var(--card);min-width:0}
+.hc b{font-family:var(--font-mono);font-size:11px;color:var(--muted);font-weight:400}
+.hc span{font-family:var(--font-mono);font-size:11.5px;overflow-wrap:anywhere;line-height:1.35}
+.hc.full{border-color:var(--cg);background:var(--cg-tint)}
+.hc.long{border-color:var(--bad);background:var(--bad-tint)}
+.hc.tree{border-color:var(--rn);background:var(--rn-tint)}
+.hc.last{box-shadow:0 0 0 2.5px var(--ink)}
+.hlog{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.hlog:empty{display:none}
+@media (max-width:860px){.hgrid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 基础</span><span aria-hidden="true">/</span><span class="tb-here">HashMap：哈希、扩容、树化</span></div></nav>
+<main>
+
+<header class="hero">
+  <p class="kicker">hashCode · 扰动 · (n−1) &amp; hash · 拉链 · 负载因子 0.75 · resize · 高低位拆分 · 树化 8 / 6 / 64 · fail-fast · ConcurrentHashMap</p>
+  <h1>HashMap：把 key 变成数组下标，撞了就挂链，挂长了就扩容，扩不动才变树</h1>
+  <p class="lead">数组按下标取是一步到位的，可 key 是 88L、"req-1"、一个 record，不是 0、1、2。HashMap 的全部心思就是<b>把任意 key 稳定地换算成一个下标</b>：先取 hashCode，把高 16 位混进低 16 位，再和“数组长度 − 1”按位与。长度永远是 2 的幂，所以这一步是一次位运算；扩容翻倍时，每个节点只看多出来的那一位，决定留在原地还是搬到“原位 + 旧长度”，不用重新算。撞到同一个桶的 key 挂成链表，链表太长而数组已经够大时，才变成红黑树。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j01-order-object-life.html#s-4">一个订单对象的一生 · 第 4、8 站</a></span><span>地图：<a href="../java/roadmap.html#j01">J01 · HashMap：哈希、扩容、树化（过关题）</a></span><span>上一页：<a href="collections-choose.html">常用集合怎么选</a></span><span>实验：JDK 17.0.20 <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div>
+    <h2><span class="sn">①</span>为什么需要：get(88L) 怎么一步就找到</h2>
+    <p class="lead">在全景第 4 站，这一步要解决的是：100 个商品缓存在内存里，下单时给一个商品号 88，要立刻拿到机械键盘，不能把 100 个挨个比一遍；到了几十万个商品也得一样快。全景实测打印出的那行“hashCode=88，扰动后 88，桶数组长 256，下标 88”，就是这一页要讲清的全过程。第 8 站还埋着一个雷：多个 Tomcat 线程同时往 <code>userOrders</code> 这个 HashMap 里放，会丢数据。</p>
+  </div>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 220" role="img" aria-label="get(88L) 的路径：88L 的 hashCode 是 88，高 16 位异或到低 16 位后还是 88，和 255 按位与得到下标 88，去桶数组第 88 格，用 equals 比对，拿到机械键盘。">
+        <defs><marker id="h1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+        <text x="16" y="22" class="t-of">全景第 4 站 · catalog.get(88L)</text>
+        <rect x="16" y="40" width="120" height="60" rx="12" class="b-g2"/><text x="76" y="66" text-anchor="middle" class="t-mono" style="font-weight:600">88L</text><text x="76" y="86" text-anchor="middle" class="t-xs">key</text>
+        <rect x="172" y="40" width="150" height="60" rx="12" class="b-pd"/><text x="247" y="66" text-anchor="middle" class="t-b">hashCode()</text><text x="247" y="86" text-anchor="middle" class="t-monos">= 88</text>
+        <rect x="358" y="40" width="160" height="60" rx="12" class="b-pd"/><text x="438" y="66" text-anchor="middle" class="t-b">扰动 h ^ (h&gt;&gt;&gt;16)</text><text x="438" y="86" text-anchor="middle" class="t-monos">= 88</text>
+        <rect x="554" y="40" width="170" height="60" rx="12" class="b-cg"/><text x="639" y="66" text-anchor="middle" class="t-b">(256 − 1) &amp; 88</text><text x="639" y="86" text-anchor="middle" class="t-monos">下标 = 88</text>
+        <rect x="760" y="40" width="184" height="60" rx="12" class="b-bk"/><text x="852" y="66" text-anchor="middle" class="t-b">table[88]</text><text x="852" y="86" text-anchor="middle" class="t-xs">equals 比对 → 机械键盘</text>
+        <g><line x1="138" y1="70" x2="168" y2="70" class="e-ink" marker-end="url(#h1)"/><line x1="324" y1="70" x2="354" y2="70" class="e-ink" marker-end="url(#h1)"/><line x1="520" y1="70" x2="550" y2="70" class="e-ink" marker-end="url(#h1)"/><line x1="726" y1="70" x2="756" y2="70" class="e-ink" marker-end="url(#h1)"/></g>
+        <text x="16" y="138" class="t-s">不管有 100 个还是 100 万个商品，都是这 4 步：<tspan style="font-weight:700">一次方法调用、两次位运算、一次数组访问、桶里一两次 equals</tspan>。</text>
+        <text x="16" y="164" class="t-of">全景第 8 站 · 多线程同时 put</text>
+        <text x="16" y="190" class="t-s">两个线程各放 10 万个用户，HashMap 3 次里 2 次<tspan class="t-bad">真丢了数据，最多少了 3.4 万个</tspan>，3 次的 size() 都不对（实测）；computeIfAbsent 直接抛 ConcurrentModificationException。</text>
+        <text x="16" y="212" class="t-xs">为什么会这样，⑥ 第一圈讲；换成什么，J02 讲。</text>
+      </svg>
+    </div>
+  </figure>
+  <div class="scene"><b>需求</b><span>J01 的过关题：<b>不查资料讲清 HashMap put 的全过程，以及扩容为什么是 2 倍</b>。所以④把 put 拆成一张流程图，把“为什么是 2 的幂”讲到能推出来，↺ 里直接给你练这两题。</span></div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div>
+    <h2><span class="sn">②</span>没有它会怎样：数组快，但 key 不是下标</h2>
+  </div>
+  <div class="design three">
+    <div class="way" data-role="other">
+      <h4>挨个比<small>List</small></h4>
+      <p class="tip">10 万单里找用户 1024，要看 10 万次。上一页 <span class="tag-real">实测</span> 查 1 万次 1477 ms。</p>
+    </div>
+    <div class="way" data-role="other">
+      <h4>直接拿 key 当下标<small>long[] 开到最大</small></h4>
+      <p class="tip">商品号 88 就放 <code>arr[88]</code>，一步到位。可用户 id 可能是 10 亿、请求号是字符串，数组开不了那么大，也没法拿字符串当下标。</p>
+    </div>
+    <div class="way" data-role="cg">
+      <h4>排好序二分<small>TreeMap</small></h4>
+      <p class="tip">O(log n)，100 万个要比 20 次，还要求 key 能比大小。不需要有序时，这 20 次是白花的。</p>
+    </div>
+  </div>
+  <ul class="pains">
+    <li>挨个比太慢；排序二分要求可比较，而且仍然要比 log n 次。</li>
+    <li>直接当下标最快，但只适用于“小范围的整数 key”。</li>
+    <li class="ok">缺的那一块：<b>一个函数，把任意 key 压到 0 ～ n−1 的一个整数上</b>，这就是哈希。代价是不同的 key 可能压到同一格（碰撞），所以要有办法处理碰撞，并且让碰撞少。</li>
+  </ul>
+  <p class="mismatch">不懂精华时的典型误用：重写了 <code>equals</code> 却没重写 <code>hashCode</code>。两个“相等”的订单算出不同的下标，各住各的桶，<code>get</code> 永远找不到另一个（坑见⑥）。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div>
+    <h2><span class="sn">③</span>相邻方案：撞了怎么办</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>谁在用</th><th>撞了以后</th><th>好在哪</th><th>输在哪</th></tr></thead>
+      <tbody>
+        <tr class="hl"><th>拉链法</th><td><code>HashMap</code>、<code>ConcurrentHashMap</code></td><td>同一个桶挂一条链表（太长变树）</td><td>装得再满也不会“没地方”，删除简单</td><td>每个元素一个节点对象，32 字节</td></tr>
+        <tr><th>开放寻址</th><td><code>ThreadLocalMap</code>、<code>IdentityHashMap</code>、Python dict</td><td>往后找下一个空格</td><td>没有节点对象，数组连续，缓存友好</td><td>负载因子必须低，删除要留“墓碑”，满了退化严重</td></tr>
+        <tr><th>素数长度 + 取模</th><td><code>Hashtable</code>（JDK 1.0）</td><td>拉链</td><td>取模对坏哈希更宽容</td><td>% 比位运算慢；扩容要每个元素重新取模；每个方法都加锁</td></tr>
+        <tr><th>不哈希，用树</th><td><code>TreeMap</code></td><td>没有碰撞这回事</td><td>有序、能范围查</td><td>O(log n)，key 必须可比较</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页学 HashMap（JDK 8 起的实现，JDK 17 源码）：</b>拉链法 + 2 的幂长度 + 扰动 + 太长才树化。Java 里按 key 找、不要求顺序时，默认就选它；多线程共享时换 ConcurrentHashMap，它的桶结构和这页一样，只是加了并发控制（J02）。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div>
+    <h2><span class="sn">④</span>原理：定位、put、扩容、树化</h2>
+  </div>
+  <div class="todo">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>按位与</b>：<code>x &amp; 15</code> 只留下 x 二进制的最低 4 位，结果在 0～15 之间。当 n 是 2 的幂时，<code>x &amp; (n − 1)</code> 和 <code>x % n</code> 结果一样（x 非负），但只要一条指令。</li>
+      <li><b>hashCode 和 equals 的约定</b>：equals 相等的两个对象，hashCode 必须相等；反过来不要求。HashMap 先用 hash 找桶，再用 equals 确认，靠的就是这条约定。record 会按全部字段自动生成这两个方法。</li>
+      <li><b>红黑树</b>：上一页讲过，有序、O(log n)。这里只用到“链表太长时换成它”。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-index"><span class="sn">④-1</span>定位三步：hashCode → 扰动 → (n−1) &amp; hash</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 250" role="img" aria-label="扰动为什么有用：key 是 65536 的倍数时，hashCode 的低 16 位全是 0。桶数组长 16 时，下标只看最低 4 位，不扰动的话 12 个 key 全挤进第 0 格；把高 16 位异或下来以后，低位变成 1 到 12，分散到 12 个不同的格子。">
+        <text x="16" y="22" class="t-of">桶数组长 16 时，下标只看最低 4 位。如果 key 的差别全在高位呢？</text>
+        <text x="16" y="52" class="t-mono">key = 65536 × 3 = 196608</text>
+        <text x="300" y="52" class="t-mono">hashCode  0000 0000 0000 0011  0000 0000 0000 0000</text>
+        <text x="300" y="76" class="t-mono">h &gt;&gt;&gt; 16   0000 0000 0000 0000  0000 0000 0000 0011</text>
+        <text x="300" y="100" class="t-mono" style="font-weight:600">异或后     0000 0000 0000 0011  0000 0000 0000 <tspan style="fill:var(--good)">0011</tspan></text>
+        <text x="300" y="124" class="t-mono">&amp; (16−1)                                         <tspan style="fill:var(--good)">0011</tspan> → 下标 3</text>
+        <rect x="16" y="146" width="440" height="88" rx="12" class="b-bad"/>
+        <text x="30" y="170" class="t-b">不扰动：只看低 4 位</text>
+        <text x="30" y="194" class="t-s">65536 的 1～12 倍，低 16 位全是 0</text>
+        <text x="30" y="218" class="t-s">12 个 key 全进 <tspan style="font-weight:700">第 0 格</tspan>，一条 12 长的链</text>
+        <rect x="490" y="146" width="454" height="88" rx="12" class="b-good"/>
+        <text x="504" y="170" class="t-b">扰动：高 16 位异或进低 16 位</text>
+        <text x="504" y="194" class="t-s">下标分别是 1、2、3 … 12（javac 17 实测算出）</text>
+        <text x="504" y="218" class="t-s">12 个 key 进 12 个不同的格子</text>
+      </svg>
+    </div>
+    <figcaption>JDK 17 源码 <code>hash(key)</code> 就一行：<code>(h = key.hashCode()) ^ (h &gt;&gt;&gt; 16)</code>，key 为 null 时 hash 是 0（所以 HashMap 允许一个 null key，放在第 0 格）。全景第 4 站的 88 只有低位，扰动后还是 88。JDK 7 的扰动做了 4 次移位异或，JDK 8 减到 1 次，因为最坏情况已经有树化兜底了（⑥-3）。</figcaption>
+  </figure>
+
+  <h3 id="m-put"><span class="sn">④-2</span>put 的全过程（过关题第一问）</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 420" role="img" aria-label="put 流程：1 算 hash；2 桶数组为空就先 resize 初始化成 16；3 用 (n-1)&hash 找到桶，桶空就新建节点；4 桶不空先比第一个节点，hash 相同且 key 相等就覆盖；5 第一个是树节点就按红黑树插入；6 否则沿链表走，找到相等的 key 就覆盖，走到尾巴就挂上去，链表达到 9 个时尝试树化，数组小于 64 则改为扩容；7 覆盖旧值时直接返回旧值；8 新增时 modCount 加 1，size 加 1 后超过阈值就 resize；9 返回 null。">
+        <defs><marker id="h2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+        <g class="t-s">
+          <rect x="16" y="14" width="300" height="40" rx="10" class="b-pd"/><text x="28" y="39"><tspan style="font-weight:700">1</tspan>  hash = h ^ (h &gt;&gt;&gt; 16)，null 为 0</text>
+          <rect x="16" y="70" width="300" height="40" rx="10" class="b-pd"/><text x="28" y="95"><tspan style="font-weight:700">2</tspan>  table 为空？→ resize() 建 16 格</text>
+          <rect x="16" y="126" width="300" height="40" rx="10" class="b-cg"/><text x="28" y="151"><tspan style="font-weight:700">3</tspan>  i = (n − 1) &amp; hash，看 table[i]</text>
+          <rect x="360" y="126" width="250" height="40" rx="10" class="b-good"/><text x="372" y="151">空 → table[i] = newNode，去 8</text>
+          <rect x="16" y="182" width="300" height="52" rx="10" class="b-cg"/><text x="28" y="204"><tspan style="font-weight:700">4</tspan>  比第一个节点：hash 相等，</text><text x="46" y="224">且 == 或 equals？→ 记下它，去 7</text>
+          <rect x="16" y="250" width="300" height="40" rx="10" class="b-cg"/><text x="28" y="275"><tspan style="font-weight:700">5</tspan>  第一个是 TreeNode → putTreeVal</text>
+          <rect x="16" y="306" width="300" height="96" rx="10" class="b-cg"/><text x="28" y="328"><tspan style="font-weight:700">6</tspan>  沿链表走：</text><text x="46" y="350">遇到相等的 key → 记下，去 7</text><text x="46" y="372">走到尾 → 挂在尾巴（JDK 8 起尾插）</text><text x="46" y="394">链表到 9 个 → treeifyBin</text>
+          <rect x="360" y="330" width="250" height="52" rx="10" class="b-rn"/><text x="372" y="352">treeifyBin：数组 &lt; 64 → 改为扩容</text><text x="372" y="372">否则把这条链变成红黑树</text>
+          <rect x="650" y="182" width="294" height="52" rx="10" class="b-g2"/><text x="662" y="204"><tspan style="font-weight:700">7</tspan>  已有这个 key：换掉 value，</text><text x="680" y="224">返回旧值（size、modCount 都不动）</text>
+          <rect x="650" y="262" width="294" height="72" rx="10" class="b-bk"/><text x="662" y="286"><tspan style="font-weight:700">8</tspan>  新增：modCount++</text><text x="680" y="308">++size &gt; threshold？→ resize()</text><text x="680" y="326" class="t-xs">翻倍，高低位拆分（④-3）</text>
+          <rect x="650" y="350" width="294" height="40" rx="10" class="b-neu"/><text x="662" y="375"><tspan style="font-weight:700">9</tspan>  返回 null（之前没有这个 key）</text>
+        </g>
+        <g>
+          <line x1="166" y1="54" x2="166" y2="68" class="e-ink" marker-end="url(#h2)"/>
+          <line x1="166" y1="110" x2="166" y2="124" class="e-ink" marker-end="url(#h2)"/>
+          <line x1="318" y1="146" x2="356" y2="146" class="e-ink" marker-end="url(#h2)"/>
+          <line x1="166" y1="166" x2="166" y2="180" class="e-ink" marker-end="url(#h2)"/>
+          <line x1="166" y1="234" x2="166" y2="248" class="e-ink" marker-end="url(#h2)"/>
+          <line x1="166" y1="290" x2="166" y2="304" class="e-ink" marker-end="url(#h2)"/>
+          <line x1="318" y1="390" x2="356" y2="370" class="e-ink" marker-end="url(#h2)"/>
+          <line x1="318" y1="208" x2="646" y2="208" class="e-mut" marker-end="url(#h2)"/>
+          <path d="M318 336 C 480 300, 560 250, 646 218" class="e-mut" marker-end="url(#h2)"/>
+          <path d="M612 146 C 640 160, 660 230, 680 258" class="e-mut" marker-end="url(#h2)"/>
+          <line x1="797" y1="334" x2="797" y2="348" class="e-ink" marker-end="url(#h2)"/>
+        </g>
+      </svg>
+    </div>
+    <figcaption>对着 JDK 17 <code>putVal</code> 画的。第 6 步“到 9 个”来自源码 <code>binCount &gt;= TREEIFY_THRESHOLD − 1</code>：binCount 从第一个节点后面开始数，条件成立时新节点已经挂上，链表正好 9 个。常说的“链表长度超过 8 就树化”指的就是这个，⑤ 里实测也是第 9 个才触发。</figcaption>
+  </figure>
+
+  <h3 id="m-resize"><span class="sn">④-3</span>扩容：翻倍，每个节点只看一位就知道去哪</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 250" role="img" aria-label="扩容拆分：桶数组从 256 翻倍到 512 时，下标多看一位，也就是 hash 的第 8 位（值 256）。88 的这一位是 0，留在 88；344 的这一位是 1，搬到 88 + 256 = 344。原来同一个桶里的节点，拆成低位链和高位链两条，各自保持原来的顺序。">
+        <text x="16" y="22" class="t-of">256 → 512：下标从看低 8 位，变成看低 9 位</text>
+        <text x="16" y="50" class="t-mono">88  = <tspan style="fill:var(--good);font-weight:600">0</tspan> 0101 1000</text>
+        <text x="16" y="72" class="t-mono">344 = <tspan style="fill:var(--rn);font-weight:600">1</tspan> 0101 1000</text>
+        <text x="200" y="62" class="t-xs">← 低 8 位一样，所以长 256 时同在 88；多出来的第 9 位（hash &amp; 256）不一样</text>
+        <rect x="16" y="98" width="200" height="56" rx="10" class="b-cg"/><text x="28" y="122" class="t-b">扩容前 table[88]</text><text x="28" y="142" class="t-mono">88 → 344</text>
+        <line x1="218" y1="126" x2="300" y2="96" class="e-ink"/><line x1="218" y1="126" x2="300" y2="168" class="e-ink"/>
+        <rect x="304" y="70" width="290" height="50" rx="10" class="b-good"/><text x="316" y="92" class="t-b">低位链：(hash &amp; 256) == 0</text><text x="316" y="110" class="t-s">88 → 留在 table[88]</text>
+        <rect x="304" y="142" width="290" height="50" rx="10" class="b-rn"/><text x="316" y="164" class="t-b">高位链：(hash &amp; 256) != 0</text><text x="316" y="182" class="t-s">344 → 搬到 table[88 + 256] = table[344]</text>
+        <rect x="630" y="70" width="314" height="122" rx="12" class="b-card"/>
+        <text x="644" y="94" class="t-b">为什么不用重新算下标</text>
+        <text x="644" y="118" class="t-s">新下标 = hash &amp; (2n − 1)，比旧下标只多看</text>
+        <text x="644" y="138" class="t-s">一位。那一位是 0 就不变，是 1 就加 n。</text>
+        <text x="644" y="162" class="t-s">一个桶只拆成两条链，顺序不变，</text>
+        <text x="644" y="182" class="t-s">也就不会出现 JDK 7 那种成环（⑥-3）。</text>
+        <text x="16" y="226" class="t-s"><tspan class="t-bk">实测</tspan> 商品 100 个时桶数组 256，88 和 344 挤在 table[88]；加到 201 个超过阈值 192，扩到 512，88 留在 88，344 搬到 344，各剩 1 个节点。</text>
+      </svg>
+    </div>
+    <figcaption>阈值 <code>threshold = 容量 × 负载因子 0.75</code>。<span class="tag-real">实测</span> 从空的 HashMap 一个个放：第 1 个时才分配 16 格（阈值 12），第 13、25、49、97 个时依次扩到 32、64、128、256，阈值跟着变成 24、48、96、192。</figcaption>
+  </figure>
+
+  <h3 id="m-tree"><span class="sn">④-4</span>树化：链表长到 9 个，数组也够大，才变红黑树</h3>
+  <div class="design">
+    <div class="way" data-role="rn">
+      <h4>三个常量<small>JDK 17 源码</small></h4>
+      <ul class="pains">
+        <li class="ok"><code>TREEIFY_THRESHOLD = 8</code>：链表挂到第 9 个时尝试树化</li>
+        <li class="ok"><code>MIN_TREEIFY_CAPACITY = 64</code>：数组小于 64 时不树化，改为扩容。数组小，链长多半是因为“格子太少”，扩容更对症</li>
+        <li class="ok"><code>UNTREEIFY_THRESHOLD = 6</code>：扩容拆分后一边剩 6 个及以下，退回链表。8 和 6 隔开一段，免得在临界值附近来回变</li>
+      </ul>
+      <p class="tip"><span class="tag-real">实测</span> 12 个 hashCode 都是 42 的 key：第 9 个时扩到 32，第 10 个扩到 64，第 11 个那个桶才变成 TreeNode。</p>
+    </div>
+    <div class="way" data-role="other">
+      <h4>为什么阈值是 8<small>源码注释里的算账</small></h4>
+      <p class="tip">hashCode 分布正常、负载因子 0.75 时，一个桶里的节点数近似泊松分布（平均约 0.5 个）。源码注释列出：桶里有 0 个的概率约 0.61，1 个约 0.30，2 个约 0.08……<b>8 个约 0.00000006</b>。</p>
+      <p class="tip">TreeNode 大约是普通 Node 的两倍大。所以树化不是为“平常”准备的，平常根本到不了 8；它是给<b>hashCode 写得很差、或者被人故意构造碰撞</b>时兜底的（⑥-3 哈希碰撞攻击）。</p>
+    </div>
+  </div>
+
+  <h3 id="m-why"><span class="sn">④-5</span>为什么长度非是 2 的幂、扩容非是 2 倍（过关题第二问）</h3>
+  <div class="design">
+    <div class="way" data-role="done">
+      <h4>HashMap：2 的幂 + 位运算<small>JDK 1.4 起</small></h4>
+      <ul class="pains">
+        <li class="ok">定位：<code>hash &amp; (n−1)</code>，一条指令；取模要做除法，慢一个数量级</li>
+        <li class="ok">扩容：翻倍后仍是 2 的幂，每个节点只看 <code>hash &amp; oldCap</code> 一位就知道去哪，不用重新算</li>
+        <li class="ok">均摊：按比例扩容，n 次 put 总共只搬 O(n) 次（和 ArrayList 的 1.5 倍同理）</li>
+        <li>代价：下标只看低位，高位再乱也用不上，所以必须扰动；hashCode 低位分布差时更容易撞</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>Hashtable：素数长度 + 取模<small>JDK 1.0</small></h4>
+      <ul class="pains">
+        <li class="ok">长度取素数（初始 11，扩容 2n+1），取模时 hashCode 的高位低位都参与，对差的 hashCode 更宽容</li>
+        <li>每次定位都要做除法</li>
+        <li>扩容后每个元素都要重新 <code>% newLength</code></li>
+        <li>每个方法都 synchronized，单线程也付锁的钱</li>
+      </ul>
+    </div>
+  </div>
+  <div class="verdict" data-role="done"><b>决定胜负的约束：</b>HashMap 的 get / put 是 Java 里调用最频繁的操作之一，每次都要“定位”。2 的幂让定位从除法变成一次按位与，翻倍又让扩容只需看一位。它唯一的弱点“只用低位”，用一次扰动 <code>h ^ (h &gt;&gt;&gt; 16)</code> 补上，成本几乎为零。所以“为什么扩容是 2 倍”，答案是：<b>只有翻倍才能保持 2 的幂，保住这两个位运算的好处</b>；负载因子 0.75 则是在“浪费空格”和“碰撞变多”之间取的折中。</div>
+
+  <h3 id="lab"><span class="sn">④-6</span>自己放几个 key 试试</h3>
+  <div class="lab" id="hlab">
+    <div class="presets" role="group" aria-label="预设">
+      <button type="button" data-p="seq">放 1～13<br><span>看第 13 个扩容</span></button>
+      <button type="button" data-p="tree">放 5、69、133…<br><span>同一个桶，看树化</span></button>
+      <button type="button" data-p="hi">放 65536 的倍数<br><span>看扰动有什么用</span></button>
+      <button type="button" data-p="hi-off">同上，关掉扰动<br><span>对比</span></button>
+    </div>
+    <div class="run-row">
+      <label for="hk" class="tip">放一个 key（0～2147483647 的整数）：</label>
+      <input id="hk" type="number" min="0" max="2147483647" step="1" value="88" style="font:inherit;width:9em;padding:6px 10px;border-radius:10px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)">
+      <button class="btn primary" type="button" id="hput">put</button>
+      <button class="btn" type="button" id="hreset">清空</button>
+    </div>
+    <div class="hstat" id="hstat" aria-live="polite"></div>
+    <div class="hgrid" id="hgrid" aria-label="桶数组"></div>
+    <ol class="hlog" id="hlog"></ol>
+  </div>
+  <p class="tip">模拟和 JDK 17 一致的规则：整数 key 的 hashCode 就是它自己，扰动、按位与、负载因子 0.75、尾插、链表到 9 个尝试树化、数组小于 64 时改为扩容、拆分后不超过 6 个退回链表。模拟逻辑在 node 里跑过，“放 1～13”和“同一个桶”两个预设的结果和 ⑤ 的实测一致。</p>
+
+  <h3>最少语法</h3>
+<pre class="codebox"><code>Map&lt;Long, Product&gt; catalog = new HashMap&lt;&gt;(134);       <span class="cm">// 预计 100 个：100 / 0.75 + 1</span>
+catalog.put(88L, keyboard);                             <span class="cm">// 返回旧值，没有就是 null</span>
+catalog.get(88L);  catalog.getOrDefault(99L, NONE);  catalog.containsKey(88L);
+userOrders.computeIfAbsent(1024L, k -&gt; new ArrayList&lt;&gt;()).add(order);
+stockDelta.merge(88L, -2, Integer::sum);                <span class="cm">// 有就合并，没有就放</span>
+catalog.putIfAbsent(88L, keyboard);
+for (Map.Entry&lt;Long, Product&gt; e : catalog.entrySet()) { … }   <span class="cm">// 遍历用 entrySet</span>
+<span class="cm">// key 的类型：equals 和 hashCode 必须一起写；record 自动生成</span>
+record SkuKey(long skuId, String warehouse) {}</code></pre>
+  <p class="tip">初始容量为什么是 134 不是 100、为什么不能多线程写、迭代顺序：放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div>
+    <h2><span class="sn">⑤</span>亲眼看到：交易靶场的 catalog 和 userOrders</h2>
+    <p class="lead">用反射直接看 HashMap 内部的 <code>table</code> 数组（要加 <code>--add-opens java.base/java.util=ALL-UNNAMED</code>，全景第 4 站也是这么看的）。6 段：扩容时机、第 4 站的 88 和 344、一个桶从链表到树、坏 hashCode 有多慢、第 8 站并发写、可变 key。完整代码：<a href="https://github.com/archeu/study-labs/tree/main/java/javase/hashmap-internals">study-labs/java/javase/hashmap-internals →</a></p>
+  </div>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">1</span><b>Demo.java</b> 节选，JDK 17</div>
+<pre><code><span class="cm">// 1. 一个个放，记下桶数组什么时候变</span>
+HashMap&lt;Long, Product&gt; catalog = new HashMap&lt;&gt;();
+for (long id = 1; id &lt;= 100; id++) {
+  catalog.put(id, p(id));
+  <span class="cm">// Peek.capacity 用反射读 table.length</span>
+}
+<span class="cm">// 2. 88 和 344 撞到同一个桶，加到 201 个后拆开</span>
+catalog.put(344L, p(344));
+for (long id = 101; id &lt;= 200; id++) catalog.put(id, p(id));
+
+<span class="cm">// 3. hashCode 写死成 42：全进一个桶</span>
+record BadKey(int id) implements Comparable&lt;BadKey&gt; {
+  public int hashCode() { return 42; }
+  public int compareTo(BadKey o) { … }
+}
+<span class="cm">// 4. 同上但不实现 Comparable：BadKeyNoCmp</span>
+
+<span class="cm">// 5. 两个线程各放 10 万个不同的用户</span>
+Map&lt;Long, Long&gt; m = new HashMap&lt;&gt;();
+t1: for (u = 0;         u &lt; 100_000; u++) m.put(u, 9527L);
+t2: for (u = 1_000_000; …            ; u++) m.put(u, 9527L);
+
+<span class="cm">// 6. 拿可变的 List 当 key，放进去以后再改它</span>
+List&lt;Long&gt; cartKey = new ArrayList&lt;&gt;(List.of(88L));
+cache.put(cartKey, "购物车报价 598.00");
+cartKey.add(66L);
+cache.get(cartKey);</code></pre>
+    </div>
+    <div class="codebox">
+      <div class="code-bar"><span class="n">2</span><b>运行</b> JDK 17.0.20，2 核 ARM</div>
+<pre class="console"><b>$ java --add-opens java.base/java.util=ALL-UNNAMED \
+    -cp target/classes labs.javase.hashmap_internals.Demo</b>
+<span class="w">== 1. 什么时候扩容 ==</span>
+  new HashMap&lt;&gt;() 之后：桶数组 0（还没分配）
+  放第   1 个后：桶数组  16，阈值  12
+  放第  13 个后：桶数组  32，阈值  24
+  放第  25 个后：桶数组  64，阈值  48
+  放第  49 个后：桶数组 128，阈值  96
+  放第  97 个后：桶数组 256，阈值 192
+<span class="w">== 2. 全景第 4 站 ==</span>
+  hashCode=88，扰动后 88，桶数组 256，下标 88，1 个节点
+  放进 344：下标 88，88 号的桶里：2 个节点，Node
+  加到 201 个：桶数组 512，88 → 88（1 个），344 → 344（1 个）
+<span class="w">== 3. 一个桶越来越长 ==</span>
+  第 1～8 个：桶数组  16，链表 1～8 个，Node
+  放第  9 个：桶数组  <b>32</b>，那个桶 9 个节点，Node
+  放第 10 个：桶数组  <b>64</b>，那个桶 10 个节点，Node
+  放第 11 个：桶数组  64，那个桶 11 个节点，<b>TreeNode</b>
+<span class="w">== 4. hashCode 全一样，查 2 万次 ==</span>
+  好的 hashCode（Integer）        1.3 ms
+  全撞 + Comparable              5.0 ms（两遍：5.0、9.1）
+  <span class="r">全撞 + 不可比较             4077.0 ms</span>
+<span class="w">== 5. 全景第 8 站：两个线程同时 put ==</span>
+  应有 200000 个用户：
+  <span class="r">第 1 次 size() = 178400，遍历数出 165390</span>
+  <span class="r">第 2 次 size() = 199972，遍历数出 200000</span>
+  <span class="r">第 3 次 size() = 157585，遍历数出 182224</span>
+  <span class="r">computeIfAbsent：线程抛出 ConcurrentModificationException</span>
+  ConcurrentHashMap.computeIfAbsent：200000
+<span class="w">== 6. 可变 key ==</span>
+  改了 key 之后 get(同一个对象) → <span class="r">null</span>；size 还是 1</pre>
+      <p class="tip" style="padding:10px 14px">第 3 段第 1～8 个的输出合并成了一行。第 4、5 段每次运行数字会变。第 5 段按遍历数：第 1 次少 34610 个，第 3 次少 17776 个，第 2 次没少但 size() 少算了 28 个。</p>
+    </div>
+  </div>
+  <div class="done-box"><b>到这里已经能交差了：</b>你亲眼看到了第 4 站那行输出背后的每一步：扩容的时机、碰撞和拆分、树化要先等数组长到 64；也看到了第 8 站的雷到底有多响。<br><b>已知还没处理的细节：</b>可变 key（<a href="#p-mut">⑥-1</a>）、多线程写（<a href="#p-race">⑥-1</a>）、初始容量算错（<a href="#p-cap">⑥-1</a>）、坏 hashCode（<a href="#p-bad">⑥-1</a>）、JDK 7 的死循环（<a href="#d-jdk7">⑥-3</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div>
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-mut"><b><em>坑 1</em>放进去以后改了 key，再也取不出来<a class="root" href="#m-index">← ④-1 下标由 hash 决定</a></b>
+      <dl><dt>现象</dt><dd>拿购物车的商品列表当缓存 key，之后往列表里加了一件，<code>get(同一个对象)</code> 返回 null，旧条目还占着内存。<span class="seen">⑤ 第 6 段</span></dd>
+      <dt>根源</dt><dd>节点还躺在旧 hash 算出的桶里，新 hash 指向另一个桶；节点里还存着旧 hash，比对也过不去。</dd>
+      <dt>做法</dt><dd class="fix">key 用不可变类型：Long、String、record（字段也要不可变，<code>List.copyOf</code>）。</dd></dl></div>
+    <div class="pit" id="p-race"><b><em>坑 2</em>多个线程同时写，丢数据、size 不准、抛异常<a class="root" href="#m-put">← ④-2 put 不是原子的</a></b>
+      <dl><dt>现象</dt><dd>两个线程各放 10 万个，3 次里 2 次少了 1.8 万～3.5 万个；3 次的 <code>size()</code> 都和遍历数出来的对不上；computeIfAbsent 直接 ConcurrentModificationException。<span class="seen">⑤ 第 5 段</span></dd>
+      <dt>根源</dt><dd>“看桶是空的 → 放新节点”“++size”“扩容时搬节点”都是好几步，两个线程交错执行就互相覆盖：同时看到空桶，后写的盖掉先写的；扩容时一边在搬，另一边往旧数组里放，放进去的就丢了。</dd>
+      <dt>做法</dt><dd class="fix">共享就用 <code>ConcurrentHashMap</code>（J02 讲它怎么做到）；或者只在一个线程里写。<code>Collections.synchronizedMap</code> 能用，但整个 Map 一把锁。</dd></dl></div>
+    <div class="pit" id="p-cap"><b><em>坑 3</em>new HashMap&lt;&gt;(100) 放 100 个，还是扩容了<a class="root" href="#m-resize">← ④-3 阈值 = 容量 × 0.75</a></b>
+      <dl><dt>现象</dt><dd>以为给了 100 就够了。<span class="seen">实测</span> 容量被调成 128，阈值 96，放到第 97 个扩到 256。</dd>
+      <dt>根源</dt><dd>构造参数是“桶数组长度”，会被向上取成 2 的幂，而阈值只有它的四分之三。</dd>
+      <dt>做法</dt><dd class="fix">放 n 个就给 <code>n / 0.75 + 1</code>（100 个给 134，实测一开始就是 256，不再扩容）；JDK 19 起直接 <code>HashMap.newHashMap(100)</code>；Guava 的 <code>Maps.newHashMapWithExpectedSize</code> 同理。</dd></dl></div>
+    <div class="pit" id="p-bad"><b><em>坑 4</em>hashCode 写得差，还不可比较：查一次要走遍整棵树<a class="root" href="#m-tree">← ④-4 树化靠比较</a></b>
+      <dl><dt>现象</dt><dd>hashCode 全一样的 2 万个 key，查 2 万次：可比较时 5 ms，不可比较时 4077 ms，慢 800 倍。<span class="seen">⑤ 第 4 段</span></dd>
+      <dt>根源</dt><dd>红黑树要靠“比大小”决定往左还是往右。hash 一样又不能比较时，插入只好用 <code>System.identityHashCode</code> 随便定个顺序，查找时却不知道往哪边走，只能两边都找，退化成 O(n)。</dd>
+      <dt>做法</dt><dd class="fix">hashCode 用全部参与 equals 的字段算（record 或 <code>Objects.hash</code>）；会大量做 key 的类型顺手实现 Comparable。</dd></dl></div>
+    <div class="pit"><b><em>坑 5</em>只重写了 equals，没重写 hashCode<a class="root" href="#m-index">← ④-1 先 hash 后 equals</a></b>
+      <dl><dt>现象</dt><dd>两个 equals 相等的 SkuKey，<code>put</code> 了一个，用另一个 <code>get</code> 拿不到；HashSet 里出现“重复”元素。</dd>
+      <dt>根源</dt><dd>默认 hashCode 是对象身份，两个对象算出不同的下标，根本走不到 equals 那一步。</dd>
+      <dt>做法</dt><dd class="fix">两个一起写，或者直接用 record；IDE 和 Sonar 都能检查。</dd></dl></div>
+    <div class="pit"><b><em>坑 6</em>依赖 HashMap 的遍历顺序<a class="root" href="#m-resize">← ④-3 扩容会拆分</a></b>
+      <dl><dt>现象</dt><dd>测试里接口返回的 JSON 字段顺序固定，数据一多、或者换了 JDK，顺序变了，断言失败、签名对不上。</dd>
+      <dt>根源</dt><dd>遍历是按桶下标走的，下标取决于容量和 hash；扩容一次，顺序就可能变。</dd>
+      <dt>做法</dt><dd class="fix">要插入顺序用 LinkedHashMap，要按 key 排序用 TreeMap。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>知道数量就给容量</b><p><code>new HashMap&lt;&gt;(n * 4 / 3 + 1)</code> 或 JDK 19 的 <code>HashMap.newHashMap(n)</code>。</p><p class="guard">一路扩容的搬迁和临时垃圾。</p></div>
+    <div class="rl"><b>key 不可变，equals 和 hashCode 成对</b><p>优先用 Long、String、枚举、record。自己写就用 <code>Objects.hash(全部字段)</code>，字段和 equals 用的完全一致。</p><p class="guard">坑 1、坑 5。</p></div>
+    <div class="rl"><b>用复合操作，不要先查再放</b><p><code>computeIfAbsent</code>、<code>merge</code>、<code>putIfAbsent</code> 代替 <code>if (!containsKey) put</code>，少一次定位，语义也清楚。</p><p class="guard">多余的哈希计算，以及换成 ConcurrentHashMap 后的竞态。</p></div>
+    <div class="rl"><b>computeIfAbsent 的函数里别改同一个 Map</b><p>JDK 9 起，在 mapping 函数里再往同一个 HashMap 放东西会抛 ConcurrentModificationException。</p><p class="guard">递归缓存写法踩坑（典型是递归算斐波那契）。</p></div>
+    <div class="rl"><b>跨线程共享就用 ConcurrentHashMap</b><p>哪怕“只是偶尔写一下”。它不允许 null key 和 null value。</p><p class="guard">坑 2。</p></div>
+    <div class="rl"><b>遍历用 entrySet，不用 keySet 再 get</b><p>keySet 再 get，每个 key 多一次定位。</p><p class="guard">无谓的 hash 计算和 equals。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：面试官会接着问的</h3></div>
+  <div class="deep">
+    <div class="dp" id="d-jdk7" data-role="bad"><h4>JDK 7 的 HashMap 为什么会死循环</h4>
+      <p>JDK 7 往链表里放新节点用<b>头插</b>，扩容搬节点时也一个个头插到新桶，于是链表顺序被反转。两个线程同时扩容同一个桶：线程 A 搬了一半被挂起，线程 B 搬完，链表顺序已经倒过来；A 醒来接着按旧的 next 指针搬，就可能把两个节点互相指成一个环。之后任何 get 落到这个桶，就在环里转圈，CPU 100%。</p>
+      <p>JDK 8 改成<b>尾插</b>，扩容按 lo / hi 两条链保持原顺序，不再成环；但⑤ 已经实测，数据照样丢。所以结论没变：多线程别用 HashMap。</p></div>
+    <div class="dp" data-role="pd"><h4>JDK 7 和 8 的差别</h4>
+      <div class="tbl-wrap"><table class="t" style="min-width:0"><tbody>
+        <tr><th>结构</th><td>7：数组 + 链表；8：数组 + 链表 + 红黑树</td></tr>
+        <tr><th>插入</th><td>7：头插；8：尾插</td></tr>
+        <tr><th>扰动</th><td>7：4 次移位异或；8：一次 <code>h ^ (h &gt;&gt;&gt; 16)</code></td></tr>
+        <tr><th>扩容</th><td>7：每个节点重新算下标；8：看 <code>hash &amp; oldCap</code> 拆成两条</td></tr>
+        <tr><th>最坏查找</th><td>7：O(n)；8：O(log n)（key 可比较时）</td></tr>
+        <tr><th>JDK 9+</th><td>computeIfAbsent 等检测到函数里改了 Map 就抛 CME；JDK 19 加 <code>newHashMap(n)</code>；8 到 21 的结构没有再变</td></tr>
+      </tbody></table></div></div>
+    <div class="dp" data-role="rn"><h4>哈希碰撞攻击，和树化真正防的东西</h4>
+      <p>2011 年底公开的一类攻击：String 的 hashCode 是公开算法，攻击者可以构造成千上万个 hashCode 相同的参数名，一个 POST 请求就让服务器在解析表单时把 HashMap 变成一条超长链表，O(n²) 吃满 CPU。</p>
+      <p>JDK 8 的树化就是兜底：String 实现了 Comparable，即使 hash 全撞，红黑树也能按字符串大小查，最坏 O(log n)。⑤ 第 4 段的 5 ms 对 4077 ms，说的就是这个差别。容器层面也会限制参数个数（Tomcat 的 <code>maxParameterCount</code>）。</p></div>
+    <div class="dp" data-role="bk"><h4>ConcurrentHashMap 一句话</h4>
+      <p>桶结构和本页一样（数组 + 链表 + 红黑树，2 的幂，扩容翻倍）。区别在并发控制：空桶用 CAS 放第一个节点，非空桶只锁那个桶的头节点；扩容时多个线程一起搬，读不加锁。所以⑤ 里它一个都没丢。细节在 J02，以及补给“HashMap 与 ConcurrentHashMap 源码”（待做）。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">面试官会怎么问</span></div>
+  <div class="faq">
+    <details><summary>说一下 HashMap 的 put 过程。</summary><p>按④-2 的 9 步说：算 hash（扰动）→ 表空则初始化 → 定位桶 → 空桶直接放 → 比首节点 → 树节点走树插入 → 沿链表找相等的 key 或挂到尾巴，到 9 个尝试树化（数组小于 64 则扩容）→ 已存在就替换并返回旧值 → 新增则 modCount++、++size 超过阈值就扩容 → 返回 null。</p></details>
+    <details><summary>为什么容量是 2 的幂？扩容为什么是 2 倍？</summary><p>2 的幂让 <code>hash % n</code> 变成 <code>hash &amp; (n−1)</code>；翻倍后还是 2 的幂，扩容时每个节点只看 <code>hash &amp; oldCap</code> 一位，留在原位或搬到原位 + oldCap，不用重新算（④-5）。</p></details>
+    <details><summary>为什么要扰动？为什么是异或高 16 位？</summary><p>下标只用 hash 的低几位，高位的差别用不上。异或把高位信息带到低位，一次移位一次异或，几乎零成本（④-1）。</p></details>
+    <details><summary>什么时候树化？为什么是 8，为什么还有 64 和 6？</summary><p>链表到 9 个（源码 <code>binCount &gt;= 7</code>）且数组不小于 64；数组小就先扩容。8 是按泊松分布几乎碰不到的长度；6 留出回退的余量，避免来回变（④-4）。</p></details>
+    <details><summary>HashMap 线程安全吗？JDK 7 和 8 出的问题一样吗？</summary><p>不安全。JDK 7 并发扩容可能成环，get 死循环；JDK 8 尾插不成环，但仍然丢数据、size 不准，computeIfAbsent 可能抛 CME（⑤ 第 5 段，⑥-3）。</p></details>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span></div>
+  <ul class="next">
+    <li>ConcurrentHashMap：CAS 放首节点、锁桶头、多线程协助扩容、<code>sizeCtl</code> 和 <code>CounterCell</code>（J02，补给待做页）</li>
+    <li>红黑树本身：插入后的旋转和变色，<code>TreeNode</code> 为什么还保留 next 指针</li>
+    <li>LinkedHashMap 的 LRU、WeakHashMap 和内存泄漏（J03）</li>
+    <li>开放寻址的 ThreadLocalMap：为什么它用线性探测，和 ThreadLocal 内存泄漏（J02）</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div>
+    <h2><span class="sn">↺</span>回到⑤：过关题，以及改造练习</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="done"><h4>过关题 1：讲 put 的全过程</h4><p>合上页面，在纸上画出④-2 的 9 步，每一步说出“为什么要这一步”。然后打开 ⑤ 的 Demo，在 <code>catalog.put(344L, …)</code> 处打断点，单步进 <code>HashMap.putVal</code>，看你画的分支对不对。</p><p class="uses">讲出来以后告诉我，地图上这一项可以标成“讲出”</p></div>
+    <div class="exc" data-role="done"><h4>过关题 2：讲扩容为什么是 2 倍</h4><p>用 88 和 344 举例，说清：长度 256 时它们为什么在同一格，扩到 512 时为什么一个不动、一个搬到 344，如果扩成 3 倍（768）会失去什么。</p><p class="uses">用到：④-3、④-5</p></div>
+    <div class="exc" data-role="pd"><h4>改造：给 catalog 定容量、换并发 Map</h4><p>把 catalog 改成 <code>new HashMap&lt;&gt;(134)</code>，用 Peek 确认放 100 个不再扩容；把第 5 段的 HashMap 换成 ConcurrentHashMap，跑 3 次，确认一个不少。</p><p class="uses">用到：坑 2、坑 3</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出 HashMap 的精华。</summary><p>把任意 key 用“hashCode → 扰动 → 与上长度减一”换算成数组下标，碰撞挂链表、太长变树；长度保持 2 的幂，让定位和扩容都只是位运算。</p></details>
+    <details><summary>2. 不用哈希，按 key 找有什么老办法？疼在哪？</summary><p>挨个比 O(n)；排序后二分 O(log n) 且要求可比较；直接当下标只适用于小范围整数（②）。</p></details>
+    <details><summary>3. 改了 key 以后取不出来，根源是哪条原理？</summary><p>下标由 hash 决定，节点还存着旧 hash，留在旧桶里；新 hash 指向别的桶（④-1，坑 1）。</p></details>
+    <details><summary>4. 预测：把⑤第 3 段的 BadKey 放进 <code>new HashMap&lt;&gt;(64)</code>，第几个会变成 TreeNode？</summary><p>第 9 个。数组一开始就是 64（第一次 put 时按 64 分配，阈值 48），链表挂到第 9 个时 treeifyBin 发现数组不小于 64，直接树化，不再扩容（④-2 第 6 步、④-4）。</p></details>
+    <details><summary>5. 预测：一个 key 的 hashCode 是 1000，桶数组从 16 扩到 32，它从哪个下标搬到哪个下标？</summary><p>1000 的二进制是 11 1110 1000。扰动后不变（只有低位）。16 时看低 4 位 1000 → 下标 8；32 时多看第 5 位（值 16），1000 &amp; 16 = 0，所以留在 8。若是 1016（多一个 16），就会搬到 8 + 16 = 24（④-3）。</p></details>
+    <details><summary>6. 放回全景：第 4 站前后各发生了什么？这一页讲的东西坏了，整条链路会怎样？</summary><p>前面是第 3 站进入 Spring 代理、开了事务；后面是第 5 站拿着查到的 Product new 出 Order。如果商品 key 用了可变对象或没写 hashCode，第 4 站 get 返回 null，第 5 站之前就抛“没有商品 88”，用户看到 400；如果 hashCode 全撞又不可比较，第 4 站从几十微秒变成几毫秒，所有下单接口一起变慢。第 8 站的 userOrders 被多个 Tomcat 线程同时写，会悄悄丢掉用户的订单记录，“我的订单”里少一单，日志里什么都没有。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。实验在本机 JDK 17.0.20（2 核 ARM）：⑤ 的 Demo 6 段，用反射读 <code>table</code>、<code>threshold</code> 和节点类型（加 <code>--add-opens java.base/java.util=ALL-UNNAMED</code>），第 4 段跑了两遍；另用一个探针验证 <code>new HashMap&lt;&gt;(100)</code> 和 <code>(134)</code> 放 100 个后的容量、65536 倍数的扰动下标。标“实测”的都来自这些运行。</p>
+  <p>按源码（openjdk/jdk17u 的 HashMap.java）：<code>hash()</code>、<code>putVal</code>、<code>resize</code> 的 lo / hi 拆分、<code>treeifyBin</code>，常量 16、0.75、8、6、64，以及源码注释里的泊松分布表和“TreeNode 约为普通节点两倍大”。按文档和历史资料：Hashtable 的 11 和 2n+1、JDK 7 头插成环、2011 年的哈希碰撞攻击、JDK 19 的 <code>HashMap.newHashMap</code>。JDK 版本约定：知识点实验用 JDK 17，交易靶场和全景页用 JDK 21。</p>
+  <p>相关：<a href="../java/pano-j01-order-object-life.html">全景：一个订单对象的一生</a> · <a href="collections-choose.html">常用集合怎么选</a> · <a href="oop-generics-erasure.html">面向对象和泛型</a> · <a href="../juc/java-memory-model.html">Java 内存模型</a> · 回到 <a href="../java/roadmap.html#j01">Java 地图 J01</a></p>
+</footer>
+
+</main>
+<script>
+/*SIM-START*/
+// 和 JDK 17 HashMap 一致的简化模型：整数 key（0..2^31-1），hashCode = key 本身
+const LF = 0.75, TREEIFY = 8, UNTREEIFY = 6, MIN_TREE_CAP = 64;
+function spread(h, on) { return on ? (h ^ (h >>> 16)) >>> 0 : h; }
+function empty(spreadOn) { return { cap: 0, thr: 0, size: 0, buckets: [], tree: [], spreadOn: spreadOn !== false }; }
+function clone(s) { return { cap: s.cap, thr: s.thr, size: s.size, buckets: s.buckets.map(b => b.slice()), tree: s.tree.slice(), spreadOn: s.spreadOn }; }
+function resize(s, log) {
+  const old = s.cap, n = old === 0 ? 16 : old * 2;
+  const nb = Array.from({ length: n }, () => []), nt = new Array(n).fill(false);
+  let moved = 0;
+  for (let i = 0; i < old; i++) {
+    const lo = [], hi = [];
+    for (const e of s.buckets[i]) ((e.hash & old) === 0 ? lo : hi).push(e);
+    if (hi.length) moved += hi.length;
+    nb[i] = lo; nb[i + old] = hi;
+    if (s.tree[i]) { nt[i] = lo.length > UNTREEIFY; nt[i + old] = hi.length > UNTREEIFY; }
+  }
+  s.cap = n; s.thr = Math.floor(n * LF); s.buckets = nb; s.tree = nt;
+  log.push(old === 0 ? "表还没分配：resize() 建 16 格，阈值 12" : "扩容 " + old + " → " + n + "，阈值 " + s.thr + "；看 hash & " + old + "：" + moved + " 个节点搬到“原位 + " + old + "”，其余留在原位");
+}
+function put(state, key) {
+  const s = clone(state), log = [];
+  const h = key >>> 0, hash = spread(h, s.spreadOn);
+  log.push("hashCode = " + h + (s.spreadOn ? "，扰动后 " + hash : "，不扰动"));
+  if (s.cap === 0) resize(s, log);
+  let i = hash & (s.cap - 1);
+  log.push("下标 = (" + s.cap + " − 1) & " + hash + " = " + i);
+  const b = s.buckets[i];
+  const hit = b.findIndex(e => e.key === key);
+  if (hit >= 0) { log.push("桶里已有 " + key + "：替换 value，返回旧值，size 不变"); return { state: s, log, idx: i }; }
+  if (b.length === 0) log.push("桶是空的：直接放");
+  else if (s.tree[i]) log.push("桶是红黑树：按树插入");
+  else log.push("桶里有 " + b.length + " 个：沿链表走到尾，挂上（尾插）");
+  b.push({ key, hash });
+  if (!s.tree[i] && b.length >= TREEIFY + 1) {
+    if (s.cap < MIN_TREE_CAP) { log.push("链表到 " + b.length + " 个，但数组 " + s.cap + " < 64：不树化，改为扩容"); resize(s, log); }
+    else { s.tree[i] = true; log.push("链表到 " + b.length + " 个，数组 ≥ 64：变成红黑树"); }
+  }
+  s.size++;
+  if (s.size > s.thr) { log.push("size " + s.size + " > 阈值 " + s.thr); resize(s, log); }
+  i = hash & (s.cap - 1);
+  return { state: s, log, idx: i };
+}
+function run(keys, spreadOn) {
+  let s = empty(spreadOn), last = null;
+  for (const k of keys) { last = put(s, k); s = last.state; }
+  return { state: s, last };
+}
+const PRESETS = {
+  seq: { keys: Array.from({ length: 13 }, (_, i) => i + 1), spreadOn: true },
+  tree: { keys: Array.from({ length: 11 }, (_, i) => 5 + 64 * i), spreadOn: true },
+  hi: { keys: Array.from({ length: 12 }, (_, i) => 65536 * (i + 1)), spreadOn: true },
+  "hi-off": { keys: Array.from({ length: 12 }, (_, i) => 65536 * (i + 1)), spreadOn: false }
+};
+/*SIM-END*/
+(() => {
+  const grid = document.getElementById("hgrid"), stat = document.getElementById("hstat"), logEl = document.getElementById("hlog");
+  const input = document.getElementById("hk");
+  let st = empty(true), lastIdx = -1;
+  function render(log) {
+    stat.textContent = st.cap === 0 ? "还没放东西：桶数组没分配。" :
+      "桶数组 " + st.cap + " 格 · size " + st.size + " · 阈值 " + st.thr + (st.spreadOn ? "" : " · 扰动已关") + (st.cap > 64 ? " · 只画前 64 格" : "");
+    grid.innerHTML = "";
+    const shown = Math.min(st.cap, 64);
+    for (let i = 0; i < shown; i++) {
+      const cell = document.createElement("div");
+      const b = st.buckets[i];
+      cell.className = "hc" + (b.length ? " full" : "") + (st.tree[i] ? " tree" : "") + (b.length >= 3 && !st.tree[i] ? " long" : "") + (i === lastIdx ? " last" : "");
+      const n = document.createElement("b"); n.textContent = i; cell.append(n);
+      if (b.length) {
+        const s = document.createElement("span");
+        s.textContent = st.tree[i] ? "树 · " + b.length + " 个" : b.map(e => e.key).join(" → ");
+        s.title = b.map(e => e.key).join(", ");
+        cell.append(s);
+      }
+      grid.append(cell);
+    }
+    logEl.innerHTML = "";
+    (log || []).forEach(t => { const li = document.createElement("li"); li.textContent = t; logEl.append(li); });
+  }
+  function doPut(k) {
+    const r = put(st, k);
+    st = r.state; lastIdx = r.idx;
+    render(["put(" + k + ")"].concat(r.log));
+  }
+  document.getElementById("hput").addEventListener("click", () => {
+    const v = Number(input.value);
+    if (!Number.isInteger(v) || v < 0 || v > 2147483647) { render(["请输入 0～2147483647 之间的整数"]); return; }
+    doPut(v);
+  });
+  input.addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("hput").click(); });
+  document.getElementById("hreset").addEventListener("click", () => { st = empty(st.spreadOn); lastIdx = -1; render(); });
+  document.querySelectorAll("#hlab .presets button").forEach(btn => btn.addEventListener("click", () => {
+    const p = PRESETS[btn.dataset.p];
+    document.querySelectorAll("#hlab .presets button").forEach(b => b.setAttribute("aria-pressed", String(b === btn)));
+    const r = run(p.keys, p.spreadOn);
+    st = r.state; lastIdx = r.last.idx;
+    render(["依次 put：" + p.keys.join("、"), "最后一次 put(" + p.keys[p.keys.length - 1] + ")："].concat(r.last.log));
+  }));
+  render();
+})();
+</script>
+
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
