@@ -102,6 +102,7 @@
 | 02 | [ThreadPoolExecutor.execute 源码](https://archeu.github.io/study-notes/juc/threadpool-execute.html) | execute 的三个 if、ctl 的位、Worker 和 getTask、放进队列后的复查和线程退出前的检查、几件只能靠源码解释的怪事、各版本差异，线程调度实验台 |
 | 03 | [AQS 源码](https://archeu.github.io/study-notes/juc/aqs.html) | state 加等待队列、独占和共享、Condition 的两条队、公平与非公平、JDK 8 和 17 / 21 两代源码对照、日常开发里哪些框架和 JDK 类用到了它，三个 JDK 实测和实验台 |
 | 04 | [Java 内存模型](https://archeu.github.io/study-notes/juc/java-memory-model.html) | 写了不等于别人看到：重排序从哪来、happens-before 规则和推导、为什么只保证没有数据竞争的程序、volatile / synchronized / final 各保证什么、内存屏障和 VarHandle，可见性和重排序实测（JDK 17，ARM），双重检查锁分步推演 |
+| 05 | [线程、线程状态与上下文切换](https://archeu.github.io/study-notes/juc/thread-state-context-switch.html) | Java 线程和内核线程 1:1、线程创建成本、六种状态和内核状态对照（RUNNABLE 也可能在 IO 里睡着）、读线程转储、两种上下文切换和怎么数、线程数公式、中断和守护线程，JDK 17 实测（/proc 对照、512 线程慢 36%、一次交接 3.9 微秒、新建线程 82 微秒），线程状态机实验台 |
 
 ## 网络
 

@@ -1,0 +1,1097 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>线程、线程状态与上下文切换</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a mechanism topic (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), depth 懂机制, JDK 17; J02 knowledge point 1. Roles: pd blue = RUNNABLE and platform threads, cg purple = BLOCKED (synchronized), g2 brown = WAITING, rn pink = TIMED_WAITING, bk teal = kernel side and context switches, neutral grey = NEW / TERMINATED / old ways, bad red = pitfalls, good green = right way.
+   Interaction (one): a thread state machine lab in ④-2: pick an action, see the Java state, the kernel state, the thread-dump line and the voluntary / nonvoluntary switch counters. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:1.6}
+.sm{display:flex;flex-direction:column;gap:14px;outline:none}
+.smap .nd rect{fill:var(--card);stroke:var(--rc);stroke-width:1.8;transition:fill .2s,stroke-width .2s}
+.smap .nd text{fill:var(--ink)}
+.smap .nd .t-xs{fill:var(--muted)}
+.smap .nd.on rect{fill:var(--rt);stroke-width:3.4}
+.smap .grp{fill:none;stroke:var(--rc);stroke-width:1.4;stroke-dasharray:6 5}
+.smap .gl{fill:var(--rc)}
+.sm-panel{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:14px 18px;align-items:start}
+.sm-now{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.sm-now p{display:grid;grid-template-columns:5.2em minmax(0,1fr);gap:10px;font-size:15px;align-items:baseline}
+.sm-now .lbl{font-size:13px;color:var(--muted);font-weight:700}
+.sm-now code{font-size:12.5px;overflow-wrap:anywhere}
+.sm-now #sm-java{font-family:var(--font-mono);font-size:17px}
+.sm-acts{display:flex;flex-wrap:wrap;gap:8px;align-content:flex-start;min-width:0}
+.sm-acts .btn.vol{border-color:var(--bk)}
+.sm-acts .btn.non{border-color:var(--bad)}
+.sm-note{grid-column:1 / -1;font-size:15px;background:var(--bk-tint);border-radius:10px;padding:10px 14px}
+.sm-panel .run-row{grid-column:1 / -1}
+@media (max-width:760px){.sm-panel{grid-template-columns:minmax(0,1fr)}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 并发</span><span aria-hidden="true">/</span><span class="tb-here">线程、线程状态与上下文切换</span></div></nav>
+<main>
+
+<header class="hero">
+  <p class="kicker">内核线程 · 1:1 · 线程栈 · NEW / RUNNABLE / BLOCKED / WAITING / TIMED_WAITING / TERMINATED · jcmd Thread.print · /proc · 上下文切换 · 主动让出 · 被抢占 · 线程数估算 · interrupt · 守护线程</p>
+  <h1>线程：一个 Java 线程就是一个内核线程，状态是 JVM 贴的标签，切换是内核做的</h1>
+  <p class="lead">Java 的 <code>Thread</code> 背后是一个真正的操作系统线程，<b>由内核决定它什么时候上 CPU、什么时候被换下来</b>。<code>Thread.State</code> 的六种状态只说明它在 Java 层面等什么：等锁、等通知、等时间到；它在 socket 上干等时，Java 照样说它是 RUNNABLE。线程被换下 CPU 叫上下文切换，一次几微秒；线程开得越多，切得越频繁。读懂这三件事，才看得懂线程转储，也才估得出线程池该开多大。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j02-order-in-threadpool.html#s-4">一个下单请求在线程池里 · 第 1、2、4 站</a></span><span>地图：<a href="../java/roadmap.html#j02">J02 · 线程、线程状态与上下文切换（第 1 个知识点）</a></span><span>实验：JDK 17.0.20，2 核 ARM，Linux 6.8 <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div>
+    <h2><span class="sn">①</span>为什么需要：全景里有三站说不清</h2>
+    <p class="lead">在全景第 4 站，这一步要解决的是：exec-17 刚读到“还剩 1 件”，还没写回，<b>就被换下了 CPU</b>，exec-23 趁机也读到 1。谁决定换、什么时候换、换一次要多久？同一张全景里还有两个问题：第 1 站的 Acceptor 明明在干等新连接，线程转储却说它 RUNNABLE；第 2 站的 Tomcat 默认开到 200 个线程，为什么是 200，开 2000 个会不会更快？</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>全景里的现象</th><th>背后的问题</th><th>本页在哪讲</th></tr></thead>
+      <tbody>
+        <tr><th>第 4 站：读完库存被换下 CPU</th><td>线程什么时候被切走，切一次多贵</td><td>④-3、⑤ 实验 3</td></tr>
+        <tr><th>第 1 站：干等的 Acceptor 显示 RUNNABLE</th><td>Java 的线程状态和内核里的状态不是一回事</td><td>④-2、⑤ 实验 1</td></tr>
+        <tr><th>第 2 站：线程池开多少个</th><td>线程的成本，和“等待时间占多少”决定线程数</td><td>④-1、④-4、⑤ 实验 2、4</td></tr>
+        <tr><th>第 6 站：47 个线程同时 BLOCKED</th><td>BLOCKED、WAITING、TIMED_WAITING 各在等什么</td><td>④-2 状态机实验台</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="scene"><b>需求</b><span>地图上这一项的深度是“懂机制”：能说清 Java 线程和内核线程的关系，看到一份线程转储能讲出每个线程在等什么，知道上下文切换从哪来、怎么数，能按“计算多少、等待多少”估出线程数。后面的锁、线程池、ThreadLocal、虚拟线程都建在这一页上。</span></div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div>
+    <h2><span class="sn">②</span>没有它会怎样：一个线程处理所有请求</h2>
+    <p class="lead">假设订单服务只有一个线程。每个请求花 1 ms 算价，再花 20 ms 等数据库返回。等的那 20 ms，线程什么也不干，CPU 闲着，后面的请求只能排队。</p>
+  </div>
+  <div class="bars" aria-label="200 个任务，每个算 1 毫秒、等 20 毫秒，线程数不同时的总耗时，本机实测">
+    <p class="tip"><span class="tag-real">实测</span> JDK 17，2 核。200 个任务，每个“算 1 ms + 等 20 ms”，交给固定大小的线程池。条形按对数刻度。</p>
+    <div class="bar" data-role="bad"><span>2 个线程</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="val">2113 ms</span></div>
+    <div class="bar" data-role="other"><span>8 个线程</span><span class="track"><span class="fill" style="width:62%"></span></span><span class="val">532 ms</span></div>
+    <div class="bar" data-role="done"><span>32 个线程</span><span class="track"><span class="fill" style="width:30%"></span></span><span class="val">153 ms</span></div>
+    <div class="bar" data-role="done"><span>128 个线程</span><span class="track"><span class="fill" style="width:30%"></span></span><span class="val">150 ms</span></div>
+  </div>
+  <ul class="pains">
+    <li>只有两个线程时，CPU 绝大部分时间在等：每 21 ms 里只算了 1 ms。一个线程一次只能等一件事。</li>
+    <li>线程从 2 个加到 32 个，快了 14 倍；再加到 128 个，几乎没变，因为这时 CPU 已经忙满了。</li>
+    <li class="ok">缺的那一块：<b>让“等”的时候把 CPU 让给别人</b>。多个线程各等各的，内核把 CPU 轮流分给此刻有活干的线程。代价是每个线程都要内存，换来换去也要时间。</li>
+  </ul>
+  <p class="mismatch">不懂这一点时的典型误用：接口慢了就把线程池从 200 调到 2000。如果慢在等下游，确实会快一点；如果慢在 CPU 或者锁上，线程越多切换越多、排队越长，反而更慢（⑤ 实验 1、⑥ 坑 3）。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div>
+    <h2><span class="sn">③</span>相邻方案：让多件事同时进行的四种做法</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>谁来调度</th><th>一件事等待时</th><th>成本</th><th>Java 里的例子</th></tr></thead>
+      <tbody>
+        <tr><th>多进程</th><td>内核</td><td>内核换别的进程上</td><td>最重：各有一份内存</td><td>起多个 JVM</td></tr>
+        <tr class="hl"><th>平台线程（1:1）</th><td>内核</td><td>内核换别的线程上</td><td>每个约几十微秒创建、一块栈；切换几微秒</td><td><code>new Thread</code>、线程池、Tomcat exec 线程</td></tr>
+        <tr><th>虚拟线程（M:N）</th><td>JVM 把很多虚拟线程放到少数平台线程上</td><td>JVM 把它从平台线程上卸下来</td><td>很轻：栈在堆上，按需长</td><td>JDK 21 <code>Thread.ofVirtual()</code></td></tr>
+        <tr><th>事件循环</th><td>你自己的代码</td><td>注册回调，线程去处理别的事件</td><td>最轻，但代码要写成回调或响应式</td><td>Netty、Tomcat 的 Poller、WebFlux</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line">选择规则：日常 Java 后端就是平台线程加线程池；连接很多、大部分时间在等 IO 时考虑虚拟线程或事件循环。后两者都建在平台线程上，所以<b>本页学平台线程</b>：Java 线程、内核线程、状态和切换。虚拟线程是 J02 最后一个知识点，事件循环见 <a href="../network/io-models.html">网络 IO 模型</a>。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div>
+    <h2><span class="sn">④</span>原理：一个线程从 new 到结束</h2>
+  </div>
+  <div class="todo">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>CPU 核</b>：一个核同一时刻只能执行一条指令流。2 核机器上，同一瞬间最多 2 个线程真正在跑，其他的都在等。</li>
+      <li><b>内核态</b>：创建线程、睡眠、唤醒、切换都要进操作系统内核，一次进出就有几百纳秒以上的开销。</li>
+      <li><b>/proc</b>：Linux 把每个进程、每个线程的信息做成文件。<code>/proc/&lt;pid&gt;/task/</code> 下面一个目录就是一个线程。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-11"><span class="sn">④-1</span>一个 Java 线程 = 一个内核线程</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 250" role="img" aria-label="Java 线程的四层：堆里的 Thread 对象，HotSpot 里的 JavaThread 结构，一个 pthread 加一块约 2 MB 的栈，内核里一个任务，有自己的线程号，在 /proc/self/task 下面能看到，内核调度器决定它什么时候上 CPU。">
+        <g class="t-s">
+          <rect x="16" y="30" width="200" height="120" rx="12" class="b-pd"/>
+          <text x="30" y="56" class="t-b">Thread 对象</text>
+          <text x="30" y="80">在 Java 堆里</text>
+          <text x="30" y="100" class="t-mono">name = "exec-17"</text>
+          <text x="30" y="120" class="t-mono">getState()</text>
+          <rect x="252" y="30" width="200" height="120" rx="12" class="b-neu"/>
+          <text x="266" y="56" class="t-b">JavaThread</text>
+          <text x="266" y="80">HotSpot 里的 C++ 结构</text>
+          <text x="266" y="100">记着线程状态、</text>
+          <text x="266" y="120">持有的锁、中断位</text>
+          <rect x="488" y="30" width="200" height="120" rx="12" class="b-neu"/>
+          <text x="502" y="56" class="t-b">pthread + 栈</text>
+          <text x="502" y="80">栈默认 1 MB（x64）</text>
+          <text x="502" y="100">本机 ARM 是 2 MB</text>
+          <text x="502" y="120">先占地址，用到才给内存</text>
+          <rect x="724" y="30" width="220" height="120" rx="12" class="b-bk"/>
+          <text x="738" y="56" class="t-b">内核任务</text>
+          <text x="738" y="80" class="t-mono">tid 931043</text>
+          <text x="738" y="100" class="t-mono">/proc/self/task/931043</text>
+          <text x="738" y="120">调度器决定它何时上 CPU</text>
+        </g>
+        <g class="e-ink"><line x1="216" y1="90" x2="248" y2="90" marker-end="url(#ar)"/><line x1="452" y1="90" x2="484" y2="90" marker-end="url(#ar)"/><line x1="688" y1="90" x2="720" y2="90" marker-end="url(#ar)"/></g>
+        <text x="16" y="186" class="t-s">← Java 能看到的</text>
+        <text x="944" y="186" class="t-s" text-anchor="end">操作系统能看到的 →</text>
+        <text x="16" y="220" class="t-s"><tspan class="t-b">start()</tspan> 时才建出后三层：这一步要进内核，<tspan class="t-bad">本机实测一个线程从新建到结束约 82～94 微秒</tspan>；交给已有线程做同样的事约 9 微秒。</text>
+        <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+      </svg>
+    </div>
+    <figcaption>HotSpot 在 Linux 上是 1:1：一个 Java 线程对应一个内核线程，内核还用 Java 线程名的前 15 个字符给它命名，所以 <code>top -H</code>、<code>/proc</code> 里能直接看到 exec-17。<span class="tag-real">实测</span> 一个只起了 8 个业务线程的程序，内核里有 25 个线程：多出来的是 GC、JIT 编译器、引用处理这些 JVM 自己的线程。</figcaption>
+  </figure>
+
+  <h3 id="m-12"><span class="sn">④-2</span>六种状态：JVM 只告诉你“在 Java 层面等什么”</h3>
+  <p class="lead">先在下面这台状态机上走一遍：挑一个动作，看 Java 说它是什么状态、内核说它是什么状态、线程转储里那一行长什么样。</p>
+  <div class="lab sm" id="sm" tabindex="0" aria-label="线程状态机实验台">
+    <div class="fig-box wide">
+      <svg class="sv smap" viewBox="0 0 960 344" role="img" aria-label="线程状态机：NEW；RUNNABLE 里分三种：排队等 CPU、在 CPU 上、阻塞在本地 IO；BLOCKED；WAITING 里分 Object.wait 和 park 两种；TIMED_WAITING；TERMINATED。当前状态高亮。">
+        <g class="nd" data-n="NEW" data-role="other"><rect x="16" y="140" width="110" height="56" rx="10"/><text x="30" y="166" class="t-b">NEW</text><text x="30" y="184" class="t-xs">new 了还没 start</text></g>
+        <rect x="160" y="16" width="340" height="300" rx="14" class="grp" data-role="pd"/>
+        <text x="176" y="40" class="t-b gl">RUNNABLE</text><text x="282" y="40" class="t-xs">（Java 只有这一个标签）</text>
+        <g class="nd" data-n="READY" data-role="pd"><rect x="178" y="56" width="304" height="70" rx="10"/><text x="194" y="84" class="t-b">排队等 CPU</text><text x="194" y="106" class="t-xs">内核 R：可运行，在就绪队列里</text></g>
+        <g class="nd" data-n="RUN" data-role="pd"><rect x="178" y="138" width="304" height="70" rx="10"/><text x="194" y="166" class="t-b">在 CPU 上执行</text><text x="194" y="188" class="t-xs">内核 R：正在某个核上跑</text></g>
+        <g class="nd" data-n="IO" data-role="pd"><rect x="178" y="220" width="304" height="80" rx="10"/><text x="194" y="248" class="t-b">阻塞在本地 IO</text><text x="194" y="270" class="t-xs">内核 S：睡着，等数据到</text><text x="194" y="288" class="t-xs">accept()、read()、epoll_wait()</text></g>
+        <g class="nd" data-n="BLOCKED" data-role="cg"><rect x="540" y="16" width="230" height="64" rx="10"/><text x="556" y="42" class="t-b">BLOCKED</text><text x="556" y="64" class="t-xs">等着进 synchronized</text></g>
+        <rect x="540" y="96" width="230" height="140" rx="14" class="grp" data-role="g2"/>
+        <text x="556" y="118" class="t-b gl">WAITING</text><text x="640" y="118" class="t-xs">等别人叫醒，不限时</text>
+        <g class="nd" data-n="WAIT_MON" data-role="g2"><rect x="552" y="130" width="206" height="44" rx="9"/><text x="566" y="157" class="t-s">Object.wait()</text></g>
+        <g class="nd" data-n="WAIT_PARK" data-role="g2"><rect x="552" y="182" width="206" height="44" rx="9"/><text x="566" y="209" class="t-s">park()：队列 take、锁等待</text></g>
+        <g class="nd" data-n="TIMED" data-role="rn"><rect x="540" y="252" width="230" height="64" rx="10"/><text x="556" y="278" class="t-b">TIMED_WAITING</text><text x="556" y="300" class="t-xs">sleep、带超时的 wait / park</text></g>
+        <g class="nd" data-n="TERM" data-role="other"><rect x="814" y="140" width="130" height="56" rx="10"/><text x="828" y="166" class="t-b">TERMINATED</text><text x="828" y="184" class="t-xs">run() 返回了</text></g>
+        <text x="655" y="330" class="t-xs" text-anchor="middle">右边这几种，内核里都是 S（睡着）</text>
+      </svg>
+    </div>
+    <div class="sm-panel">
+      <div class="sm-now">
+        <p><span class="lbl">Java 说</span><b id="sm-java">NEW</b></p>
+        <p><span class="lbl">内核说</span><b id="sm-kern">还没有内核线程</b></p>
+        <p><span class="lbl">线程转储</span><code id="sm-dump">（不出现）</code></p>
+        <p class="sm-cs"><span class="lbl">切换次数</span><span>主动让出 <b id="sm-vol">0</b> · 被抢占 <b id="sm-non">0</b></span></p>
+      </div>
+      <div class="sm-acts" id="sm-acts" aria-label="可以做的动作"></div>
+      <p class="sm-note" id="sm-note" aria-live="polite">从 NEW 开始。点 start()。</p>
+      <div class="run-row"><button class="btn" type="button" id="sm-reset">从头来</button><span class="tip">动作按钮只列出当前状态下能发生的事。试试在 BLOCKED、阻塞在 IO、WAITING 时分别点 interrupt()。</span></div>
+    </div>
+  </div>
+  <ul class="callouts">
+    <li><b>1</b><span><b>RUNNABLE 不等于在跑。</b>它包括在 CPU 上跑、排队等 CPU、阻塞在本地方法里三种。JVM 看不到本地代码在内核里干什么，只知道“它没在等 Java 的锁或通知”，所以一律标 RUNNABLE。<span class="tag-real">实测</span> 等新连接的 acceptor 线程：Java 说 RUNNABLE，内核说 S，<code>cpu=0.57ms</code>；死循环的 price-calc：两边都是 R，<code>cpu=3226ms</code>。</span></li>
+    <li><b>2</b><span><b>BLOCKED 只有一个来源：进 synchronized 时锁被别人拿着</b>（包括 <code>wait()</code> 被叫醒后要重新拿回锁）。<code>ReentrantLock</code>、阻塞队列等不到时是 WAITING，因为它们底下用的是 <code>LockSupport.park</code>，不是 synchronized。全景第 6 站那 47 个线程是 BLOCKED，就是因为用了 synchronized。</span></li>
+    <li><b>3</b><span><b>WAITING 和 TIMED_WAITING 只差一个超时。</b><code>wait()</code>、<code>join()</code>、<code>park()</code> 不限时；<code>sleep(ms)</code>、<code>wait(ms)</code>、<code>parkNanos</code> 限时。线程转储括号里还会写清是 <code>(on object monitor)</code>、<code>(parking)</code> 还是 <code>(sleeping)</code>。</span></li>
+    <li><b>4</b><span><b>状态和“持有什么”无关。</b><span class="tag-real">实测</span> exec-17 拿着库存锁在里面 <code>sleep</code>，它是 TIMED_WAITING，转储里有一行 <code>- locked &lt;0x…be98&gt;</code>；exec-23 等同一把锁，是 BLOCKED，转储写 <code>- waiting to lock &lt;0x…be98&gt;</code>。按地址就能找到谁卡住了谁。</span></li>
+  </ul>
+
+  <h3 id="m-13"><span class="sn">④-3</span>上下文切换：内核把一个线程换下 CPU，换另一个上来</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 250" role="img" aria-label="2 个 CPU 核上的时间线。核 0：exec-17 执行 SELECT 后时间片到，被抢占，换成 exec-23 读库存；exec-23 发 SQL 后主动让出，换回 exec-17。核 1：price-calc 一直在算。每次切换，内核把当前线程的寄存器存起来，把下一个线程的恢复回去。">
+        <text x="16" y="66" class="t-b">核 0</text>
+        <text x="16" y="146" class="t-b">核 1</text>
+        <rect x="80" y="44" width="260" height="36" rx="6" class="b-pd"/><text x="92" y="67" class="t-s">exec-17：SELECT qty，读到 1</text>
+        <rect x="350" y="44" width="40" height="36" rx="6" class="b-bk"/>
+        <rect x="400" y="44" width="230" height="36" rx="6" class="b-g2"/><text x="412" y="67" class="t-s">exec-23：也读到 1，发 UPDATE</text>
+        <rect x="640" y="44" width="40" height="36" rx="6" class="b-bk"/>
+        <rect x="690" y="44" width="250" height="36" rx="6" class="b-pd"/><text x="702" y="67" class="t-s">exec-17：接着写回 qty = 0</text>
+        <rect x="80" y="124" width="860" height="36" rx="6" class="b-neu"/><text x="92" y="147" class="t-s">price-calc：一直在算，时间片到了也没人跟它抢（就绪队列空）</text>
+        <text x="370" y="104" class="t-xs t-bad" text-anchor="middle">被抢占</text>
+        <text x="370" y="118" class="t-xs" text-anchor="middle">时间片到</text>
+        <text x="660" y="104" class="t-xs" text-anchor="middle">主动让出</text>
+        <text x="660" y="118" class="t-xs" text-anchor="middle">等数据库</text>
+        <rect x="80" y="182" width="860" height="56" rx="10" class="b-card"/>
+        <text x="96" y="206" class="t-s"><tspan class="t-b">每次切换（中间的小块）内核做的事：</tspan>把 exec-17 的寄存器、程序计数器、栈指针存进它的内核栈 → 挑下一个线程 → 恢复 exec-23 的那一份。</text>
+        <text x="96" y="226" class="t-s">同一进程的线程共用地址空间，不用换页表。直接开销几微秒；间接开销是新线程的数据不在 CPU 缓存里，前一段跑得慢。</text>
+      </svg>
+    </div>
+    <figcaption>线程号、时间是示意，两种切换是真的。<b>主动让出</b>（voluntary）：线程自己要等，sleep、等锁、等 IO、park；<b>被抢占</b>（nonvoluntary）：时间片用完，或者有更该跑的线程醒了。Linux 给每个线程分别计数，在 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/status</code> 里叫 <code>voluntary_ctxt_switches</code> 和 <code>nonvoluntary_ctxt_switches</code>；全机每秒总数看 <code>vmstat 1</code> 的 <code>cs</code> 列。</figcaption>
+  </figure>
+  <ul class="callouts">
+    <li><b>1</b><span>主动让出多：线程大部分时间在等，看是在等锁（BLOCKED 多不多）还是在等 IO。被抢占多：可运行的线程比核多，CPU 不够分。</span></li>
+    <li><b>2</b><span><span class="tag-real">实测</span> 两个线程用 <code>park / unpark</code> 来回交接 20 万次，平均一次 3.4～3.9 微秒，几乎每次都是一次主动让出。这就是“叫醒另一个线程干活”的最低代价，也是为什么锁竞争激烈时吞吐会掉。</span></li>
+  </ul>
+
+  <h3 id="m-14"><span class="sn">④-4</span>线程开多少：看一个任务里“等”占多少</h3>
+  <div class="formula">
+    <p class="f">线程数 ≈ 核数 × (1 + <em>等待时间</em> ÷ <em>计算时间</em>)</p>
+    <p>出处是《Java 并发编程实战》（Goetz）。纯计算的任务，等待为 0，线程数 ≈ 核数（常见写法 N + 1）；等下游、等数据库的任务，等得越久，越要多开。<span class="tag-real">实测</span> 2 核、每个任务算 1 ms 等 20 ms：公式给出 2 × 21 = 42。32 个线程 153 ms，128 个线程 150 ms，过了 42 再加就没用了。</p>
+    <p>公式只给起点。等待时间要从监控里量（接口 P50 的耗时里有多少在等下游），最后靠压测定。Tomcat 默认 200，是给“大多数时间在等数据库”的典型 Web 应用留的余量。</p>
+  </div>
+
+  <h3 id="m-15"><span class="sn">④-5</span>线程怎么停：中断是请求，守护线程不等</h3>
+  <ul class="callouts">
+    <li><b>1</b><span><code>t.interrupt()</code> 只是把 t 的中断位置成 true。t 正在 <code>sleep</code>、<code>wait</code>、<code>join</code> 时，会抛 <code>InterruptedException</code> 并<b>清掉</b>中断位；在 <code>park</code> 时直接返回，中断位保持 true；在等 synchronized 或者阻塞在传统 Socket 读写时，什么也不发生，接着等。NIO 的可中断通道（<code>InterruptibleChannel</code>）会被关掉，抛 <code>ClosedByInterruptException</code>。</span></li>
+    <li><b>2</b><span>所以停一个线程靠它自己配合：循环里检查 <code>Thread.currentThread().isInterrupted()</code>，捕获 <code>InterruptedException</code> 后要么往上抛，要么调 <code>interrupt()</code> 把中断位补回去。<code>Thread.stop()</code> 会在任意一行把线程打死、锁也来不及好好释放，早就废弃，JDK 20 起直接抛 <code>UnsupportedOperationException</code>。</span></li>
+    <li><b>3</b><span><b>守护线程</b>（<code>setDaemon(true)</code>）：JVM 只剩守护线程时就退出，不等它们跑完，它们的 <code>finally</code> 也不执行。GC 线程、J01 全景里取消订单的 <code>order-canceller</code> 都是守护线程。</span></li>
+  </ul>
+
+  <h3 id="m-16"><span class="sn">④-6</span>为什么这样设计：1:1，把调度交给内核</h3>
+  <div class="design">
+    <div class="way" data-role="pd">
+      <h4>1:1 平台线程<small>HotSpot 从 JDK 1.3 前后起在各平台都用</small></h4>
+      <ul class="pains">
+        <li class="ok">线程在 native 代码、系统调用里阻塞，只卡住它自己，内核把核给别人</li>
+        <li class="ok">天然用上多核：内核调度器把线程分到各个核上</li>
+        <li class="ok">JVM 不用自己写调度器，和 C 库、JNI、调试器、<code>top -H</code> 都对得上</li>
+        <li>每个线程一块栈，创建、切换都要进内核：几千个就到头了</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>M:N 绿色线程<small>JDK 1.1 在 Solaris 上用过，后来放弃</small></h4>
+      <ul class="pains">
+        <li class="ok">线程由 JVM 在用户态切换，又轻又快</li>
+        <li>早期实现只用一个内核线程：一个绿色线程卡在系统调用里，全部一起停；也用不上多核</li>
+        <li>JVM 要自己做调度，还得把每个阻塞的系统调用改成非阻塞</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict">决定胜负的约束：当年的关键是<b>阻塞的系统调用和多核</b>，内核线程两样都白给。代价是线程重，于是有了线程池。JDK 21 的虚拟线程又回到 M:N，是因为 JVM 终于把 JDK 里的阻塞 IO 都改造成了“等待时把虚拟线程卸下来”；没改造的地方（JDK 21 里的 synchronized、本地方法）就是 pinning 的坑。</p>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">API</span><b>最少要会的几行</b></div>
+<pre><code>Thread t = new Thread(task, "order-canceller");  <span class="cm">// 起名字，转储里才认得出</span>
+t.setDaemon(true);                               <span class="cm">// 守护线程：JVM 退出不等它</span>
+t.start();                                       <span class="cm">// 这时才建出内核线程；run() 只是普通方法调用</span>
+t.getState();                                    <span class="cm">// NEW / RUNNABLE / BLOCKED / WAITING / TIMED_WAITING / TERMINATED</span>
+t.interrupt();                                   <span class="cm">// 只是请求，见 ④-5</span>
+t.join();                                        <span class="cm">// 等它结束</span>
+
+<span class="cm"># 命令行</span>
+jcmd &lt;pid&gt; Thread.print                          <span class="cm"># 线程转储（jstack 同样）</span>
+grep ctxt /proc/&lt;pid&gt;/task/*/status              <span class="cm"># 每个线程的两种切换次数</span>
+vmstat 1                                         <span class="cm"># cs 列：全机每秒切换次数；r 列：可运行线程数</span>
+top -H -p &lt;pid&gt;                                  <span class="cm"># 每个线程占多少 CPU</span></code></pre>
+  </div>
+  <p class="tip">线程栈大小（<code>-Xss</code>）、线程转储在各版本里的格式、调度器的时间片，这些细节放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div>
+    <h2><span class="sn">⑤</span>亲眼看到：靶场里的线程，Java 和内核各说了什么</h2>
+    <p class="lead">两个程序，JDK 17 编译成 Java 8 字节码（<code>--release 8</code>），只用 JDK 自带的类。<code>States</code> 让靶场里几个线程各停在一种状态上，同时从 <code>/proc</code> 读内核状态；<code>CtxSwitch</code> 做四个小实验。完整代码：<a href="https://github.com/archeu/study-labs/tree/main/java/juc/thread-state-context-switch">study-labs/java/juc/thread-state-context-switch →</a></p>
+  </div>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">1</span><b>States.java</b> 节选</div>
+<pre><code><span class="cm">// exec-17 拿着库存锁在里面睡；exec-23 也要这把锁</span>
+start("exec-17", () -&gt; { synchronized (stockLock) { sleep(60_000); } });
+start("exec-23", () -&gt; { synchronized (stockLock) { sink++; } });
+<span class="cm">// 像 Tomcat 的 Acceptor：等新连接</span>
+start("acceptor", () -&gt; server.accept());
+<span class="cm">// 等支付回调；取消队列 take()</span>
+start("pay-waiter", () -&gt; { synchronized (payResult) { payResult.wait(); } });
+start("order-canceller", () -&gt; cancelQueue.take());
+
+<span class="cm">// 线程名 → 内核线程号：/proc/self/task/*/comm
+// 内核状态：/proc/self/task/&lt;tid&gt;/stat 里右括号后面那个字母</span>
+for (Thread t : ts)
+  System.out.printf("%-18s %-16s %s%n", t.getName(), t.getState(), kernelState(tid));</code></pre>
+      <p class="tip">真实代码是 Java 8 写法（匿名内部类），这里为了短写成 Lambda。</p>
+    </div>
+    <div>
+<pre class="console"><span class="w">$ java -cp … States</span>
+线程名            Java 状态       内核
+order-new         NEW             -（内核里没有）
+order-done        TERMINATED      -（内核里没有）
+price-calc        RUNNABLE        <b>R</b>
+<span class="r">acceptor          RUNNABLE        S</span>
+exec-17           TIMED_WAITING   S
+exec-23           BLOCKED         S
+pay-waiter        WAITING         S
+order-canceller   WAITING         S
+这个进程在内核里一共有 25 个线程</pre>
+<pre class="console"><span class="w">$ jcmd &lt;pid&gt; Thread.print   （节选）</span>
+"acceptor" … <b>cpu=0.57ms</b> … runnable
+   java.lang.Thread.State: RUNNABLE
+	at sun.nio.ch.Net.accept(Native Method)
+"exec-17" … waiting on condition
+   java.lang.Thread.State: TIMED_WAITING (sleeping)
+	- <b>locked</b> &lt;0x000000075121be98&gt;
+"exec-23" … waiting for monitor entry
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	- <span class="r">waiting to lock &lt;0x000000075121be98&gt;</span>
+"pay-waiter" … in Object.wait()
+   java.lang.Thread.State: WAITING (on object monitor)
+"order-canceller" … waiting on condition
+   java.lang.Thread.State: WAITING (parking)
+	at jdk.internal.misc.Unsafe.park(Native Method)
+"price-calc" … <b>cpu=3226.63ms</b> … runnable</pre>
+    </div>
+  </div>
+  <h3>CtxSwitch：四个实验</h3>
+<pre class="console"><span class="w">$ java -cp … CtxSwitch                     （两次运行，取第一次；第二次见 README）</span>
+CPU 核数 2，JDK 17.0.20.1
+<span class="w">== 1. 纯计算：总量相同（约 2 核 × 1 秒），分给不同个数的线程 ==</span>
+线程数   耗时ms   主动让出   被抢占
+     2     1025          0       333
+     8     1028          9      1180
+    64     1160         47      1455
+   <span class="r">512     1393         21      1842</span>
+<span class="w">== 2. 200 个任务，每个算 1 ms、等 20 ms ==</span>
+线程数   耗时ms   理论下限ms
+     2     2113       2100
+     8      532        525
+    <b>32      153        147</b>
+   128      150        120
+<span class="w">== 3. 两个线程来回交接（park / unpark）==</span>
+交接 200000 次，共 773 ms，<b>平均一次 3.9 微秒</b>
+两个线程合计：主动让出 179770 次，被抢占 2161 次
+<span class="w">== 4. 新建线程 vs 线程池 ==</span>
+新建、启动、等它结束一个线程：平均 <span class="r">82.0 微秒</span>
+同样的活交给已有线程（提交并等结果）：平均 <b>8.8 微秒</b></pre>
+  <ul class="callouts">
+    <li><b>1</b><span>实验 1：纯计算的活，2 个线程（等于核数）最快。512 个线程慢了 36%，被抢占次数涨到 5 倍多：总活不变，多出来的是切换和缓存失效。第二次运行同样是 512 个线程最慢（1399 ms）。</span></li>
+    <li><b>2</b><span>实验 2：等待占大头的活，线程数接近公式给的 42 时最好；128 个线程的下限受 CPU 限制（200 ms 计算 ÷ 2 核 + 20 ms），已经压不下去了。</span></li>
+    <li><b>3</b><span>实验 3 的 3.4～3.9 微秒包含 unpark 的系统调用、唤醒和一次切换；两次运行都是这个量级。实验 4：新建线程比复用贵 9～10 倍，这还没算线程栈占的内存。</span></li>
+  </ul>
+  <div class="done-box"><b>到这里已经能交差了：</b>你能读懂一份线程转储里每个线程在等什么，知道 RUNNABLE 不一定在跑，能用 <code>/proc</code> 和 <code>vmstat</code> 数切换次数，能按公式给线程池估个起点。<br><b>已知还没处理的细节：</b>转储里 RUNNABLE 的误读（<a href="#p-runnable">⑥ 坑 1</a>）、吞掉中断（<a href="#p-intr">⑥ 坑 2</a>）、线程越多越慢（<a href="#p-many">⑥ 坑 3</a>）、每请求新建线程和 OOM（<a href="#p-new">⑥ 坑 4</a>）、守护线程丢数据（<a href="#p-daemon">⑥ 坑 5</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div>
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-runnable"><b><em>坑 1</em>把 RUNNABLE 当成“在干活”<a class="root" href="#m-12">← ④-2 RUNNABLE 含 IO 阻塞</a></b>
+      <dl><dt>现象</dt><dd>CPU 打满，拿线程转储一看几十个 RUNNABLE，挨个查代码，最后发现大部分在 <code>socketRead0</code>、<code>epollWait</code> 里干等，真正吃 CPU 的只有两三个。<span class="seen">⑤ acceptor：RUNNABLE，cpu=0.57ms</span></dd>
+      <dt>根源</dt><dd>阻塞在本地方法里的线程，Java 也标 RUNNABLE。</dd>
+      <dt>做法</dt><dd class="fix">先 <code>top -H -p &lt;pid&gt;</code> 找到 CPU 高的线程号，转成十六进制，在转储里按 <code>nid=0x…</code> 找；或者隔几秒拿两份转储，看 <code>cpu=</code> 涨了多少。</dd></dl></div>
+    <div class="pit" id="p-intr"><b><em>坑 2</em>捕获 InterruptedException 后什么也不做<a class="root" href="#m-15">← ④-5 中断是请求</a></b>
+      <dl><dt>现象</dt><dd>应用关闭时线程池 <code>shutdownNow()</code> 停不下来，进程要等很久或被 kill -9；定时任务取消了还在跑。</dd>
+      <dt>根源</dt><dd><code>sleep</code>、<code>wait</code> 抛异常时把中断位清掉了。<code>catch (InterruptedException e) {}</code> 之后，线程再也不知道有人要它停。</dd>
+      <dt>做法</dt><dd class="fix">往上抛；或者 <code>Thread.currentThread().interrupt()</code> 补回中断位再退出循环。</dd></dl></div>
+    <div class="pit" id="p-many"><b><em>坑 3</em>线程越多越快？<a class="root" href="#m-13">← ④-3 切换有成本</a><a class="root" href="#m-14">← ④-4 线程数公式</a></b>
+      <dl><dt>现象</dt><dd>把线程池调到几千，吞吐不升反降，<code>vmstat</code> 里 <code>cs</code> 几十万每秒，<code>r</code> 列远大于核数。<span class="seen">⑤ 实验 1：512 个线程慢 36%</span></dd>
+      <dt>根源</dt><dd>核就那么多。可运行的线程超过核数以后，多出来的只能排队、互相抢占，还把彼此的缓存冲掉。</dd>
+      <dt>做法</dt><dd class="fix">按公式估起点，压测找拐点；慢在锁上就去减锁的范围，慢在下游就考虑异步或虚拟线程，不是加线程。</dd></dl></div>
+    <div class="pit" id="p-new"><b><em>坑 4</em>每个请求 new 一个线程<a class="root" href="#m-11">← ④-1 1:1，创建要进内核</a></b>
+      <dl><dt>现象</dt><dd>平时没事，流量一高报 <code>OutOfMemoryError: unable to create native thread</code>，或者机器内存被线程栈吃光。<span class="seen">⑤ 实验 4：新建一个 82～94 µs</span></dd>
+      <dt>根源</dt><dd>每个线程都是一个内核线程，要一块栈，受 <code>ulimit -u</code>、<code>/proc/sys/kernel/threads-max</code>、容器的 pids 限制。线程数没有上限，就会撞上其中一个。</dd>
+      <dt>做法</dt><dd class="fix">用有界的线程池；真需要每个任务一个线程，用 JDK 21 的虚拟线程。</dd></dl></div>
+    <div class="pit" id="p-daemon"><b><em>坑 5</em>守护线程里做收尾的活<a class="root" href="#m-15">← ④-5 守护线程</a></b>
+      <dl><dt>现象</dt><dd>应用正常退出，最后一批日志或订单状态没写进去。</dd>
+      <dt>根源</dt><dd>只剩守护线程时 JVM 直接退出，不等它们，<code>finally</code> 也不跑。</dd>
+      <dt>做法</dt><dd class="fix">要落盘的线程别设成守护；用 shutdown hook 或 Spring 的生命周期回调（<code>@PreDestroy</code>、<code>SmartLifecycle</code>）先停、再刷完。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>线程都要有名字</b><p>线程池用自定义 <code>ThreadFactory</code>，名字带业务：<code>order-cancel-1</code>，不要 <code>pool-3-thread-7</code>。</p><p class="guard">出事时在转储里认不出是谁。</p></div>
+    <div class="rl"><b>不直接 new Thread，用线程池</b><p>阿里巴巴 Java 开发手册的强制规则。线程池要有界，拒绝策略要想清楚（<a href="threadpool-execute.html">线程池页</a>）。</p><p class="guard">坑 4。</p></div>
+    <div class="rl"><b>中断要么往上抛，要么补回去</b><p>不写空的 <code>catch (InterruptedException)</code>；长循环里检查 <code>isInterrupted()</code>。</p><p class="guard">坑 2：停不下来。</p></div>
+    <div class="rl"><b>线程里的异常要有人接</b><p>设 <code>UncaughtExceptionHandler</code>，或者用 <code>submit</code> 拿 Future 时记得 <code>get()</code>。</p><p class="guard">线程悄悄死掉、任务悄悄没跑。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：切换、调度和版本</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="bk"><h4>上下文切换的间接成本更大</h4>
+      <p>寄存器存取只要几百纳秒。更贵的是切回来以后：L1、L2 缓存里装的是别的线程的数据，要重新从内存读，前几十微秒跑得明显慢。所以“每秒切换多少次”比“一次多贵”更值得看：几万次通常无所谓，几十万次就该查了。</p>
+      <p>Linux 6.6 起默认调度器从 CFS 换成了 EEVDF（本机 6.8 就是）。两者都按“谁欠 CPU 时间多先跑谁”来分，没有固定的时间片长度，可运行的线程越多，每个分到的那一段越短，被抢占也越多。</p></div>
+    <div class="dp" data-role="pd"><h4>线程栈：-Xss 和“占地址不占内存”</h4>
+      <p>栈大小默认 1 MB（Linux x64），本机 Linux ARM 64 位是 2 MB（<code>ThreadStackSize=2040</code> KB）。这是先划出的地址范围，用到哪页才真正给物理内存，所以 1000 个线程不会立刻吃掉 1～2 GB，但递归很深、栈帧很大的线程会。调小 <code>-Xss</code> 能多开线程，调太小会 <code>StackOverflowError</code>。</p></div>
+    <div class="dp" data-role="g2"><h4>版本差异</h4>
+      <div class="tbl-wrap"><table class="t" style="min-width:0"><tbody>
+        <tr><th>JDK 8</th><td>转储里线程号是 <code>nid=0x…</code>（十六进制），没有 <code>cpu=</code>、<code>elapsed=</code></td></tr>
+        <tr><th>JDK 17</th><td>多了 <code>cpu=… elapsed=…</code>，线程号仍是十六进制（<span class="tag-real">实测</span> <code>nid=0xe99fb</code>）</td></tr>
+        <tr><th>JDK 21</th><td>线程号同时给十进制：<code>#41 [923220]</code>（<span class="tag-real">实测</span>，全景页那次）；虚拟线程不出现在 <code>Thread.print</code> 里，要用 <code>jcmd &lt;pid&gt; Thread.dump_to_file</code></td></tr>
+        <tr><th>JDK 20+</th><td><code>Thread.stop()</code> 直接抛 <code>UnsupportedOperationException</code>（按 JDK 21 源码）</td></tr>
+      </tbody></table></div></div>
+    <div class="dp" data-role="cg"><h4>面试官会怎么问</h4>
+      <div class="faq">
+        <details><summary>线程有哪几种状态？BLOCKED 和 WAITING 有什么区别？</summary><p>六种。BLOCKED 只在等进 synchronized；WAITING 是等别人显式叫醒（notify、unpark、join 的线程结束）。ReentrantLock 等锁是 WAITING，因为它用 park（④-2）。</p></details>
+        <details><summary>调用 start() 和直接调用 run() 有什么区别？</summary><p>start() 让 JVM 建出内核线程，新线程去执行 run()；直接调 run() 只是在当前线程里调一个普通方法（④-1）。</p></details>
+        <details><summary>sleep 和 wait 有什么区别？</summary><p>sleep 是 Thread 的静态方法，不释放锁，到点自己醒；wait 是 Object 的方法，必须在 synchronized 里调，会释放锁，被 notify 或超时后要重新抢锁，抢不到时是 BLOCKED（④-2 实验台）。</p></details>
+        <details><summary>什么是上下文切换？怎么减少？</summary><p>内核把一个线程换下 CPU、换另一个上来，保存和恢复寄存器等现场。减少办法：线程数别超过需要（④-4）、减少锁竞争、用无锁结构或 CAS、IO 多的场景用虚拟线程或事件循环（④-3）。</p></details>
+      </div></div>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span></div>
+  <ul class="next">
+    <li>HotSpot 源码里线程状态怎么来的：<code>JavaThreadState</code> 和 <code>java_lang_Thread::threadStatus</code> 的对应</li>
+    <li>用 <code>perf sched</code>、<code>pidstat -w -t</code> 看谁在切、为什么切；async-profiler 的 wall 模式看等待时间（J03、J13）</li>
+    <li>CPU 亲和性、<code>taskset</code> 和容器里的 CPU 限额：JVM 以为有 8 个核，其实只能用 2 个</li>
+    <li>synchronized 怎么加锁、锁升级，为什么 BLOCKED（J02 下一个知识点之后）</li>
+    <li>虚拟线程：同样的状态和切换，换成 JVM 在用户态做（J02 第 9 个知识点）</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div>
+    <h2><span class="sn">↺</span>回到⑤：改造你的案例</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="pd"><h4>1. 找出吃 CPU 的线程</h4><p>让 <code>States</code> 带 <code>hold</code> 参数跑起来，用 <code>top -H -p &lt;pid&gt;</code> 找到 CPU 最高的线程号，转成十六进制，在 <code>jcmd Thread.print</code> 里按 <code>nid</code> 找到它。对一下是不是 price-calc。</p><p class="uses">用到：④-1、坑 1</p></div>
+    <div class="exc" data-role="g2"><h4>2. 让 order-canceller 能停下来</h4><p>把它改成循环 <code>take()</code> 处理取消任务，主线程过 1 秒调 <code>interrupt()</code>。先写一个吞掉异常的版本，看它停不下来；再改成补回中断位、退出循环。</p><p class="uses">用到：④-5、坑 2</p></div>
+    <div class="exc" data-role="bk"><h4>3. 给你的接口估线程数</h4><p>改 <code>CtxSwitch</code> 实验 2 的“算 1 ms、等 20 ms”成你项目里一个接口的真实比例（看监控），先用公式算，再跑出拐点，对比两个数。</p><p class="uses">用到：④-4、坑 3</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这页的精华。</summary><p>Java 线程就是内核线程，由内核调度和切换；Thread.State 只说明它在 Java 层面等什么，RUNNABLE 也可能在 IO 里睡着；切换有成本，线程数要按“等待占多少”来定。</p></details>
+    <details><summary>2. 一个线程处理所有请求，疼在哪？</summary><p>它等数据库的时候 CPU 闲着，别的请求也只能排队。⑤ 实验 2 里 2 个线程 2113 ms，32 个线程 153 ms。</p></details>
+    <details><summary>3. 线程转储里几十个 RUNNABLE，CPU 却不高，为什么？</summary><p>它们多半阻塞在本地 IO 里，比如 socket 读、epoll 等待。JVM 看不到内核里发生了什么，一律标 RUNNABLE（④-2）。看 <code>cpu=</code> 或者 <code>top -H</code> 才知道谁在真跑。</p></details>
+    <details><summary>4. 预测：把 exec-17 锁里的 <code>Thread.sleep(60_000)</code> 换成 <code>stockLock.wait(60_000)</code>，exec-23 会变成什么状态？</summary><p>exec-23 能进锁了。<code>wait</code> 会释放锁，exec-23 拿到锁、执行完 <code>sink++</code>，变成 TERMINATED；exec-17 是 TIMED_WAITING (on object monitor)。60 秒到了，exec-17 要重新抢锁，抢到之前是 BLOCKED（④-2 第 2 条）。</p></details>
+    <details><summary>5. 预测：一个 4 核容器，CPU 限额只给 1 核，JVM 却按 4 核把 ForkJoinPool 和 GC 线程开满，会看到什么？</summary><p>可运行线程远多于真正能用的 CPU，被抢占次数（nonvoluntary）猛涨，响应时间抖动。纯计算任务更明显，和 ⑤ 实验 1 里 512 个线程的情形一样（④-3）。JDK 10 起 JVM 会读容器的 CPU 限额来算核数，老版本或配错时就会这样。</p></details>
+    <details><summary>6. 放回全景：第 4 站 exec-17 读完库存被换下 CPU，这是哪种切换？如果服务器有 64 个核、Tomcat 只有 4 个线程，第 4、5 站还会撞吗？</summary><p>如果是等 SELECT 的结果，是主动让出；如果正好时间片用完，是被抢占。两种都会让 exec-23 插进来。64 核、4 个线程时几乎不会被抢占，但 4 个线程可以同时在 4 个核上跑，照样同时读到 1、各自写回 0。撞车的根源是“读、判断、写回”不是一步，不是切换本身；切换只是让单核上也能撞。修法是全景第 6、7、8 站。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。实验在本机 JDK 17.0.20（2 核 ARM，Linux 6.8）：<code>States</code> 跑一次，另带 <code>hold</code> 参数跑一次拿 <code>jcmd Thread.print</code>；<code>CtxSwitch</code> 完整跑两次，页面放第一次，第二次的数字写在 README 里，结论相同。标“实测”的都来自这几次运行。</p>
+  <p>按源码（本机 JDK 17、21 源码）：<code>Thread.State</code> 的 javadoc（BLOCKED 包括 wait 后重新进入 synchronized）、<code>interrupt()</code> 的 javadoc（sleep/wait/join 抛异常并清中断位、可中断通道被关闭）、JDK 21 的 <code>Thread.stop()</code> 抛 UnsupportedOperationException、<code>ThreadStackSize</code> 用 <code>-XX:+PrintFlagsFinal</code> 查。按文档：线程数公式出自《Java 并发编程实战》第 8 章；Linux 6.6 默认调度器换成 EEVDF；JDK 1.1 绿色线程的历史；容器 CPU 限额从 JDK 10 起被识别。</p>
+  <p>相关：<a href="../java/pano-j02-order-in-threadpool.html">全景：一个下单请求在线程池里</a> · <a href="java-memory-model.html">Java 内存模型</a> · <a href="threadpool-execute.html">ThreadPoolExecutor.execute 源码</a> · <a href="aqs.html">AQS 源码</a> · <a href="../network/io-models.html">网络 IO 模型</a> · <a href="../java/roadmap.html#j02">Java 地图 J02</a></p>
+</footer>
+
+</main>
+<script>
+/*SIM-START*/
+// 线程状态机：每个内部状态在 Java 和内核眼里各是什么、线程转储怎么写、能做哪些动作
+const SM = {
+  NEW:       { java: "NEW", kern: "还没有内核线程", dump: "（不出现在线程转储里）" },
+  READY:     { java: "RUNNABLE", kern: "R：可运行，在就绪队列里排队", dump: "java.lang.Thread.State: RUNNABLE" },
+  RUN:       { java: "RUNNABLE", kern: "R：正在 CPU 上执行", dump: "java.lang.Thread.State: RUNNABLE" },
+  IO:        { java: "RUNNABLE", kern: "S：睡着，等数据到", dump: "RUNNABLE  at sun.nio.ch.Net.accept(Native Method)" },
+  BLOCKED:   { java: "BLOCKED", kern: "S：睡着，等锁", dump: "BLOCKED (on object monitor)  - waiting to lock <0x…be98>" },
+  WAIT_MON:  { java: "WAITING", kern: "S：睡着，等 notify", dump: "WAITING (on object monitor)  at java.lang.Object.wait" },
+  WAIT_PARK: { java: "WAITING", kern: "S：睡着，等 unpark", dump: "WAITING (parking)  at jdk.internal.misc.Unsafe.park" },
+  TIMED:     { java: "TIMED_WAITING", kern: "S：睡着，等时间到", dump: "TIMED_WAITING (sleeping)  at java.lang.Thread.sleep" },
+  TERM:      { java: "TERMINATED", kern: "内核线程已经退出", dump: "（不出现在线程转储里）" }
+};
+// 动作：[按钮文字, 下一状态, 切换类型 vol / non / null, 说明]
+const ACTS = {
+  NEW: [["start()", "READY", null, "start() 让 JVM 建出内核线程，放进就绪队列。还没轮到它上 CPU，但 Java 已经叫它 RUNNABLE。"]],
+  READY: [["调度器选中它", "RUN", null, "内核把它放到一个核上，恢复它的寄存器，开始执行。"]],
+  RUN: [
+    ["时间片用完", "READY", "non", "被抢占：内核把它换下来让别的线程跑。Java 状态没变，还是 RUNNABLE。"],
+    ["读 socket，数据没到", "IO", "vol", "在本地方法里阻塞：内核让它睡了，Java 看不到，仍标 RUNNABLE。"],
+    ["进 synchronized，锁被占", "BLOCKED", "vol", "抢不到锁，先自旋一小会儿，还不行就挂起，主动让出 CPU。"],
+    ["sleep(100)", "TIMED", "vol", "主动睡 100 ms，不释放已经拿着的锁。"],
+    ["拿着锁调 wait()", "WAIT_MON", "vol", "释放这把锁，进等待集合，等别人 notify。"],
+    ["take() 空队列 / park()", "WAIT_PARK", "vol", "阻塞队列、ReentrantLock 等不到时都走 LockSupport.park。"],
+    ["run() 返回", "TERM", null, "线程结束，内核线程退出。"]
+  ],
+  IO: [
+    ["数据到了", "READY", null, "内核把它叫醒，放回就绪队列，等轮到它。"],
+    ["interrupt()", "IO", null, "什么也没发生：传统 Socket 的阻塞读不响应中断，只是中断位成了 true。NIO 可中断通道才会被关掉。"]
+  ],
+  BLOCKED: [
+    ["锁被放开，抢到了", "READY", null, "拿到锁，回到就绪队列。"],
+    ["interrupt()", "BLOCKED", null, "什么也没发生：等 synchronized 不响应中断，接着等。要能中断地等锁，用 ReentrantLock.lockInterruptibly()。"]
+  ],
+  WAIT_MON: [
+    ["别人 notify()", "BLOCKED", null, "被叫醒后要重新拿回刚才释放的锁，拿到之前是 BLOCKED。"],
+    ["interrupt()", "BLOCKED", null, "也要先拿回锁；拿到后 wait() 抛 InterruptedException，中断位被清掉。"]
+  ],
+  WAIT_PARK: [
+    ["别人 unpark()", "READY", null, "被叫醒，回到就绪队列。"],
+    ["interrupt()", "READY", null, "park 直接返回，不抛异常，中断位保持 true，由调用方自己检查。"]
+  ],
+  TIMED: [
+    ["100 ms 到了", "READY", null, "定时器到点，内核把它叫醒。"],
+    ["interrupt()", "READY", null, "提前醒来，sleep 抛 InterruptedException，中断位被清掉。"]
+  ],
+  TERM: []
+};
+function smStep(st, idx) {
+  const a = (ACTS[st.state] || [])[idx];
+  if (!a) return st;
+  return { state: a[1], vol: st.vol + (a[2] === "vol" ? 1 : 0), non: st.non + (a[2] === "non" ? 1 : 0), note: a[3] };
+}
+function smInit() { return { state: "NEW", vol: 0, non: 0, note: "从 NEW 开始。点 start()。" }; }
+/*SIM-END*/
+
+(() => {
+  const $ = s => document.querySelector(s);
+  const box = $("#sm");
+  if (!box) return;
+  let st = smInit();
+  function render() {
+    const info = SM[st.state];
+    $("#sm-java").textContent = info.java;
+    $("#sm-kern").textContent = info.kern;
+    $("#sm-dump").textContent = info.dump;
+    $("#sm-vol").textContent = st.vol;
+    $("#sm-non").textContent = st.non;
+    $("#sm-note").textContent = st.note;
+    box.querySelectorAll(".nd").forEach(g => g.classList.toggle("on", g.dataset.n === st.state));
+    const acts = $("#sm-acts");
+    acts.textContent = "";
+    const list = ACTS[st.state];
+    if (!list.length) {
+      const p = document.createElement("span");
+      p.className = "tip";
+      p.textContent = "线程已经结束，点“从头来”。";
+      acts.append(p);
+    }
+    list.forEach((a, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "btn" + (a[2] === "non" ? " non" : a[2] === "vol" ? " vol" : "");
+      b.textContent = a[0];
+      b.addEventListener("click", () => { st = smStep(st, i); render(); });
+      acts.append(b);
+    });
+  }
+  $("#sm-reset").addEventListener("click", () => { st = smInit(); render(); });
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
