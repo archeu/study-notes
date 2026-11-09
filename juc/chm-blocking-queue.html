@@ -1,0 +1,995 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>ConcurrentHashMap 与阻塞队列</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a mechanism topic (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), depth 懂机制, JDK 17; J02 knowledge point 5. Roles: pd blue = Node chains and the lock-a-bin path, g2 brown = TreeBin, bk teal = counters and queues, cg purple = interview, bad red = ForwardingNode / pitfalls, neutral grey = rejected design (Segment).
+   Interaction (one): putVal path explorer in ④-2: pick a scenario (first put, empty bin, chain, 9th in a chain, tree, resizing, putIfAbsent hit) and see which branches of JDK 17 putVal it passes and whether it locks. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:1.6}
+.pv{display:flex;flex-direction:column;gap:14px;outline:none}
+.pv-scn{flex-direction:row;flex-wrap:wrap}
+.pv-scn button{text-align:center}
+.pv-flow{display:flex;flex-direction:column;gap:6px;counter-reset:pv}
+.pv-step{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:4px 14px;padding:8px 12px 8px 40px;border:1.5px dashed var(--line);border-radius:10px;font-size:14px;color:var(--muted);position:relative;opacity:.55}
+.pv-step::before{counter-increment:pv;content:counter(pv);position:absolute;left:10px;top:8px;width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-family:var(--font-mono);font-size:11.5px;background:var(--paper);color:var(--muted)}
+.pv-step.on{opacity:1;border-style:solid;border-color:var(--pd);background:var(--pd-tint);color:var(--ink)}
+.pv-step.on::before{background:var(--pd);color:var(--on-accent)}
+.pv-step.lk{border-color:var(--cg);background:var(--cg-tint)}
+.pv-step.last{box-shadow:inset 4px 0 0 var(--ink)}
+.pv-step b{font-weight:700}
+.pv-note{font-size:15px;background:var(--bk-tint);border-radius:10px;padding:10px 14px}
+@media (max-width:760px){.pv-step{grid-template-columns:minmax(0,1fr)}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 并发</span><span aria-hidden="true">/</span><span class="tb-here">ConcurrentHashMap 与阻塞队列</span></div></nav>
+<main>
+
+<header class="hero">
+  <p class="kicker">ConcurrentHashMap · 桶 · CAS 放空桶 · synchronized 锁桶头 · TreeBin · ForwardingNode · 多线程协助扩容 · baseCount + CounterCell · merge / compute · Recursive update · 阻塞队列 · put / offer / take / poll · ArrayBlockingQueue · LinkedBlockingQueue · DelayQueue · 背压</p>
+  <h1>ConcurrentHashMap 与阻塞队列：锁一个桶，而不是锁整张表</h1>
+  <p class="lead">J01 的全景预言过：两个线程同时往 HashMap 里放新用户，会丢。本机实测，100 万个用户丢了 4%～16%。ConcurrentHashMap 的办法是<b>把锁的粒度缩到一个桶</b>：空桶用一次 CAS 放进去，有东西的桶只锁桶头那个节点，读完全不加锁，扩容时大家一起帮忙搬，计数也像 LongAdder 那样分格记。它只保证“单个方法是原子的”，先 get 再 put 照样丢更新。阻塞队列是另一种并发容器：放不进去就等、取不到就等，线程之间靠它交接任务。全景第 9 站的订单表和超时取消，用的就是这两样。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j02-order-in-threadpool.html#s-9">一个下单请求在线程池里 · 第 9 站</a></span><span>地图：<a href="../java/roadmap.html#j02">J02 · ConcurrentHashMap 与阻塞队列（第 5 个知识点）</a></span><span>前置：<a href="../javase/hashmap-internals.html">HashMap：哈希、扩容、树化</a></span><span>实验：JDK 17.0.20，2 核 ARM <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div>
+    <h2><span class="sn">①</span>为什么需要：全景第 9 站有两样东西被几十个线程同时碰</h2>
+    <p class="lead">在全景第 9 站，这一步要解决的是：每个抢到的人，订单号要放进按用户分组的 <code>userOrders</code>；30 分钟不付款要自动取消，取消任务交给一个后台线程。前者是几十个 exec 线程同时写一张表，后者是 exec 线程放、后台线程取，两边速度不一样。</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>靶场里的事</th><th>需要什么</th><th>本页用什么</th></tr></thead>
+      <tbody>
+        <tr><th>userOrders：用户 → 他的订单列表</th><td>很多线程同时读写，既不能丢数据，也不能为了安全把所有线程排成一队</td><td>ConcurrentHashMap</td></tr>
+        <tr><th>商品销量计数</th><td>“读出来 +1 再写回”要是一步</td><td><code>merge</code> / <code>compute</code></td></tr>
+        <tr><th>30 分钟未付款就取消</th><td>到期前取不到，到期了马上取到，取的线程平时睡着</td><td>DelayQueue</td></tr>
+        <tr><th>下单后发通知、写日志</th><td>生产快、消费慢时，不能无限堆积</td><td>有界阻塞队列</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="scene"><b>需求</b><span>地图上这一项的深度是“懂机制”：说得清 ConcurrentHashMap 的 put 走了哪几条路、为什么读不加锁、size 为什么不是精确值；知道它保证什么、不保证什么；阻塞队列会按“有界还是无界、要不要排序、要不要延迟”选，并知道线程池为什么离不开它。</span></div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div>
+    <h2><span class="sn">②</span>没有它会怎样：HashMap 丢数据，整表加锁又太挤</h2>
+  </div>
+  <div class="bars" aria-label="两个线程各放 50 万个用户，HashMap 最后的 size，本机实测">
+    <p class="tip"><span class="tag-real">实测</span> JDK 17，2 核。两个线程各 put 50 万个不同的用户，应该有 1000000 个。</p>
+    <div class="bar" data-role="bad"><span>HashMap 第 1 次</span><span class="track"><span class="fill" style="width:96.3%"></span></span><span class="val">962723</span></div>
+    <div class="bar" data-role="bad"><span>HashMap 第 2 次</span><span class="track"><span class="fill" style="width:83.9%"></span></span><span class="val">839013</span></div>
+    <div class="bar" data-role="bad"><span>HashMap 第 3 次</span><span class="track"><span class="fill" style="width:87.1%"></span></span><span class="val">871315</span></div>
+    <div class="bar" data-role="done"><span>synchronizedMap / CHM</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="val">1000000</span></div>
+  </div>
+  <ul class="pains">
+    <li>HashMap 三次分别丢了 3.7 万、16 万、12.9 万个用户，没有任何异常。两个线程同时往同一个空桶放节点，后放的盖掉先放的；同时扩容，各自搬出一张新表，最后只留下其中一张（<a href="../javase/hashmap-internals.html">HashMap 页</a>）。</li>
+    <li><code>Collections.synchronizedMap</code> 每个方法都锁整张表：不丢了，但所有线程的读和写排成一队，读也不能并行。</li>
+    <li class="ok">缺的那一块：<b>让不同的桶各管各的</b>。改的是不同的桶，就互不等待；读不加锁也能读到完整的数据。</li>
+  </ul>
+  <p class="mismatch">不懂这一点时的典型误用：换成 ConcurrentHashMap 就觉得“线程安全了”，接着写 <code>Integer v = map.get(k); map.put(k, v + 1);</code>。<span class="tag-real">实测</span> 两个线程各 +1 共 200 万次，结果 1970799 和 1954211；换成 <code>merge</code> 才是 2000000（⑥ 坑 1）。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div>
+    <h2><span class="sn">③</span>相邻方案</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>容器</th><th>怎么保证安全</th><th>读要不要锁</th><th>适合</th></tr></thead>
+      <tbody>
+        <tr><th>Hashtable / synchronizedMap</th><td>每个方法锁整张表</td><td>要</td><td>老代码；并发很低</td></tr>
+        <tr><th>JDK 7 的 ConcurrentHashMap</th><td>分 16 段（Segment），每段一把 ReentrantLock</td><td>不要</td><td>历史，JDK 8 起改掉了</td></tr>
+        <tr class="hl"><th>JDK 8+ 的 ConcurrentHashMap</th><td>空桶 CAS，非空桶锁桶头</td><td>不要</td><td>通用的并发 Map，日常首选</td></tr>
+        <tr><th>ConcurrentSkipListMap</th><td>跳表 + CAS，没有锁</td><td>不要</td><td>要按 key 排序、范围查询</td></tr>
+        <tr><th>CopyOnWriteArrayList</th><td>写时复制整个数组</td><td>不要</td><td>读极多、写极少的小列表（监听器列表）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line">选择规则：要 Map 就用 ConcurrentHashMap，要有序再换跳表；要在线程之间交接任务、让“放的”和“取的”速度自动对齐，用阻塞队列。<b>本页以 ConcurrentHashMap 为主</b>，阻塞队列讲家族和选法，SynchronousQueue 和 LinkedTransferQueue 的内部见<a href="synchronous-transfer-queue.html">专门那一页</a>。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div>
+    <h2><span class="sn">④</span>原理：一个桶一把锁，空桶连锁都不要</h2>
+  </div>
+  <div class="todo">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>HashMap 的桶、扩容、树化</b>：数组下标 = 扰动后的 hash &amp; (长度 − 1)，链表长到 8 且数组不小于 64 时变红黑树（<a href="../javase/hashmap-internals.html">HashMap 页</a>）。</li>
+      <li><b>CAS、synchronized、LongAdder</b>：见<a href="synchronized-cas-atomic.html">synchronized 与 CAS</a>。</li>
+      <li><b>volatile 读和发布</b>：先把节点的字段写好，再用一次 volatile 写（或 CAS）放进数组，别的线程 volatile 读到它，就一定看到写好的字段（<a href="jmm-jcstress-cache.html#d-src">JMM 下一圈第三圈</a>）。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-struct"><span class="sn">④-1</span>长什么样：和 HashMap 一样的桶数组，多了三种特殊节点</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 300" role="img" aria-label="ConcurrentHashMap 的结构：volatile 的 table 数组，桶里可能是空、Node 链表、TreeBin（红黑树的代表）、ForwardingNode（扩容时表示这个桶已经搬走）。旁边是计数：baseCount 加若干 CounterCell。">
+        <g class="t-s">
+          <text x="16" y="28" class="t-b">transient volatile Node[] table</text>
+          <rect x="16" y="40" width="70" height="44" rx="6" class="b-card"/><text x="51" y="66" text-anchor="middle" class="t-xs">0 空</text>
+          <rect x="16" y="88" width="70" height="44" rx="6" class="b-pd"/><text x="51" y="114" text-anchor="middle" class="t-xs">1</text>
+          <rect x="16" y="136" width="70" height="44" rx="6" class="b-card"/><text x="51" y="162" text-anchor="middle" class="t-xs">2 空</text>
+          <rect x="16" y="184" width="70" height="44" rx="6" class="b-g2"/><text x="51" y="210" text-anchor="middle" class="t-xs">88</text>
+          <rect x="16" y="232" width="70" height="44" rx="6" class="b-bad"/><text x="51" y="258" text-anchor="middle" class="t-xs">…</text>
+
+          <rect x="120" y="92" width="130" height="36" rx="8" class="b-pd"/><text x="132" y="115" class="t-mono">Node 用户 1024</text>
+          <rect x="270" y="92" width="130" height="36" rx="8" class="b-pd"/><text x="282" y="115" class="t-mono">Node 用户 3072</text>
+          <text x="420" y="115" class="t-xs">链表：val、next 都是 volatile</text>
+
+          <rect x="120" y="188" width="150" height="36" rx="8" class="b-g2"/><text x="132" y="211" class="t-mono">TreeBin（hash = −2）</text>
+          <text x="290" y="211" class="t-xs">一个桶超过 8 个：桶头换成 TreeBin，里面是红黑树，自带一个读写小锁</text>
+
+          <rect x="120" y="236" width="190" height="36" rx="8" class="b-bad"/><text x="132" y="259" class="t-mono">ForwardingNode（hash = −1）</text>
+          <text x="330" y="259" class="t-xs">扩容时：这个桶已经搬到新表了，查的人跟着它去新表，写的人先来帮忙搬</text>
+
+          <rect x="660" y="30" width="284" height="140" rx="12" class="b-bk"/>
+          <text x="676" y="56" class="t-b">计数（size 从这里算）</text>
+          <text x="676" y="80" class="t-mono">volatile long baseCount</text>
+          <text x="676" y="102">没冲突：CAS 加到 baseCount</text>
+          <text x="676" y="124" class="t-mono">CounterCell[] counterCells</text>
+          <text x="676" y="146">冲突了：各加各的格子（和 LongAdder 一样）</text>
+
+          <rect x="660" y="186" width="284" height="90" rx="12" class="b-card"/>
+          <text x="676" y="210" class="t-b">sizeCtl</text>
+          <text x="676" y="232">平时 = 下次扩容的门槛（长度 × 0.75）</text>
+          <text x="676" y="254">负数 = 正在初始化或扩容</text>
+        </g>
+        <g class="e-ink"><line x1="86" y1="110" x2="116" y2="110" marker-end="url(#ar5)"/><line x1="250" y1="110" x2="266" y2="110" marker-end="url(#ar5)"/><line x1="86" y1="206" x2="116" y2="206" marker-end="url(#ar5)"/><line x1="86" y1="254" x2="116" y2="254" marker-end="url(#ar5)"/></g>
+        <defs><marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+      </svg>
+    </div>
+    <figcaption>用负的 hash 值标出特殊节点：普通节点的 hash 一定 ≥ 0（<code>spread</code> 时把最高位清掉了），所以看到 −1 就知道是 ForwardingNode，−2 是 TreeBin。<span class="tag-real">实测</span> 9 个 hashCode 相同的 key 挤进同一个桶，桶头从 <code>Node</code> 变成 <code>TreeBin</code>。</figcaption>
+  </figure>
+
+  <h3 id="m-put"><span class="sn">④-2</span>put 走哪条路：点一个场景看看</h3>
+  <div class="lab pv" id="pv" tabindex="0" aria-label="putVal 的分支演示">
+    <div class="seg pv-scn" id="pv-scn" role="tablist" aria-label="场景"></div>
+    <div class="pv-flow" id="pv-flow"></div>
+    <p class="pv-note" id="pv-note"></p>
+  </div>
+  <ul class="callouts">
+    <li><b>1</b><span><b>空桶不加锁</b>：用 <code>casTabAt</code> 把新节点 CAS 进数组。两个线程抢同一个空桶，只有一个成功，失败的那个重新循环，这时桶已经不空了，就走加锁的路。</span></li>
+    <li><b>2</b><span><b>非空桶锁桶头</b>：<code>synchronized (f)</code>，f 是桶里第一个节点。锁到以后再确认一次桶头没被换掉（期间可能被扩容搬走），然后在链表或树里找 key。只有同一个桶的写才互相等，表越大、哈希越散，冲突越少。</span></li>
+    <li><b>3</b><span><b>get 完全不加锁</b>：<code>tabAt</code> 是一次带获取语义的读，节点的 <code>val</code>、<code>next</code> 是 volatile。写的一方先把节点构造好再发布，读的一方读到节点就看得到完整内容。</span></li>
+    <li><b>4</b><span><b>扩容大家一起搬</b>：一个线程发现要扩容，就建一张两倍长的新表，从后往前每次领 16 个桶（<code>MIN_TRANSFER_STRIDE</code>）去搬；别的线程 put 时撞上 ForwardingNode，先去领一段帮忙（<code>helpTransfer</code>），搬完再回来 put。</span></li>
+  </ul>
+
+  <h3 id="m-count"><span class="sn">④-3</span>size 和“只保证单个方法原子”</h3>
+  <ul class="callouts">
+    <li><b>1</b><span><b>size 是估算</b>：<code>size()</code> 把 baseCount 和所有 CounterCell 加起来。加的过程中别的线程还在改，所以并发时读到的是“某个时刻附近”的值。<span class="tag-real">实测</span> 两个线程各 put 30 万个以后：baseCount 40954，counterCells 2 格合计 559046，加起来 600000。</span></li>
+    <li><b>2</b><span><b>单个方法是原子的，两个方法之间不是</b>：<code>get</code> 和 <code>put</code> 各自安全，但“get 完再 put”中间能插进别人。要“读出来改一改再写回”，用 <code>merge</code>、<code>compute</code>、<code>computeIfAbsent</code>，它们在桶锁里一次做完。</span></li>
+    <li><b>3</b><span><b>不允许 null</b>：key、value 都不能是 null。并发下 <code>get</code> 返回 null，必须能确定是“没有这个 key”；如果允许 null 值，就分不清，而又没法像单线程那样再调一次 containsKey 确认（两次调用之间可能变了）。</span></li>
+  </ul>
+
+  <h3 id="m-queue"><span class="sn">④-4</span>阻塞队列：满了就等，空了就等</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>操作</th><th>抛异常</th><th>返回特殊值</th><th>一直等</th><th>等一会儿</th></tr></thead>
+      <tbody>
+        <tr><th>放</th><td><code>add</code></td><td><code>offer</code> → false</td><td><code>put</code></td><td><code>offer(e, 时长)</code></td></tr>
+        <tr><th>取</th><td><code>remove</code></td><td><code>poll</code> → null</td><td><code>take</code></td><td><code>poll(时长)</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>实现</th><th>容量</th><th>内部</th><th>用在哪</th></tr></thead>
+      <tbody>
+        <tr><th>ArrayBlockingQueue</th><td>有界，必须给</td><td>数组 + 一把锁 + 两个 Condition（notEmpty、notFull）</td><td>固定大小的缓冲、背压</td></tr>
+        <tr><th>LinkedBlockingQueue</th><td>不给就是 <code>Integer.MAX_VALUE</code></td><td>链表 + 两把锁（putLock、takeLock），放和取可以同时进行</td><td><code>Executors.newFixedThreadPool</code> 的任务队列（无界，⑥ 坑 4）</td></tr>
+        <tr><th>PriorityBlockingQueue</th><td>无界</td><td>数组堆 + 一把锁</td><td>按优先级取</td></tr>
+        <tr class="hl"><th>DelayQueue</th><td>无界</td><td>PriorityQueue + 一把锁 + leader 线程</td><td>超时取消、定时重试（全景第 9 站）</td></tr>
+        <tr><th>SynchronousQueue</th><td>0：手递手</td><td>双重栈 / 队列，CAS</td><td><code>newCachedThreadPool</code>（<a href="synchronous-transfer-queue.html">专门那页</a>）</td></tr>
+        <tr><th>LinkedTransferQueue</th><td>无界</td><td>双重队列，CAS</td><td>生产者要等消费者接走（同上）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul class="callouts">
+    <li><b>1</b><span>“等”都是 AQS 的 Condition 加 park（<a href="aqs.html">AQS 页</a>机制 5）：取的线程在 notEmpty 上等，放了东西就 signal；所以全景第 9 站的 order-canceller 平时是 WAITING，不占 CPU。</span></li>
+    <li><b>2</b><span>DelayQueue 的 leader：只让一个线程按“堆顶还剩多久”定时睡（TIMED_WAITING），其余取的线程不限时等；堆顶到期，leader 取走，再叫醒下一个当 leader。避免一堆线程同时醒来抢同一个元素。</span></li>
+  </ul>
+
+  <h3 id="m-design"><span class="sn">④-5</span>为什么这样设计：锁的粒度跟着数据走</h3>
+  <div class="design">
+    <div class="way" data-role="pd">
+      <h4>JDK 8：锁一个桶<small>CAS + synchronized(桶头)</small></h4>
+      <ul class="pains">
+        <li class="ok">并发度随表长增长：表长 1024，就是 1024 把“锁”，不用事先猜开几段</li>
+        <li class="ok">不用额外的锁对象，桶头节点自己就是锁；没人抢时 synchronized 只是一两次 CAS（<a href="synchronized-cas-atomic.html#m-inflate">synchronized 页</a>）</li>
+        <li class="ok">扩容多线程协作，计数分格，没有全局热点</li>
+        <li>代码复杂得多：ForwardingNode、ReservationNode、TreeBin 的读写小锁</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>JDK 7：分段锁<small>16 个 Segment，每段一个小 HashMap</small></h4>
+      <ul class="pains">
+        <li class="ok">思路简单：每段就是一个加了 ReentrantLock 的小哈希表</li>
+        <li>并发度在创建时就定死（默认 16），后来机器核越来越多，16 不够用</li>
+        <li>每个 Segment 都是一个 ReentrantLock 对象，空 map 也要占内存</li>
+        <li>size 要先不加锁算几次，不一致再把 16 段全锁上</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict">决定胜负的约束：<b>真正会冲突的是“同一个桶”，不是“同一段”</b>。哈希够散时，两个线程同时写同一个桶的概率很小，所以锁桶头几乎总是无竞争的；再配上 synchronized 在 JDK 6 以后的轻量级锁，比 Segment 里的 ReentrantLock 更省。</p>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">API</span><b>最少要会的几行</b></div>
+<pre><code>ConcurrentHashMap&lt;Long, List&lt;Long&gt;&gt; userOrders = new ConcurrentHashMap&lt;&gt;();
+userOrders.computeIfAbsent(1024L, k -&gt; new CopyOnWriteArrayList&lt;&gt;()).add(10017L);  <span class="cm">// 没有就建，一步完成</span>
+
+ConcurrentHashMap&lt;Long, Long&gt; sold = new ConcurrentHashMap&lt;&gt;();
+sold.merge(88L, 1L, Long::sum);                               <span class="cm">// 销量 +1，原子</span>
+sold.compute(88L, (k, v) -&gt; v == null ? 1 : v + 1);           <span class="cm">// 同上，写法更灵活</span>
+long n = sold.mappingCount();                                 <span class="cm">// 比 size() 好：返回 long</span>
+
+BlockingQueue&lt;Long&gt; notify = new ArrayBlockingQueue&lt;&gt;(10_000);  <span class="cm">// 有界</span>
+if (!notify.offer(orderId, 50, TimeUnit.MILLISECONDS)) degrade();  <span class="cm">// 满了：降级，不要无限等</span>
+DelayQueue&lt;CancelTask&gt; cancel = new DelayQueue&lt;&gt;();
+CancelTask t = cancel.take();                                 <span class="cm">// 到期才返回</span></code></pre>
+  </div>
+  <p class="tip">初始容量的算法、computeIfAbsent 里的递归、弱一致的迭代器、队列选型的坑，这些放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div>
+    <h2><span class="sn">⑤</span>亲眼看到：丢数据、桶里的节点、计数器和三种队列</h2>
+    <p class="lead">三个程序，<code>--release 8</code> 编译，JDK 17 运行；<code>ChmPeek</code> 用反射读内部字段，要加 <code>--add-opens java.base/java.util.concurrent=ALL-UNNAMED</code>。完整代码：<a href="https://github.com/archeu/study-labs/tree/main/java/juc/chm-blocking-queue">study-labs/java/juc/chm-blocking-queue →</a></p>
+  </div>
+<pre class="console"><span class="w">$ java -cp … MapRace</span>
+== 1. 两个线程各 put 50 万个不同的 key，应有 1000000 ==
+第 1 次  HashMap <span class="r">962723</span>，218 ms   synchronizedMap 1000000，241 ms   ConcurrentHashMap <b>1000000</b>，235 ms
+第 2 次  HashMap <span class="r">839013</span>，147 ms   synchronizedMap 1000000，228 ms   ConcurrentHashMap <b>1000000</b>，87 ms
+第 3 次  HashMap <span class="r">871315</span>，172 ms   synchronizedMap 1000000，234 ms   ConcurrentHashMap <b>1000000</b>，144 ms
+== 2. 销量计数：两个线程各 +1 共 100 万次，应有 2000000 ==
+第 1 次  get 再 put：<span class="r">1970799</span>    merge：<b>2000000</b>
+第 2 次  get 再 put：<span class="r">1954211</span>    merge：<b>2000000</b></pre>
+<pre class="console"><span class="w">$ java --add-opens java.base/java.util.concurrent=ALL-UNNAMED -cp … ChmPeek</span>
+== 1. 扩容：table 长度和 sizeCtl ==
+刚 new：        table 还没建，sizeCtl=0
+放了   1 个：  table 长 16，sizeCtl=12
+放了  12 个：  table 长 <b>32</b>，sizeCtl=24        <span class="cm">← 第 12 个就扩了（HashMap 是第 13 个）</span>
+放了  24 个：  table 长 64，sizeCtl=48
+放了  48 个：  table 长 128，sizeCtl=96
+放了 100 个：  table 长 256，sizeCtl=192
+== 2. 一个桶里挤满：链表 → 树 ==
+同一个桶里 8 个：表长 <span class="r">128</span>，桶 88 的头节点是 Node     <span class="cm">← new ConcurrentHashMap(64) 建出来是 128</span>
+同一个桶里 9 个：表长 128，桶 88 的头节点是 <b>TreeBin</b>
+== 3. 计数器：两个线程同时 put ==
+size()=600000，baseCount=40954，counterCells 2 格，格子里合计 559046
+== 4. computeIfAbsent 里再改同一个 map ==
+抛 <span class="r">IllegalStateException: Recursive update</span></pre>
+<pre class="console"><span class="w">$ java -cp … QueueDemo</span>
+== 1. ArrayBlockingQueue(3) ==
+队列满了，offer(10004, 200ms) = <b>false</b>，等了 200 ms；add 会抛异常，put 会一直等
+== 2. DelayQueue：到期才能取 ==
+刚放进去，poll() = null（没到期，取不到）
+第 1 个 take：订单 10018，在第 100 ms
+第 2 个 take：订单 10019，在第 200 ms
+第 3 个 take：订单 10017，在第 300 ms
+== 3. 2 生产 2 消费，传 400 万个订单号 ==
+第 1 轮  ArrayBlockingQueue 304 ms   LinkedBlockingQueue 650 ms
+第 2 轮  ArrayBlockingQueue 385 ms   LinkedBlockingQueue 576 ms</pre>
+  <ul class="callouts">
+    <li><b>1</b><span>HashMap 三次都丢、每次丢得不一样、从不报错：这就是 J01 全景第 8 站预言的事。ConcurrentHashMap 不丢，三次都比整表加锁的 synchronizedMap 快（第 1 次 235 对 241 ms，只快一点）。</span></li>
+    <li><b>2</b><span>ConcurrentHashMap 在数量<b>达到</b>门槛（12）时就扩容，HashMap 是<b>超过</b>门槛（第 13 个）才扩。<code>new ConcurrentHashMap(64)</code> 在 JDK 17 里按 64 ÷ 0.75 + 1 = 86 再向上取 2 的幂，建出 128 长的表；<code>new HashMap(64)</code> 是 64（⑥ 坑 5）。</span></li>
+    <li><b>3</b><span>两个线程同时 put，大部分计数落进了 counterCells，只有约 7% 加在 baseCount 上：一冲突就分格，和 LongAdder 一模一样。</span></li>
+    <li><b>4</b><span>这一轮 ArrayBlockingQueue 比 LinkedBlockingQueue 快。按设计 LinkedBlockingQueue 放和取用两把锁、能并行，但每放一个都要 new 一个链表节点；2 核、元素很小时，分配和 GC 的开销盖过了两把锁的好处。普通 main 程序，只看方向。</span></li>
+  </ul>
+  <div class="done-box"><b>到这里已经能交差了：</b>全景第 9 站的 userOrders 用 ConcurrentHashMap + computeIfAbsent，销量用 merge，超时取消用 DelayQueue，通知用有界队列 + offer 超时降级；你能讲清 put 的三条路、get 为什么不加锁、size 为什么是估算。<br><b>已知还没处理的细节：</b>复合操作（<a href="#p-compound">⑥ 坑 1</a>）、compute 里干重活或递归（<a href="#p-recursive">⑥ 坑 2</a>）、迭代和 size 的一致性（<a href="#p-weak">⑥ 坑 3</a>）、无界队列（<a href="#p-unbounded">⑥ 坑 4</a>）、初始容量（<a href="#p-cap">⑥ 坑 5</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div>
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-compound"><b><em>坑 1</em>先 get 再 put、先 containsKey 再 put<a class="root" href="#m-count">← ④-3 只保证单个方法原子</a></b>
+      <dl><dt>现象</dt><dd>计数偏少、同一个用户被建了两个订单列表、后建的把先建的盖掉。<span class="seen">⑤：200 万次 +1 少了 3～4.6 万</span></dd>
+      <dt>根源</dt><dd>两次调用之间没有任何锁，别的线程随时能插进来。</dd>
+      <dt>做法</dt><dd class="fix"><code>merge</code>、<code>compute</code>、<code>computeIfAbsent</code>、<code>putIfAbsent</code>；值本身是可变对象（List）时，值也要是线程安全的。</dd></dl></div>
+    <div class="pit" id="p-recursive"><b><em>坑 2</em>computeIfAbsent 里做慢事，或者再改同一个 map<a class="root" href="#m-put">← ④-2 compute 拿着桶锁执行</a></b>
+      <dl><dt>现象</dt><dd>同一个桶上的其他线程全卡住；或者直接抛 <code>IllegalStateException: Recursive update</code>。<span class="seen">⑤：AaAa 和 BBBB 同桶，实测抛出</span></dd>
+      <dt>根源</dt><dd>传进去的函数在 synchronized(桶头) 里执行；函数里又往同一个桶放东西，JDK 9 起检测到就抛异常。JDK 8 里同样的写法可能直接死循环（JDK-8062841，历史原因）。</dd>
+      <dt>做法</dt><dd class="fix">函数只做“new 一个对象”这样的快事；查库、调接口放在外面算好再 put；不要在函数里改同一个 map。</dd></dl></div>
+    <div class="pit" id="p-weak"><b><em>坑 3</em>把 size()、迭代结果当成精确快照<a class="root" href="#m-count">← ④-3 size 是估算</a></b>
+      <dl><dt>现象</dt><dd>“当前在线订单数”时多时少；遍历时没抛 ConcurrentModificationException，却漏了刚放进去的订单。</dd>
+      <dt>根源</dt><dd>size 是边加边算的；迭代器是弱一致的：反映迭代开始以后某些时刻的状态，不保证看到所有并发修改，也不会报错。</dd>
+      <dt>做法</dt><dd class="fix">要精确就在业务上加锁或者用数据库统计；监控类数字接受它是估算；用 <code>mappingCount()</code> 拿 long。</dd></dl></div>
+    <div class="pit" id="p-unbounded"><b><em>坑 4</em>用了无界队列<a class="root" href="#m-queue">← ④-4 LinkedBlockingQueue 默认 Integer.MAX_VALUE</a></b>
+      <dl><dt>现象</dt><dd>消费变慢后内存一路涨，最后 OOM；线程池的最大线程数配了也没用。</dd>
+      <dt>根源</dt><dd><code>new LinkedBlockingQueue()</code> 容量是 21 亿；<code>Executors.newFixedThreadPool</code> 正是这么建的（JDK 17 源码）。队列永远不满，就永远不会触发拒绝策略，也不会加线程（<a href="threadpool-execute.html">线程池页</a>）。</dd>
+      <dt>做法</dt><dd class="fix">队列一律给容量；放的时候用带超时的 offer，满了就降级或拒绝（阿里巴巴开发手册禁止用 Executors 建线程池也是这个原因）。</dd></dl></div>
+    <div class="pit" id="p-cap"><b><em>坑 5</em>以为 new ConcurrentHashMap(n) 和 new HashMap(n) 一样<a class="root" href="#m-struct">← ④-1 sizeCtl 和表长</a></b>
+      <dl><dt>现象</dt><dd>想“预分配 64 个桶”，结果建了 128 个；按 HashMap 的经验算的扩容次数对不上。<span class="seen">⑤ 实测 128</span></dd>
+      <dt>根源</dt><dd>ConcurrentHashMap 把参数当成“要放多少个元素”，按 n ÷ 0.75 + 1 向上取 2 的幂；HashMap 把它当“桶数”向上取 2 的幂。历史原因，JDK 8 的算法又和 17 略有不同。</dd>
+      <dt>做法</dt><dd class="fix">按“预计放多少个”传参数，别按桶数传；真在意就像 ⑤ 那样用反射看一眼。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>共享的 Map 一律 ConcurrentHashMap</b><p>Spring 单例里的缓存、注册表、计数，只要有可能被两个请求线程同时碰。</p><p class="guard">HashMap 静默丢数据。</p></div>
+    <div class="rl"><b>读改写用 merge / compute</b><p>不在业务代码里写 get 再 put。</p><p class="guard">坑 1。</p></div>
+    <div class="rl"><b>compute 的函数要快、要纯</b><p>不做 IO，不改同一个 map，不抛受检异常。</p><p class="guard">坑 2：卡住整个桶、Recursive update。</p></div>
+    <div class="rl"><b>阻塞队列一律有界，放用 offer 带超时</b><p>满了要有明确的处理：降级、拒绝、或者记日志丢弃。</p><p class="guard">坑 4：OOM。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：扩容怎么协作、版本差异</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="bad"><h4>多线程一起扩容</h4>
+      <p>触发扩容的线程把 sizeCtl 改成负数（高位记“这一轮扩容的标记”，低位记“有几个线程在帮忙”），建一张两倍长的 nextTable，然后从数组末尾开始，每次用 CAS 领 16 个桶（transferIndex 往前移）。每搬完一个桶，就把旧表那一格换成 ForwardingNode。这期间 get 碰到 ForwardingNode 就去新表查，put 碰到就先调 <code>helpTransfer</code> 领一段帮忙。最后一个搬完的线程把 table 指向新表，sizeCtl 设成新门槛。搬一个桶时，和 HashMap 一样按 <code>hash &amp; 旧长度</code> 拆成低位、高位两条链（<a href="../javase/hashmap-internals.html">HashMap 页</a>的 lo / hi）。（按 JDK 17 源码 <code>transfer</code>）</p></div>
+    <div class="dp" data-role="g2"><h4>TreeBin 的读写小锁</h4>
+      <p>树化以后，桶头是 TreeBin，写的时候照样 synchronized(TreeBin)。但红黑树旋转时结构会变，不加锁的 get 可能走丢，所以 TreeBin 自己还有一个 lockState：有写在旋转时，读线程改为沿着 TreeNode 之间保留的 next 链表线性查找，不等锁。</p></div>
+    <div class="dp" data-role="cg"><h4>版本差异</h4>
+      <div class="tbl-wrap"><table class="t" style="min-width:0"><tbody>
+        <tr><th>JDK 5～7</th><td>Segment 分段锁，默认 16 段</td></tr>
+        <tr><th>JDK 7 的 HashMap</th><td>头插法，并发扩容可能把链表弄成环，get 死循环；JDK 8 改尾插，不成环但照样丢数据（⑤ 实测）</td></tr>
+        <tr><th>JDK 8</th><td>CAS + synchronized 桶头、TreeBin、协作扩容、CounterCell；新增 compute / merge / forEach / reduce 等并行批量方法；computeIfAbsent 递归可能死循环</td></tr>
+        <tr><th>JDK 9+</th><td>递归更新抛 <code>IllegalStateException: Recursive update</code>（本页 JDK 17 实测）</td></tr>
+        <tr><th>JDK 21～23</th><td>compute 的函数在 synchronized 里执行，虚拟线程在里面阻塞会钉住载体线程（JDK 24 起 JEP 491 解决，见 <a href="synchronized-cas-atomic.html#p-pin">synchronized 页坑 5</a>）</td></tr>
+      </tbody></table></div></div>
+    <div class="dp" data-role="pd"><h4>面试官会怎么问</h4>
+      <div class="faq">
+        <details><summary>ConcurrentHashMap 在 JDK 7 和 8 有什么区别？</summary><p>7 是 Segment 分段锁；8 去掉分段，空桶 CAS、非空桶 synchronized 锁桶头，链表长了转红黑树，多线程协作扩容，计数分格（④-5）。</p></details>
+        <details><summary>get 为什么不用加锁？</summary><p>table 是 volatile，读桶用 getReferenceAcquire；Node 的 val、next 是 volatile；写入先构造好节点再 CAS 或在锁里发布，读到节点就看到完整内容（④-2）。</p></details>
+        <details><summary>为什么 key 和 value 不能是 null？</summary><p>并发下 get 返回 null 必须只有“不存在”一种含义，否则没法用两次调用区分（④-3）。</p></details>
+        <details><summary>线程池为什么不建议用 Executors 创建？</summary><p>newFixedThreadPool 和 newSingleThreadExecutor 用无界 LinkedBlockingQueue，任务堆积会 OOM；newCachedThreadPool 用 SynchronousQueue、最大线程数无上限，线程会无限多（坑 4）。</p></details>
+      </div></div>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span></div>
+  <ul class="next">
+    <li>ConcurrentHashMap 的 <code>transfer</code> 源码逐行：sizeCtl 的高低位、resizeStamp、最后一个线程的复查</li>
+    <li>批量方法 <code>forEach(parallelismThreshold, …)</code>、<code>reduce</code>、<code>search</code> 用 ForkJoinPool 并行</li>
+    <li>ConcurrentSkipListMap：没有锁的有序 Map，跳表的 CAS 插入（和 Redis ZSet 对照）</li>
+    <li>Caffeine 本地缓存：在 ConcurrentHashMap 之上做淘汰、过期，读写缓冲为什么用环形队列（J07）</li>
+    <li>Disruptor 环形队列：为什么比 ArrayBlockingQueue 快一个数量级</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div>
+    <h2><span class="sn">↺</span>回到⑤：改造你的案例</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="pd"><h4>1. 修好销量计数，再比一比</h4><p>在 <code>MapRace</code> 第 2 段加两种写法：<code>compute</code> 和“值换成 LongAdder、用 computeIfAbsent 取出来再 increment”。四种写法对比结果和耗时。</p><p class="uses">用到：坑 1、④-3</p></div>
+    <div class="exc" data-role="g2"><h4>2. 看扩容时的 ForwardingNode</h4><p>在 <code>ChmPeek</code> 里，一个线程不停 put 到触发扩容，另一个线程不停反射扫旧表，数一数看到 hash = −1 的节点几次。</p><p class="uses">用到：④-1、⑥ 第三圈</p></div>
+    <div class="exc" data-role="bk"><h4>3. 给通知队列加背压</h4><p>在 <code>QueueDemo</code> 里让消费者每个元素睡 1 ms，生产者用 <code>offer(e, 10ms)</code>，统计被降级的个数；再换成无界 LinkedBlockingQueue，看堆内存怎么涨（<code>jcmd GC.heap_info</code>）。</p><p class="uses">用到：坑 4</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这页的精华。</summary><p>ConcurrentHashMap 把锁缩到一个桶：空桶 CAS、非空桶锁桶头、读不加锁、扩容大家一起搬、计数分格；它只保证单个方法原子，读改写要用 merge / compute。阻塞队列让放和取的线程在满和空时自动等，选型先看有界无界。</p></details>
+    <details><summary>2. HashMap 和整表加锁各疼在哪？</summary><p>HashMap 并发写静默丢数据（实测丢 4%～16%）；整表加锁不丢，但所有读写排成一队（②）。</p></details>
+    <details><summary>3. 换了 ConcurrentHashMap 计数还是偏少，根源是 ④ 的哪一条？</summary><p>④-3：只保证单个方法原子，get 和 put 之间能插队。</p></details>
+    <details><summary>4. 预测：所有 key 的 hashCode 都返回同一个值，16 个线程同时 put，ConcurrentHashMap 的吞吐会怎样？</summary><p>所有写都落在同一个桶，都要 synchronized 同一个桶头，退化成一把全局锁，比 synchronizedMap 好不了多少；桶里超过 8 个会树化，查找还算 O(log n)，但锁竞争避免不了（④-2、④-5）。</p></details>
+    <details><summary>5. 预测：DelayQueue 里放了 10 万个 30 分钟后到期的取消任务，有 4 个线程在 take，这 30 分钟里 CPU 和线程状态是什么样？</summary><p>几乎不占 CPU：一个 leader 线程按堆顶剩余时间 TIMED_WAITING，另外 3 个 WAITING；到期时 leader 醒来取走堆顶，再叫醒一个接任 leader（④-4）。</p></details>
+    <details><summary>6. 放回全景：第 9 站如果还用 HashMap，第 4～8 站全都正确，第 10、11 站正常返回，用户会看到什么？</summary><p>用户下单成功、库存也扣了，但“我的订单”里偶尔少一单：userOrders 在并发 put 时静默丢了条目，没有异常也没有日志。超时取消如果也依赖这张表，那一单还可能永远不会被取消。换 ConcurrentHashMap + computeIfAbsent，值用 CopyOnWriteArrayList 或者加锁的列表。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。实验在本机 2 核 ARM，JDK 17.0.20：<code>MapRace</code>、<code>ChmPeek</code>（加 <code>--add-opens</code>）、<code>QueueDemo</code> 各跑一次；MapRace 第 1 段 3 次、第 2 段 2 次，QueueDemo 第 3 段 3 轮去掉第一轮预热。标“实测”的都来自这次运行。</p>
+  <p>按源码（本机 JDK 17）：ConcurrentHashMap 的 <code>putVal</code>（空桶 casTabAt、MOVED 时 helpTransfer、synchronized(f)、Recursive update）、<code>TREEIFY_THRESHOLD = 8</code>、<code>MIN_TRANSFER_STRIDE = 16</code>、<code>MOVED = -1</code>、<code>TREEBIN = -2</code>、<code>baseCount</code> / <code>counterCells</code> / <code>sizeCtl</code>、构造函数；LinkedBlockingQueue 的 takeLock / putLock 和默认容量；ArrayBlockingQueue 的一把锁两个 Condition；DelayQueue 的 leader；Executors 里的无界队列。按文档：JDK 7 的 Segment 实现、JDK-8062841。</p>
+  <p>相关：<a href="../javase/hashmap-internals.html">HashMap：哈希、扩容、树化</a> · <a href="synchronous-transfer-queue.html">SynchronousQueue 与 LinkedTransferQueue</a> · <a href="synchronized-cas-atomic.html">synchronized 与 CAS</a> · <a href="threadpool-execute.html">ThreadPoolExecutor.execute 源码</a> · <a href="../java/pano-j02-order-in-threadpool.html">全景：一个下单请求在线程池里</a> · <a href="../java/roadmap.html#j02">Java 地图 J02</a></p>
+</footer>
+
+</main>
+<script>
+/*SIM-START*/
+// putVal 的几条路（按 JDK 17 源码）。每个场景：经过哪些判断、最后落在哪、要不要锁。
+const PV_NODES = [
+  { id: "init", t: "table 还没建？", d: "第一次 put 才建表（initTable，CAS 把 sizeCtl 改成 -1 抢到初始化权）" },
+  { id: "empty", t: "桶是空的？", d: "casTabAt(tab, i, null, 新节点)：一次 CAS，不加锁" },
+  { id: "moved", t: "桶头 hash == -1（ForwardingNode）？", d: "正在扩容：helpTransfer 先领 16 个桶帮忙搬，搬完回到循环开头" },
+  { id: "absent", t: "putIfAbsent 且桶头就是这个 key？", d: "不加锁直接返回旧值（JDK 17 的快路径）" },
+  { id: "lock", t: "synchronized (桶头)", d: "锁住桶头，再确认桶头没被换掉" },
+  { id: "list", t: "链表：找 key，找到就改值，找不到挂到尾巴", d: "binCount 数链表长度" },
+  { id: "tree", t: "TreeBin：putTreeVal", d: "在红黑树里插入，旋转时用 TreeBin 自己的 lockState 挡住读" },
+  { id: "treeify", t: "binCount ≥ 8 → treeifyBin", d: "表长 < 64 时先扩容，否则转成 TreeBin" },
+  { id: "count", t: "addCount(1)", d: "CAS baseCount，冲突就加到 CounterCell；超过 sizeCtl 就扩容" }
+];
+const PV_SCN = {
+  first: { label: "第一次 put", path: ["init", "empty", "count"], lock: false, note: "表是懒加载的：第一次 put 时才建 16 长的表（实测 sizeCtl 从 0 变成 12）。建完桶一定是空的，CAS 放进去，不加锁。" },
+  empty: { label: "桶是空的", path: ["init", "empty", "count"], lock: false, note: "最常见的情况：哈希够散时，大部分 put 都落在空桶，一次 CAS 就完成。两个线程抢同一个空桶，CAS 失败的那个回到循环开头，这时桶已不空，走加锁那条路。" },
+  chain: { label: "桶里有链表", path: ["init", "empty", "moved", "absent", "lock", "list", "count"], lock: true, note: "桶不空、也没在扩容：synchronized 桶头，在链表里找 key。只有写同一个桶的线程会互相等。" },
+  long8: { label: "链表第 9 个", path: ["init", "empty", "moved", "absent", "lock", "list", "treeify", "count"], lock: true, note: "挂上以后链表长度达到 8（不算新的这个），且表长 ≥ 64，就把整个桶转成 TreeBin。实测第 9 个 key 进来后桶头变成 TreeBin。" },
+  tree: { label: "桶里是树", path: ["init", "empty", "moved", "absent", "lock", "tree", "count"], lock: true, note: "桶头是 TreeBin（hash = -2）：同样先锁桶头，再在红黑树里插入。" },
+  moving: { label: "正在扩容", path: ["init", "empty", "moved"], lock: false, note: "桶头是 ForwardingNode：这个桶已经搬到新表了。put 不等扩容结束，而是先去领一段桶帮忙搬（helpTransfer），然后拿着新表回到循环开头重新 put。" },
+  absent: { label: "putIfAbsent 已存在", path: ["init", "empty", "moved", "absent"], lock: false, note: "putIfAbsent / computeIfAbsent 的快路径：桶头恰好就是这个 key，不加锁直接返回旧值。只看桶头，key 在链表后面就还是要加锁。" }
+};
+function pvPath(scn) {
+  const s = PV_SCN[scn];
+  return PV_NODES.map(n => ({ id: n.id, on: s.path.includes(n.id), last: s.path[s.path.length - 1] === n.id }));
+}
+/*SIM-END*/
+
+(() => {
+  const $ = s => document.querySelector(s);
+  if (!$("#pv")) return;
+  const tabs = $("#pv-scn");
+  let cur = "empty";
+  Object.keys(PV_SCN).forEach(k => {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = PV_SCN[k].label; b.dataset.k = k;
+    b.addEventListener("click", () => { cur = k; render(); });
+    tabs.append(b);
+  });
+  function render() {
+    tabs.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.k === cur)));
+    const flow = $("#pv-flow");
+    flow.textContent = "";
+    pvPath(cur).forEach((p, i) => {
+      const n = PV_NODES[i];
+      const d = document.createElement("div");
+      d.className = "pv-step" + (p.on ? " on" : "") + (p.last ? " last" : "") + (n.id === "lock" && p.on ? " lk" : "");
+      d.innerHTML = "<b></b><span></span>";
+      d.querySelector("b").textContent = n.t;
+      d.querySelector("span").textContent = n.d;
+      flow.append(d);
+    });
+    const s = PV_SCN[cur];
+    $("#pv-note").textContent = (s.lock ? "要加锁（锁一个桶）。" : "不加锁。") + s.note;
+  }
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

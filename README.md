@@ -106,6 +106,7 @@
 | 06 | [JMM 下一圈：jcstress、CPU 缓存与伪共享](https://archeu.github.io/study-notes/juc/jmm-jcstress-cache.html) | Java 内存模型的下一圈：存储缓冲和失效队列、缓存一致性只管同一地址、x86 TSO 和 ARM 放宽了哪些重排序、volatile 和 CAS 在两种 CPU 上的指令、AQS 和 ConcurrentHashMap 里 volatile 读加 CAS 的模式、伪共享和 LongAdder；jcstress 0.16 在 ARM 上实测库存超卖（volatile 33.6%）、SB、MP（看到标志没看到数据 0.07%）和禁止结果 0 次，伪共享实测，先猜再看结果的实验台 |
 | 07 | [synchronized 与锁升级、CAS 与原子类](https://archeu.github.io/study-notes/juc/synchronized-cas-atomic.html) | 对象头 mark word 的几种状态（JOL 实测无锁、thin lock、fat lock、偏向）、monitorenter / monitorexit 和异常表、轻量级锁和膨胀成 ObjectMonitor、wait / notify、偏向锁为什么被拿掉、CAS 在 ARM 和 x86 上的指令、ABA 实测、原子类和 LongAdder，五种写法吞吐实测（JDK 17，2 核 ARM），锁升级分步演示 |
 | 08 | [AQS 下一圈：读写锁、StampedLock、Semaphore 与 JFR 找锁竞争](https://archeu.github.io/study-notes/juc/aqs-rwlock-jfr.html) | AQS 的下一圈：读写锁把 state 劈成两半、readerShouldBlock 和写锁饥饿、锁降级和升级死锁、StampedLock 乐观读和 validate、Semaphore 舱壁、JFR 的 jdk.JavaMonitorEnter / jdk.ThreadPark；JDK 17 实测四把锁读吞吐（读短时读写锁比普通锁慢、公平读写锁慢 75 倍、乐观读最快）、用 JFR 抓出锁里慢 SQL、Semaphore 限并发，先猜再看的实验台 |
+| 09 | [ConcurrentHashMap 与阻塞队列](https://archeu.github.io/study-notes/juc/chm-blocking-queue.html) | HashMap 并发 put 丢数据实测（丢 4%～16%）、ConcurrentHashMap 的桶数组和三种特殊节点、putVal 的几条路（空桶 CAS、锁桶头、协助扩容）、TreeBin、分格计数、只保证单个方法原子（get 再 put 实测丢更新、merge 不丢）、Recursive update、初始容量，阻塞队列家族和 DelayQueue，JDK 17 反射实测，putVal 路径演示 |
 
 ## 网络
 
