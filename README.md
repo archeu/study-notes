@@ -18,6 +18,7 @@
 | 07 | [asyncio：事件循环、async/await、并发请求](https://archeu.github.io/study-notes/agent/python-asyncio.html) | 站 01 第 5 个知识点：协程是能在 await 处暂停的函数、事件循环用一个线程加 epoll 同时等很多 socket、gather 与 TaskGroup 出错时的区别、超时和取消是协作式的；对照 Java 线程池、Netty 和虚拟线程，阻塞与 GIL 实测，8 个坑，“一个线程的时间线”实验台 |
 | 08 | [FastAPI 写接口（对照 Spring MVC）](https://archeu.github.io/study-notes/agent/python-fastapi.html) | 站 01 第 6 个知识点：uvicorn、Starlette、FastAPI 三层分工，签名决定参数从路径、查询串、请求体还是依赖来，Depends、lifespan 共享连接池、def 端点的 40 线程上限；值班助手加假日志代理的真服务实测，7 个坑，“参数从哪来”实验台 |
 | 09 | [pytest 写测试](https://archeu.github.io/study-notes/agent/python-pytest.html) | 站 01 第 7 个知识点：按名字收集、assert 改写、按参数名注入的 fixture 和作用域、dependency_overrides 加 MockTransport 不起外部服务测接口；对照 JUnit、Mockito、MockMvc，10 个测试先红后绿抓到一个真 bug，8 个坑，fixture 作用域实验台 |
+| 10 | [用 AI 编程工具干活：Claude Code、Cursor](https://archeu.github.io/study-notes/agent/ai-coding-tools.html) | 站 01 第 8 个知识点（站末总结）：智能体循环、上下文窗口与 CLAUDE.md、checkpoint 和权限模式，复盘一次真实的修 bug，6 个在 ~/claude/oncall-helper 里亲手做的练习，“这件事交给 AI 吗”判断台 |
 
 # Java 后端架构（补给库）
 
