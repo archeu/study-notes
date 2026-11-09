@@ -127,3 +127,9 @@
 |---|------|------|
 | 01 | [JVM 内存结构](https://archeu.github.io/study-notes/jvm/jvm-memory-structure.html) | 一个 Java 进程的内存分成哪几块：线程私有的栈、共享的堆、堆外的元空间和直接内存，栈和堆怎么配合、对象头和对象大小、为什么分代，六种 OOM 怎么认、容器被杀的原因，实测撑爆四块内存（JDK 17），分代实验台 |
 | 02 | [G1 和 ZGC 怎么回收](https://archeu.github.io/study-notes/jvm/g1-zgc.html) | 回收的三件事谁要停下来做、G1 的 Region 和记忆集、并发标记与混合回收、停顿预测、ZGC 的染色指针、读屏障和并发搬迁、为什么一个停顿里搬一个边跑边搬、六个坑和版本差异，实测 Parallel、G1、ZGC 四组对比（JDK 17），G1 和 ZGC 实验台 |
+
+## Java 基础
+
+| # | 页面 | 内容 |
+|---|------|------|
+| 01 | [面向对象、接口与抽象类、泛型和类型擦除](https://archeu.github.io/study-notes/javase/oop-generics-erasure.html) | J01 第 1 个知识点：封装靠访问控制和防御性复制、多态靠运行时查方法表、接口与抽象类的分工和菱形问题、sealed 与 record、泛型从源码到运行的五步（编译期检查、擦除插 checkcast、Signature 留底、对象不知道元素类型）、为什么非擦除不可、桥方法与 TypeReference，JDK 17 实测与分步演示 |
