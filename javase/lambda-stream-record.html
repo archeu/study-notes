@@ -1,0 +1,1084 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>Lambda Stream record 机制</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a mechanism topic (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), depth 懂机制; the next round of the JDK 8/17/21/25 page, focused on what Lambda / Stream / record / pattern switch compile to. JDK 17 labs, pattern switch on JDK 21. Roles: pd blue = Lambda 与 Stream, g2 brown = record, cg purple = 模式匹配 switch, rn pink = 引导方法与运行时生成, neutral grey = 老写法、匿名内部类、字符串拼接, bad red = 坑, good green = 选定的设计、编译期检查. Interactions: one Stream pipeline stepper (4 种流水线，订单行逐个流过 filter / sorted / map / 终端操作，看短路和蓄水；与 JDK 17 实测 peek 输出一致，node 校验过). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+pre.codebox{padding:14px 18px}
+h3[id]{scroll-margin-top:64px}
+.pit[id],.rl[id],.dp[id]{scroll-margin-top:64px}
+.presets button{line-height:1.35}
+table.sgrid{min-width:560px}
+table.sgrid td{min-width:120px}
+.sev{display:inline-block;font-family:var(--font-mono);font-size:12px;padding:2px 7px;border-radius:6px;margin:1px 3px 1px 0;border:1.5px solid var(--line-strong);background:var(--card)}
+.sev.pass,.sev.emit{border-color:var(--pd);background:var(--pd-tint)}
+.sev.drop{border-color:var(--bad);background:var(--bad-tint)}
+.sev.buffer{border-color:var(--rn);background:var(--rn-tint)}
+.sev.take{border-color:var(--good);background:var(--good-tint)}
+.sev.now{box-shadow:0 0 0 2px var(--ink)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 基础</span><span aria-hidden="true">/</span><span class="tb-here">Lambda、Stream、record、模式匹配：编译后变成了什么</span></div></nav>
+<main>
+
+<header class="hero">
+  <p class="kicker">invokedynamic · LambdaMetafactory · 隐藏类 · 函数式接口 · Stream 流水线 · Sink · 惰性求值 · 短路 · 有状态操作 · ForkJoinPool · record · ObjectMethods · 紧凑构造器 · sealed · typeSwitch · 穷举检查</p>
+  <h1>Lambda、Stream、record、模式匹配：编译后变成了什么</h1>
+  <p class="lead">这四样新语法有一个共同点：<b>javac 只在字节码里留一条 <code>invokedynamic</code>，真正的实现等到运行时第一次执行那一行，才由 JDK 里的引导方法现场生成</b>。Lambda 由 LambdaMetafactory 生成一个隐藏类；record 的 equals、hashCode、toString 由 ObjectMethods 生成；模式匹配的 switch 由 SwitchBootstraps 生成类型分派。Stream 不靠 indy，它的关键是“先搭流水线，终端操作一来，每个元素从头走到尾，再轮到下一个”。懂了这两条，就能推出它们各自的快慢和坑。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j01-order-object-life.html#s-6">一个订单对象的一生 · 第 2、5、6 站</a></span><span>地图：<a href="../java/roadmap.html#j01">J01 · JDK 8 到 25 的新特性（下一圈）</a></span><span>上一圈：<a href="../jdk/jdk-8-17-21.html">JDK 8、17、21、25</a>（版本、升级）</span><span>实验：JDK 17.0.20；模式匹配用 JDK 21.0.12 <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div>
+    <h2><span class="sn">①</span>为什么需要：这一圈换个问法</h2>
+    <p class="lead">在全景第 6 站，这一步要解决的是：算价那两行 <code>lines.stream().map(OrderLine::amount).reduce(…)</code> 和 <code>switch (d) { case Minus(var off) -&gt; … }</code>，到底变成了什么在执行，快不快、哪里会出事。第 2 站 Jackson 能把 JSON 变成 record、第 5 站订单行用 record，也是同一个问题。</p>
+  </div>
+  <div class="two">
+    <div class="way" data-role="other">
+      <h4>上一圈学了什么<small><a href="../jdk/jdk-8-17-21.html">JDK 8、17、21、25</a></small></h4>
+      <p class="tip">按版本看：8 到 25 每个版本加了什么、为什么半年发一版、四条主线、老项目怎么升级、升级会在哪出事。回答的是“有什么、什么时候有的”。</p>
+    </div>
+    <div class="way" data-role="pd">
+      <h4>这一圈学什么<small>地图要求：懂机制</small></h4>
+      <p class="tip">按机制看：Lambda、Stream、record、模式匹配<b>编译后是什么、运行时怎么执行</b>。回答的是“为什么能这样写、代价在哪、坑从哪来”。</p>
+    </div>
+  </div>
+  <div class="scene"><b>需求</b><span>工作天天在写，面试也爱问“Lambda 和匿名内部类有什么区别”“Stream 是怎么执行的”“parallelStream 为什么会拖慢整个服务”。所以④讲机制，⑥给坑和面试题。</span></div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div>
+    <h2><span class="sn">②</span>没有它会怎样：JDK 7 的写法，一句话回顾</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>今天写</th><th>JDK 7 时写</th><th>疼在哪</th></tr></thead>
+      <tbody>
+        <tr><th><code>l -&gt; l.amount()</code></th><td>匿名内部类 <code>new Function&lt;…&gt;() { public … apply(…) {…} }</code></td><td>5 行样板；每个都编译出一个 <code>Demo$1.class</code> 文件；容易意外捕获外部的 this</td></tr>
+        <tr><th><code>lines.stream().filter().map().toList()</code></th><td>for 循环 + 临时 List</td><td>“做什么”淹没在“怎么循环”里；想并行要自己切分</td></tr>
+        <tr><th><code>record OrderLine(…)</code></th><td>final 类 + 字段 + 构造器 + getter + equals / hashCode / toString</td><td>五六十行，或者靠 Lombok；改一个字段要改五个地方，漏改 equals 不报错</td></tr>
+        <tr><th><code>switch (d) { case Minus(var off) -&gt; … }</code></th><td><code>if (d instanceof Minus) { Minus m = (Minus) d; … }</code></td><td>每种都要强转；漏了一种不报错，悄悄算错价</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="mismatch">不懂机制时的典型误用：觉得“Stream 就是更优雅的 for 循环”，在热点路径上对 1000 万个 Long 做 <code>reduce</code>，比 for 循环慢 40 多倍（⑤ 实测）；或者随手 <code>parallelStream()</code>，结果占满了全服务共用的线程池（⑥ 坑 2）。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div>
+    <h2><span class="sn">③</span>相邻方案：它们分别替代了什么</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>新特性</th><th>替代谁</th><th>还在用旧办法的时候</th></tr></thead>
+      <tbody>
+        <tr><th>Lambda / 方法引用</th><td>匿名内部类</td><td>需要多个方法、需要自己的状态字段时，还是写类</td></tr>
+        <tr><th>Stream</th><td>for 循环 + 临时集合</td><td>热点路径、要提前 break 带复杂条件、要改外部变量时，for 循环更直接</td></tr>
+        <tr><th>record</th><td>手写值对象 / Lombok <code>@Value</code></td><td>需要继承、可变字段、JPA 实体（要无参构造器和 setter）时，用普通类</td></tr>
+        <tr><th>sealed + 模式匹配</th><td>instanceof 链、访问者模式、在类里写多态方法</td><td>类型族要对外开放扩展（插件）时，用普通接口 + 多态</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页学四样的底层机制。</b>选择规则：值对象一律 record；集合变换用 Stream，热点循环和基本类型大批量运算用 for 或 <code>IntStream</code> / <code>LongStream</code>；封闭的类型族用 sealed + switch，开放的用多态。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div>
+    <h2><span class="sn">④</span>原理：一条 invokedynamic，和一条流水线</h2>
+  </div>
+  <div class="todo">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>字节码和 javap</b>：<code>javap -c -p</code> 能看到方法调用指令，见<a href="oop-generics-erasure.html#m-dispatch">面向对象那页④-2</a>（invokevirtual / invokeinterface）。</li>
+      <li><b>函数式接口</b>：只有一个抽象方法的接口，比如 <code>Supplier</code>、<code>Function</code>、<code>Runnable</code>。Lambda 只能赋给它。</li>
+      <li><b>MethodHandle</b>：可以把它理解成“一个指向方法的、能被 JIT 内联的指针”，比反射的 Method 轻得多。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-indy"><span class="sn">④-1</span>invokedynamic：字节码里只写“到时候问引导方法”</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 300" role="img" aria-label="invokedynamic 的执行过程：javac 在字节码里写一条 invokedynamic 指令，并记下引导方法。运行时第一次执行到这一条，JVM 调用引导方法，引导方法返回一个 CallSite，绑定在这一处；以后再执行到这里，直接调 CallSite 里的 MethodHandle，不再引导。四种语法分别用 LambdaMetafactory、ObjectMethods、SwitchBootstraps、StringConcatFactory。">
+        <defs><marker id="i1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+        <text x="16" y="22" class="t-of">编译期：javac</text>
+        <rect x="16" y="34" width="280" height="96" rx="12" class="f-code" style="stroke:var(--line-strong)"/>
+        <text x="28" y="58" class="t-mono">invokedynamic get:()Supplier</text>
+        <text x="28" y="80" class="t-monos">BootstrapMethods:</text>
+        <text x="28" y="98" class="t-monos">  LambdaMetafactory.metafactory</text>
+        <text x="28" y="116" class="t-monos">  + 目标方法 lambda$main$0</text>
+        <text x="340" y="22" class="t-of">运行时：第一次执行这一条</text>
+        <rect x="340" y="34" width="220" height="96" rx="12" class="b-rn"/>
+        <text x="352" y="58" class="t-b">JVM 调引导方法</text>
+        <text x="352" y="80" class="t-s">现场生成实现（隐藏类、</text>
+        <text x="352" y="100" class="t-s">方法句柄组合），返回</text>
+        <text x="352" y="120" class="t-mono" style="font-weight:600">CallSite</text>
+        <line x1="298" y1="82" x2="336" y2="82" class="e-ink" marker-end="url(#i1)"/>
+        <rect x="604" y="34" width="340" height="96" rx="12" class="b-good"/>
+        <text x="616" y="58" class="t-b">CallSite 绑死在这一处</text>
+        <text x="616" y="80" class="t-s">以后执行到这里，直接调它里面的</text>
+        <text x="616" y="100" class="t-s">MethodHandle，和普通调用一样能被</text>
+        <text x="616" y="120" class="t-s">JIT 内联。引导只发生一次。</text>
+        <line x1="562" y1="82" x2="600" y2="82" class="e-ink" marker-end="url(#i1)"/>
+        <text x="16" y="162" class="t-of">同一个机制，四个引导方法</text>
+        <g class="t-s">
+          <rect x="16" y="174" width="224" height="104" rx="10" class="b-pd"/><text x="28" y="196" class="t-b">Lambda / 方法引用</text><text x="28" y="218" class="t-monos">LambdaMetafactory</text><text x="28" y="240" class="t-xs">生成实现函数式接口的</text><text x="28" y="258" class="t-xs">隐藏类（JDK 8 起）</text>
+          <rect x="252" y="174" width="224" height="104" rx="10" class="b-g2"/><text x="264" y="196" class="t-b">record 的三件套</text><text x="264" y="218" class="t-monos">ObjectMethods.bootstrap</text><text x="264" y="240" class="t-xs">按组件拼出 equals、</text><text x="264" y="258" class="t-xs">hashCode、toString（JDK 16）</text>
+          <rect x="488" y="174" width="224" height="104" rx="10" class="b-cg"/><text x="500" y="196" class="t-b">模式匹配 switch</text><text x="500" y="218" class="t-monos">SwitchBootstraps.typeSwitch</text><text x="500" y="240" class="t-xs">按对象类型选第几个 case</text><text x="500" y="258" class="t-xs">（JDK 21）</text>
+          <rect x="724" y="174" width="220" height="104" rx="10" class="b-neu"/><text x="736" y="196" class="t-b">字符串拼接 +</text><text x="736" y="218" class="t-monos">StringConcatFactory</text><text x="736" y="240" class="t-xs">JDK 9 起，不再编译成</text><text x="736" y="258" class="t-xs">StringBuilder 链</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption><span class="tag-real">实测</span> JDK 17 的 <code>javap -v</code>：Demo 里的 Lambda 指向 <code>LambdaMetafactory.metafactory</code>，record OrderLine 的 equals、hashCode、toString 都是一条 <code>invokedynamic</code>，引导方法是 <code>ObjectMethods.bootstrap</code>；JDK 21 编译的模式匹配 switch 是 <code>invokedynamic typeSwitch</code>。</figcaption>
+  </figure>
+  <div class="verdict" data-role="done"><b>为什么不直接编译成固定代码？</b>如果 javac 把 Lambda 编译成匿名内部类、把 record 的 equals 写死成字节码，那这些实现就永远冻结在你的 class 文件里。用 indy，实现在 JDK 里：JDK 以后换更快的策略（比如 JDK 9 把字符串拼接从 StringBuilder 改成更快的拼法），<b>老 class 文件不用重新编译就能享受到</b>。代价是第一次执行要引导：<span class="tag-real">实测</span> 一个 Lambda 第一次求值 7.6 ms，下一处 0.4 ms，之后几乎为零。</div>
+
+  <h3 id="m-lambda"><span class="sn">④-2</span>Lambda：一个私有静态方法，加一个运行时生成的隐藏类</h3>
+  <div class="design">
+    <div class="way" data-role="done">
+      <h4>Lambda<small>JDK 8 起</small></h4>
+      <ul class="pains">
+        <li class="ok">方法体被 javac 搬进本类的 <code>private static lambda$main$0</code>（捕获了 this 就是实例方法）</li>
+        <li class="ok">运行时第一次执行时，LambdaMetafactory 生成一个实现 Supplier 的<b>隐藏类</b>，<span class="tag-real">实测</span> 类名 <code>Demo$$Lambda$1/0x…</code>，<code>isHidden=true</code>，不落成 class 文件</li>
+        <li class="ok">没捕获变量：每次求值返回<b>同一个对象</b>（<span class="tag-real">实测</span> <code>==</code> 为 true）</li>
+        <li>捕获了变量：每次 new 一个，把捕获的值存进字段（实测 false）</li>
+        <li>捕获的局部变量必须是 effectively final：存的是值的拷贝，允许改就会和外面对不上</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>匿名内部类<small>JDK 1.1 起</small></h4>
+      <ul class="pains">
+        <li>javac 生成一个真实的 <code>Demo$1.class</code> 文件，一个匿名类一个文件</li>
+        <li>每次求值都 new 一个对象</li>
+        <li>总是隐式拉着外部类的 this（哪怕没用到），容易造成内存泄漏</li>
+        <li><code>this</code> 指匿名类自己，不是外部类，容易写错</li>
+        <li class="ok">能有自己的字段和多个方法</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 id="m-stream"><span class="sn">④-3</span>Stream：先搭流水线，终端操作一来，元素一个一个从头走到尾</h3>
+  <ul class="callouts">
+    <li><b>1</b><span><b>中间操作只是在搭链</b>：<code>filter</code>、<code>map</code>、<code>peek</code> 每调一次，只是在后面接一个新的流水线阶段（源码里的 <code>AbstractPipeline</code>），什么都不执行。<span class="tag-real">实测</span> 搭好以后，peek 里一行都没打印。</span></li>
+    <li><b>2</b><span><b>终端操作才开工</b>：<code>findFirst</code>、<code>toList</code>、<code>reduce</code> 一调用，流水线从尾往头把每个阶段包成一个 <code>Sink</code>（一个 Consumer），串成一条链，然后从数据源一个个推元素进去。</span></li>
+    <li><b>3</b><span><b>一个元素先走完整条链</b>：66 过 filter 被拦下，88 过 filter、过 map、到 findFirst，<b>拿到了就叫停</b>，99、12、7 根本不碰（短路）。不是“先全部 filter，再全部 map”。</span></li>
+    <li><b>4</b><span><b>有状态的操作会打断这种流动</b>：<code>sorted</code>、<code>distinct</code> 要看完所有元素才能决定第一个输出，于是在那里“蓄水”，前面的阶段要把全部元素都处理完。<span class="tag-real">实测</span> 加了 sorted 后，5 个元素全被 filter 看过。</span></li>
+  </ul>
+  <div class="lab" id="slab" tabindex="0" aria-label="Stream 流水线分步演示，左右方向键切换">
+    <div class="presets" role="group" aria-label="流水线">
+      <button type="button" data-p="first">filter → map → findFirst<br><span>短路</span></button>
+      <button type="button" data-p="list">filter → map → toList<br><span>全部走完</span></button>
+      <button type="button" data-p="sorted">filter → sorted → map → findFirst<br><span>有状态操作蓄水</span></button>
+      <button type="button" data-p="none">filter → map（没有终端操作）<br><span>什么都不发生</span></button>
+    </div>
+    <div class="run-row">
+      <button class="btn" type="button" id="sprev">← 上一步</button>
+      <button class="btn primary" type="button" id="snext">下一步 →</button>
+      <button class="btn" type="button" id="sall">一次走完</button>
+      <span class="tip" id="scnt" aria-live="polite"></span>
+    </div>
+    <div class="tbl-wrap"><table class="t sgrid" id="sgrid"></table></div>
+    <p class="lab-res" id="snote" data-role="pd"></p>
+  </div>
+  <p class="tip">订单行按顺序是 66（19.90）、88（299.00）、99（129.00）、12（9.90）、7（599.00），filter 留下单价大于 100 的，sorted 按单价从高到低。模拟和 ⑤ 的 JDK 17 实测输出一致，逻辑在 node 里跑过。</p>
+
+  <h3 id="m-record"><span class="sn">④-4</span>record：编译器生成的类，和它的边界</h3>
+  <ul class="callouts">
+    <li><b>1</b><span><code>record OrderLine(long skuId, String name, BigDecimal price, int qty)</code> 编译成一个 <code>final class OrderLine extends java.lang.Record</code>：四个 <code>private final</code> 字段、一个按组件顺序的<b>规范构造器</b>、四个同名访问方法 <code>skuId()</code>……</span></li>
+    <li><b>2</b><span>equals、hashCode、toString 不是写死的字节码，而是一条 indy，引导方法 <code>ObjectMethods.bootstrap</code> 按组件列表生成（④-1）。所以“改了组件，三件套自动跟着变”。</span></li>
+    <li><b>3</b><span><b>紧凑构造器</b> <code>OrderLine { if (qty &lt;= 0) throw … }</code>：只写校验和规范化，参数到字段的赋值由编译器补在最后。</span></li>
+    <li><b>4</b><span>class 文件里多了 <code>Record</code> 属性，列出组件名和类型。反射 <code>getRecordComponents()</code> 读的就是它，Jackson 靠它把 JSON 的键对上规范构造器的参数（全景第 2 站）。</span></li>
+    <li><b>5</b><span><b>只是浅不可变</b>：字段是 final，可字段指向的 List 自己能变。<span class="tag-real">实测</span> 外面往原列表加一行，<code>Cart</code> 里跟着变成 3 行；在紧凑构造器里 <code>List.copyOf</code> 的 <code>SafeCart</code> 还是 2 行。</span></li>
+  </ul>
+
+  <h3 id="m-switch"><span class="sn">④-5</span>模式匹配的 switch：按类型分派，再由编译器检查穷举</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 220" role="img" aria-label="switch 模式匹配的执行：typeSwitch 引导方法按对象的类型返回第几个 case 的编号；进入 case 后用访问方法把 record 拆开；带 when 守卫的条件不成立时，从下一个 case 接着找。编译期，sealed 接口的 permits 列表让编译器知道一共几种类型，少写一种就报错；运行时如果还是遇到了没见过的子类，抛 MatchException。">
+        <defs><marker id="i2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+        <rect x="16" y="20" width="300" height="180" rx="12" class="f-code" style="stroke:var(--line-strong)"/>
+        <text x="28" y="44" class="t-mono">switch (d) {</text>
+        <text x="40" y="66" class="t-mono">case None n -&gt; sum;</text>
+        <text x="40" y="88" class="t-mono">case Minus(var off)</text>
+        <text x="60" y="108" class="t-mono">when off &gt; sum -&gt; 0;</text>
+        <text x="40" y="130" class="t-mono">case Minus(var off) -&gt; …;</text>
+        <text x="40" y="152" class="t-mono">case Percent(int pct) -&gt; …;</text>
+        <text x="28" y="174" class="t-mono">}</text>
+        <text x="28" y="194" class="t-xs">没有 default</text>
+        <line x1="318" y1="100" x2="356" y2="100" class="e-ink" marker-end="url(#i2)"/>
+        <rect x="360" y="20" width="280" height="180" rx="12" class="b-cg"/>
+        <text x="374" y="44" class="t-b">运行时</text>
+        <text x="374" y="70" class="t-s">1 typeSwitch(d, 起始编号)</text>
+        <text x="390" y="90" class="t-s">→ 第几个 case 的类型对得上</text>
+        <text x="374" y="116" class="t-s">2 用 off() 拆出组件</text>
+        <text x="374" y="142" class="t-s">3 when 不成立 → 从下一个</text>
+        <text x="390" y="162" class="t-s">编号接着 typeSwitch</text>
+        <text x="374" y="188" class="t-s">4 d 是 null → NPE（没写 case null 时）</text>
+        <rect x="664" y="20" width="280" height="180" rx="12" class="b-good"/>
+        <text x="678" y="44" class="t-b">编译期：穷举检查</text>
+        <text x="678" y="70" class="t-s">sealed 的 permits 告诉编译器</text>
+        <text x="678" y="90" class="t-s">一共就 None、Minus、Percent。</text>
+        <text x="678" y="116" class="t-s">新加一个 Coupon，这个 switch</text>
+        <text x="678" y="136" class="t-s">就编译不过（<tspan class="t-bk">实测</tspan>）。</text>
+        <text x="678" y="162" class="t-s">编译器还会补一个兜底：真遇到</text>
+        <text x="678" y="182" class="t-s">没见过的子类，抛 MatchException。</text>
+      </svg>
+    </div>
+    <figcaption><span class="tag-real">实测</span> JDK 21：给 Discount 的 permits 加一个 <code>Coupon</code>，javac 报 <code>the switch expression does not cover all possible input values</code>；<code>javap -c</code> 里能看到 <code>invokedynamic typeSwitch</code> 和 <code>new java/lang/MatchException</code>。JDK 17 编译同一段代码报 “patterns in switch statements are a preview feature”，所以这一段只能用 21 跑。</figcaption>
+  </figure>
+
+  <h3>最少语法</h3>
+<pre class="codebox"><code>Supplier&lt;String&gt; s = () -&gt; "x";      Function&lt;OrderLine, BigDecimal&gt; f = OrderLine::amount;
+BigDecimal sum = lines.stream().map(OrderLine::amount).reduce(BigDecimal.ZERO, BigDecimal::add);
+long cnt = LongStream.range(0, n).filter(i -&gt; i % 2 == 0).count();          <span class="cm">// 基本类型流，不装箱</span>
+Map&lt;Long, List&lt;Order&gt;&gt; byUser = orders.stream().collect(Collectors.groupingBy(Order::userId));
+record OrderLine(long skuId, BigDecimal price, int qty) { OrderLine { if (qty &lt;= 0) throw …; } }
+if (d instanceof Minus m) { … m.off() … }                                    <span class="cm">// JDK 16</span>
+return switch (d) { case Minus(var off) -&gt; …; case Percent p -&gt; …; case None n -&gt; sum; };   <span class="cm">// JDK 21</span></code></pre>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div>
+    <h2><span class="sn">⑤</span>亲眼看到：交易靶场的订单行，在 JDK 17 上跑一遍</h2>
+    <p class="lead"><code>Demo</code>（JDK 17）5 段：Lambda 的类和对象、Stream 的执行顺序、parallelStream 的线程、装箱的代价、record 生成了什么。模式匹配的 <code>PatternSwitch</code> 单独用 JDK 21 编译运行。完整代码：<a href="https://github.com/archeu/study-labs/tree/main/java/javase/lambda-stream-record">study-labs/java/javase/lambda-stream-record →</a></p>
+  </div>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">1</span><b>Demo.java</b> 节选</div>
+<pre><code>static Supplier&lt;String&gt; nonCapturing() { return () -&gt; "无捕获"; }
+static Supplier&lt;String&gt; capturing(String u) { return () -&gt; "捕获了 " + u; }
+nonCapturing() == nonCapturing();
+capturing("1024") == capturing("1024");
+
+<span class="cm">// 66、88、99、12、7，单价 19.90、299、129、9.90、599</span>
+Stream&lt;OrderLine&gt; s = lines.stream()
+  .peek(l -&gt; println("filter 看到 " + l.skuId()))
+  .filter(l -&gt; l.price() &gt; 100)
+  .peek(l -&gt; println("map    看到 " + l.skuId()));
+<span class="cm">// 这里还什么都没打印</span>
+s.map(OrderLine::skuId).findFirst();
+s.count();                                  <span class="cm">// 再用一次</span>
+
+LongStream.range(0, 200_000).parallel()
+  .forEach(i -&gt; threads.add(currentThread().getName()));
+
+<span class="cm">// 1000 万个数求和三种写法</span>
+for (long i = 0; i &lt; n; i++) t += i;
+LongStream.range(0, n).sum();
+Stream.iterate(0L, i -&gt; i + 1).limit(n).reduce(0L, Long::sum);
+
+record Cart(long userId, List&lt;OrderLine&gt; lines) {}
+record SafeCart(long userId, List&lt;OrderLine&gt; lines) {
+  SafeCart { lines = List.copyOf(lines); }
+}</code></pre>
+    </div>
+    <div class="codebox">
+      <div class="code-bar"><span class="n">2</span><b>运行</b> JDK 17.0.20，2 核 ARM</div>
+<pre class="console"><span class="w">== 1. Lambda ==</span>
+  lambda 的类：Demo$$Lambda$1/0x0000008001000a08，isHidden=true
+  匿名内部类：Demo$1，isHidden=false
+  第一次求值 7.57 ms，下一处 0.395 ms
+  无捕获：同一个对象 <b>true</b>；捕获了变量：<b>false</b>
+<span class="w">== 2. Stream ==</span>
+  流水线搭好了，还没有终端操作：上面一行都没打印
+    filter 看到 66
+    filter 看到 88
+    map    看到 88
+  findFirst → 88
+  <span class="r">再用一次 → IllegalStateException</span>
+  加 sorted 后：filter 看到 66、88、99、12、7，
+    map 看到 7 → 7
+<span class="w">== 3. parallelStream ==</span>
+  CPU 核数 2，干活的线程：
+  [ForkJoinPool.commonPool-worker-1, main]
+<span class="w">== 4. 1000 万个数求和（5 次取最快）==</span>
+  for 循环 long             3.6 ms
+  LongStream.sum           17.9 ms
+  <span class="r">Stream&lt;Long&gt;.reduce     160.9 ms</span>
+<span class="w">== 5. record ==</span>
+  OrderLine[skuId=88, name=商品88, price=299.00, qty=2]
+  a.equals(b)=true，hashCode 相等=true，a == b：false
+  组件：[skuId, name, price, qty]
+  紧凑构造器校验：qty 必须大于 0：0
+  外面加一行：Cart 变 3 行，SafeCart 还是 2 行
+
+<b>$ javac --release 21 PatternSwitch.java &amp;&amp; java PatternSwitch</b>  <span class="cm"># JDK 21.0.12</span>
+  None[] → 598.00          Minus[off=20] → 578.00
+  Minus[off=999] → 0       Percent[pct=10] → 538.20
+  <span class="r">switch(null)，没有 case null → NullPointerException</span></pre>
+      <p class="tip" style="padding:10px 14px">第 1 段的耗时、第 4 段的数字每次运行会变，只看量级。</p>
+    </div>
+  </div>
+  <div class="done-box"><b>到这里已经能交差了：</b>全景第 6 站那两行算价代码，你能说清它们编译成了什么、运行时一步一步做了什么、为什么第一次慢。<br><b>已知还没处理的细节：</b>Stream 里改外部状态（<a href="#p-side">⑥-1</a>）、parallelStream 抢公共池（<a href="#p-par">⑥-1</a>）、record 当 JPA 实体（<a href="#p-jpa">⑥-1</a>）、switch 里的 null 和 default（<a href="#p-null">⑥-1</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div>
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-side"><b><em>坑 1</em>在 Stream 里改外部集合、指望 peek 一定执行<a class="root" href="#m-stream">← ④-3 惰性和短路</a></b>
+      <dl><dt>现象</dt><dd>在 <code>map</code> 或 <code>peek</code> 里往外部 List 加东西、记日志、扣库存，结果有时没执行（短路了，或者 JDK 9 起 <code>count()</code> 能直接算出大小就跳过整条流水线），并行时还会丢数据。</dd>
+      <dt>根源</dt><dd>中间操作执不执行、对哪些元素执行，由终端操作决定；Stream 不保证副作用。</dd>
+      <dt>做法</dt><dd class="fix">中间操作只做无副作用的变换；要收集结果用 <code>collect</code> / <code>toList</code>；要做事用终端的 <code>forEach</code>。</dd></dl></div>
+    <div class="pit" id="p-par"><b><em>坑 2</em>parallelStream 占满全服务共用的线程池<a class="root" href="#m-stream">← ④-3 并行靠 ForkJoinPool</a></b>
+      <dl><dt>现象</dt><dd>某个接口用 <code>parallelStream()</code> 调了个慢的远程服务，结果其他所有用到并行流、<code>CompletableFuture</code> 默认池的地方一起变慢。</dd>
+      <dt>根源</dt><dd>并行流默认跑在 <code>ForkJoinPool.commonPool()</code>，全 JVM 共用一个，线程数是 CPU 核数减一，调用线程自己也干活。<span class="tag-real">实测</span> 2 核机器上只有 worker-1 和 main。阻塞在 IO 上就把这几个线程全占住了。</dd>
+      <dt>做法</dt><dd class="fix">并行流只用于纯 CPU 计算、数据量大（几万以上）、没有 IO；有 IO 的并发用自己配的线程池或虚拟线程（J02）。</dd></dl></div>
+    <div class="pit"><b><em>坑 3</em>大批量数字用 Stream&lt;Long&gt;，慢 40 多倍<a class="root" href="#m-stream">← ④-3 每个元素走一遍 Sink 链</a></b>
+      <dl><dt>现象</dt><dd>1000 万个数求和：for 循环 3.6 ms，<code>LongStream</code> 17.9 ms，<code>Stream&lt;Long&gt;.reduce</code> 160.9 ms。<span class="seen">⑤ 第 4 段</span></dd>
+      <dt>根源</dt><dd>泛型流的元素是对象，每个数都要装箱成 Long、拆箱、产生垃圾；还要穿过一层层 Sink。</dd>
+      <dt>做法</dt><dd class="fix">数字用 <code>mapToLong</code> / <code>LongStream</code>；真正的热点循环用 for。业务里几十几百条订单行用 Stream 完全没问题，可读性更重要。</dd></dl></div>
+    <div class="pit" id="p-jpa"><b><em>坑 4</em>record 当 JPA 实体、当可变对象用<a class="root" href="#m-record">← ④-4 final 字段、浅不可变</a></b>
+      <dl><dt>现象</dt><dd>Hibernate 要无参构造器和可写字段、要做懒加载代理（生成子类），record 都给不了，启动报错；或者 record 里放了可变 List，被外面改了。</dd>
+      <dt>根源</dt><dd>record 是 final 类、字段 final、只有规范构造器；不可变只到字段这一层。</dd>
+      <dt>做法</dt><dd class="fix">实体用普通类，DTO、命令、值对象、投影查询结果用 record；集合组件在紧凑构造器里 <code>List.copyOf</code>。</dd></dl></div>
+    <div class="pit" id="p-null"><b><em>坑 5</em>switch 遇到 null 直接 NPE；加了 default 就失去穷举检查<a class="root" href="#m-switch">← ④-5 穷举检查</a></b>
+      <dl><dt>现象</dt><dd><code>apply(null, sum)</code> 抛 NullPointerException。<span class="seen">⑤ 实测</span> 为了“保险”加了 <code>default -&gt; sum</code>，后来新增 Coupon 没处理，编译器不再提醒，悄悄不打折。</dd>
+      <dt>根源</dt><dd>为了兼容老 switch 的行为，没写 <code>case null</code> 时遇到 null 就抛 NPE；default 能匹配一切，编译器自然认为已经穷举了。</dd>
+      <dt>做法</dt><dd class="fix">sealed 类型族的 switch 不写 default；可能为 null 就显式写 <code>case null -&gt;</code> 或在入口校验。</dd></dl></div>
+    <div class="pit"><b><em>坑 6</em>Lambda 里拉着大对象或外部 this<a class="root" href="#m-lambda">← ④-2 捕获的值存在字段里</a></b>
+      <dl><dt>现象</dt><dd>注册了一个回调 Lambda 存进全局监听器列表，里面用到了某个大对象的一个字段，结果整个大对象（甚至整个外部实例）都回收不了。</dd>
+      <dt>根源</dt><dd>Lambda 捕获的是引用，存进生成类的字段里；用到实例字段等于捕获了 this。</dd>
+      <dt>做法</dt><dd class="fix">先把要用的值取到局部变量里再捕获；监听器记得注销。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>Stream 一条链只做一件事</b><p>超过四五个操作、或者有分支判断，就拆成命名良好的方法，或者回到 for 循环。</p><p class="guard">读不懂、断点打不进去的“一行流”。</p></div>
+    <div class="rl"><b>一个 Stream 只消费一次</b><p>不要把 Stream 存进字段或作为返回值反复用；要多次用就返回 List 或 <code>Supplier&lt;Stream&gt;</code>。</p><p class="guard">IllegalStateException（⑤ 实测）。</p></div>
+    <div class="rl"><b>能用方法引用就用</b><p><code>OrderLine::amount</code> 比 <code>l -&gt; l.amount()</code> 短，生成的东西一样。</p><p class="guard">样板代码。</p></div>
+    <div class="rl"><b>值对象一律 record</b><p>命令、DTO、事件、复合 key。需要校验写紧凑构造器，集合字段 <code>List.copyOf</code>。</p><p class="guard">漏改 equals、被外部修改。</p></div>
+    <div class="rl"><b>封闭类型族：sealed + 不带 default 的 switch</b><p>优惠、支付方式、订单事件。让编译器在新增类型时逼你处理每一处。</p><p class="guard">坑 5。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="pd"><h4>Stream 源码里的那条 Sink 链</h4>
+      <p>每个中间操作都是 <code>AbstractPipeline</code> 的一个子类实例，链表一样指向上游。终端操作调用 <code>wrapSink</code>，从最后一个阶段往前，把每个阶段包成 <code>Sink</code>：filter 的 Sink 在 <code>accept</code> 里判断一下再交给下游，map 的 Sink 变换后交给下游。然后数据源的 <code>Spliterator</code> 逐个 <code>tryAdvance</code>，把元素推进第一个 Sink。</p>
+      <p>短路靠 <code>Sink.cancellationRequested()</code>：findFirst 拿到元素后返回 true，源头就停止推送。sorted 的 Sink 在 <code>accept</code> 里只是攒进列表，在 <code>end()</code> 时才排序并把元素往下推，这就是“蓄水”。（按 JDK 17 本机源码 <code>java.util.stream</code>）</p></div>
+    <div class="dp" data-role="rn"><h4>为什么第一次执行 Lambda 要几毫秒</h4>
+      <p>第一次遇到 indy，JVM 要调 <code>LambdaMetafactory</code>：解析方法类型、用 ASM 风格的字节码生成器拼出一个隐藏类、定义它、链接。整个 JVM 里第一个 Lambda 还要初始化 <code>java.lang.invoke</code> 那一整套基础设施，所以最慢（实测 7.6 ms）。这也是 Spring Boot 启动时间的一小部分来源；JDK 的 CDS / AOT 缓存能把这些生成好的类存下来，下次启动直接用（见上一圈 JDK 页的“下一圈”）。</p></div>
+    <div class="dp" data-role="g2"><h4>record 的 equals 为什么不写死</h4>
+      <p>写死的话，每个 record 的 class 文件里都有一份逐字段比较的字节码。用 indy，所有 record 共用 <code>ObjectMethods</code> 里的一份实现，它按组件列表组合 MethodHandle，JIT 照样能内联。JDK 以后换更快的实现（比如对基本类型字段特化），已编译的 record 自动受益，这是 ④-1 那个设计理由的又一个例子。</p></div>
+    <div class="dp" data-role="cg"><h4>版本线（只列机制相关）</h4>
+      <div class="tbl-wrap"><table class="t" style="min-width:0"><tbody>
+        <tr><th>JDK 7</th><td><code>invokedynamic</code> 指令加入 JVM（当时给 JRuby 这类动态语言用）</td></tr>
+        <tr><th>JDK 8</th><td>Lambda、方法引用、Stream、函数式接口</td></tr>
+        <tr><th>JDK 9</th><td>字符串拼接改用 indy（StringConcatFactory）；Stream 加 <code>takeWhile</code>、<code>dropWhile</code></td></tr>
+        <tr><th>JDK 15</th><td>Lambda 改用隐藏类生成（之前是 Unsafe 定义的匿名类）</td></tr>
+        <tr><th>JDK 16</th><td>record、<code>instanceof</code> 模式匹配转正；<code>Stream.toList()</code></td></tr>
+        <tr><th>JDK 17</th><td>sealed 转正</td></tr>
+        <tr><th>JDK 21</th><td>switch 模式匹配、record 模式转正；Sequenced 集合</td></tr>
+        <tr><th>JDK 22</th><td>未命名变量 <code>_</code> 转正：<code>case Minus(_) -&gt;</code></td></tr>
+      </tbody></table></div>
+      <p class="tip">JDK 15 和 22 两行按 JEP 371、JEP 456 写，没有在本机核对。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">面试官会怎么问</span></div>
+  <div class="faq">
+    <details><summary>Lambda 和匿名内部类有什么区别？</summary><p>匿名内部类编译期生成真实的 class 文件、每次 new 对象、隐式持有外部 this；Lambda 的方法体编进本类的私有静态方法，运行时由 invokedynamic + LambdaMetafactory 生成隐藏类，不捕获变量时复用同一个实例，只在用到时才捕获 this（④-2）。</p></details>
+    <details><summary>Stream 是怎么执行的？中间操作和终端操作的区别？</summary><p>中间操作只搭流水线，惰性；终端操作把各阶段包成 Sink 链，元素逐个从源头推到底；有短路操作时提前停止；sorted、distinct 这类有状态操作要先收齐（④-3、⑥-3）。</p></details>
+    <details><summary>parallelStream 有什么风险？</summary><p>默认用全 JVM 共享的 ForkJoinPool.commonPool，线程数是核数减一；里面做 IO 或耗时操作会拖慢所有用这个池的代码；数据量小、操作轻时，并行的拆分合并开销反而更大（坑 2）。</p></details>
+    <details><summary>record 和 Lombok @Data 有什么区别？</summary><p>record 是语言级的不可变值类型：final、字段 final、规范构造器、equals 等由 JDK 在运行时生成，反射能识别（isRecord、组件）；@Data 是编译期往普通类里插可变的 getter / setter，类型系统不知道它是“值”（④-4）。</p></details>
+    <details><summary>switch 模式匹配为什么要配合 sealed？</summary><p>sealed 的 permits 让编译器知道全部子类型，不写 default 时能检查是否穷举，新增类型时所有 switch 都编译失败、逼你处理（④-5，坑 5）。</p></details>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span></div>
+  <ul class="next">
+    <li>Collector 的四个函数（supplier、accumulator、combiner、finisher），自己写一个 Collector</li>
+    <li>Spliterator 和并行拆分：为什么 ArrayList 并行比 LinkedList 好拆</li>
+    <li>MethodHandle 和 invokedynamic 的完整机制，以及它和反射的性能差（接 J01“反射、注解与动态代理”）</li>
+    <li>上一圈 JDK 页列过的：结构化并发、AOT 缓存、Valhalla 值类型</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div>
+    <h2><span class="sn">↺</span>回到⑤：改造你的案例</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="pd"><h4>1. 看见 Sink 链</h4><p>在⑤第 2 段的 <code>findFirst()</code> 那行打断点，单步进去，找到 <code>AbstractPipeline.wrapAndCopyInto</code> 和 <code>copyIntoWithCancel</code>，看 Sink 是怎么一层套一层的。</p><p class="uses">用到：⑥-3 Sink 链</p></div>
+    <div class="exc" data-role="rn"><h4>2. 给 parallelStream 换个池</h4><p>把⑤第 3 段放进 <code>new ForkJoinPool(4).submit(() -&gt; …).get()</code> 里执行，看线程名变成什么；再想想为什么这招不被推荐当常规做法。</p><p class="uses">用到：坑 2</p></div>
+    <div class="exc" data-role="cg"><h4>3. 让编译器替你找漏</h4><p>在 <code>PatternSwitch</code> 里给 permits 加一个 <code>Coupon</code>，看报错；再加一个 <code>default</code>，看报错消失，体会坑 5。</p><p class="uses">用到：④-5（JDK 21）</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这四样的共同点。</summary><p>Lambda、record、模式匹配 switch 都编译成一条 invokedynamic，实现由 JDK 的引导方法在第一次执行时生成；Stream 是惰性搭链、终端操作时逐元素推过 Sink 链。</p></details>
+    <details><summary>2. JDK 7 写同样的逻辑，最疼在哪？</summary><p>匿名内部类、手写值对象、instanceof 加强转的样板太多，漏改 equals、漏处理一种类型都不报错（②）。</p></details>
+    <details><summary>3. 在 map 里扣库存，有时没扣，根源是哪条原理？</summary><p>中间操作是否执行由终端操作决定：短路时后面的元素不会进来，某些终端操作能直接算出结果就整条跳过（④-3，坑 1）。</p></details>
+    <details><summary>4. 预测：⑤第 2 段如果把 findFirst 换成 <code>anyMatch(l -&gt; true)</code>，peek 会打印几行？</summary><p>anyMatch 也是短路操作，拿到第一个通过 filter 的就停：filter 看到 66、filter 看到 88、map 看到 88，三行，和 findFirst 一样。</p></details>
+    <details><summary>5. 预测：把⑤第 2 段的 sorted 换成 <code>limit(1)</code>，filter 看到几个元素？</summary><p>limit 是短路的有状态操作，但不用看完全部：88 通过 filter 后 limit 拿够 1 个就叫停，所以 filter 只看到 66 和 88 两个（④-3 第 3、4 条的区别：limit 不蓄水）。</p></details>
+    <details><summary>6. 放回全景：第 6 站前后各发生了什么？这一页讲的东西用错了，整条链路会怎样？</summary><p>前面是第 5 站 new 出 Order，后面是第 7 站扣库存。如果算价用 parallelStream，订单行只有一两行，拆分合并的开销反而更大，而且占用公共池，高峰时拖慢所有用到它的请求；如果在 map 里顺手扣库存，短路或跳过时就漏扣，第 7 站的条件更新也救不回来；如果优惠 switch 加了 default，新上线的优惠券类型悄悄不打折，第 10 站返回的金额就错了。第 2 站的 PlaceOrderCmd 若不是 record 而是普通类，Jackson 就得靠无参构造器和 setter，对象就成了可变的。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。实验：⑤ 的 Demo 在本机 JDK 17.0.20（2 核 ARM）跑一次，加 <code>javap -c -v</code> 看 invokedynamic、LambdaMetafactory、ObjectMethods、隐藏类和 <code>lambda$main$N</code>；PatternSwitch 用 JDK 21.0.12 编译运行并 javap 看 typeSwitch、MatchException，另用一个探针加 Coupon 验证穷举报错、用 JDK 17 编译验证“预览特性”报错。标“实测”的都来自这些运行。JDK 版本：知识点实验本该用 17，模式匹配 switch 和 record 模式 17 不支持，这一段改用 21，开头已说明。</p>
+  <p>按源码（本机 JDK 17 src.zip 17.0.20.1，JDK 21 src.zip 21.0.12.1）：<code>LambdaMetafactory.metafactory</code>、<code>ObjectMethods.bootstrap</code>、<code>SwitchBootstraps.typeSwitch</code>、<code>AbstractPipeline</code>、<code>Sink</code>。按文档：JEP 371（隐藏类，JDK 15）、JEP 395（record）、JEP 409（sealed）、JEP 441（switch 模式匹配）、JEP 440（record 模式）、JEP 456（未命名变量，JDK 22），commonPool 的默认并行度为核数减一。</p>
+  <p>相关：<a href="../jdk/jdk-8-17-21.html">JDK 8、17、21、25（上一圈）</a> · <a href="oop-generics-erasure.html">面向对象和泛型</a> · <a href="../java/pano-j01-order-object-life.html">全景：一个订单对象的一生</a> · <a href="../spring/spring-aop-proxy.html">Spring AOP 代理原理</a> · 回到 <a href="../java/roadmap.html#j01">Java 地图 J01</a></p>
+</footer>
+
+</main>
+<script>
+/*SIM-START*/
+// 订单行：skuId 和单价。filter：单价 > 100；sorted：单价从高到低
+const ITEMS = [{ id: 66, p: 19.9 }, { id: 88, p: 299 }, { id: 99, p: 129 }, { id: 12, p: 9.9 }, { id: 7, p: 599 }];
+const PIPES = {
+  first: { stages: ["filter", "map", "findFirst"], label: "filter → map → findFirst" },
+  list: { stages: ["filter", "map", "toList"], label: "filter → map → toList" },
+  sorted: { stages: ["filter", "sorted", "map", "findFirst"], label: "filter → sorted → map → findFirst" },
+  none: { stages: ["filter", "map"], label: "filter → map（没有终端操作）" }
+};
+// 返回事件序列：{ id, stage, what }，what = "pass" | "drop" | "buffer" | "take" | "stop"
+function trace(kind) {
+  const st = PIPES[kind].stages, ev = [];
+  const term = st[st.length - 1];
+  if (term === "map") return ev;                                   // 没有终端操作：什么都不发生
+  const pass = it => it.p > 100;
+  const downstream = (it, from) => {                               // 从 from 之后的阶段继续
+    for (let k = from; k < st.length; k++) {
+      const s = st[k];
+      if (s === "map") ev.push({ id: it.id, stage: s, what: "pass" });
+      else if (s === "findFirst") { ev.push({ id: it.id, stage: s, what: "take" }); return "stop"; }
+      else if (s === "toList") { ev.push({ id: it.id, stage: s, what: "take" }); }
+    }
+    return "go";
+  };
+  if (st.includes("sorted")) {
+    const buf = [];
+    for (const it of ITEMS) {
+      const ok = pass(it);
+      ev.push({ id: it.id, stage: "filter", what: ok ? "pass" : "drop" });
+      if (ok) { buf.push(it); ev.push({ id: it.id, stage: "sorted", what: "buffer" }); }
+    }
+    buf.sort((a, b) => b.p - a.p);
+    for (const it of buf) {
+      ev.push({ id: it.id, stage: "sorted", what: "emit" });
+      if (downstream(it, st.indexOf("sorted") + 1) === "stop") { ev.push({ id: null, stage: null, what: "stop" }); break; }
+    }
+    return ev;
+  }
+  for (const it of ITEMS) {
+    const ok = pass(it);
+    ev.push({ id: it.id, stage: "filter", what: ok ? "pass" : "drop" });
+    if (!ok) continue;
+    if (downstream(it, 1) === "stop") { ev.push({ id: null, stage: null, what: "stop" }); break; }
+  }
+  return ev;
+}
+/*SIM-END*/
+(() => {
+  const grid = document.getElementById("sgrid"), note = document.getElementById("snote"), cnt = document.getElementById("scnt");
+  const lab = document.getElementById("slab");
+  let kind = "first", ev = trace(kind), cur = 0;
+  const WHAT = { pass: "✓ 通过", drop: "✕ 拦下", buffer: "攒着", emit: "排好后放出", take: "收下" };
+  function draw() {
+    const st = PIPES[kind].stages;
+    grid.innerHTML = "";
+    const head = document.createElement("tr");
+    ["订单行"].concat(st).forEach(t => { const th = document.createElement("th"); th.textContent = t; head.append(th); });
+    grid.append(head);
+    const cells = {};
+    ITEMS.forEach(it => {
+      const tr = document.createElement("tr");
+      const th = document.createElement("th"); th.textContent = it.id + "（" + it.p + "）"; tr.append(th);
+      st.forEach(s => { const td = document.createElement("td"); cells[it.id + "|" + s] = td; tr.append(td); });
+      grid.append(tr);
+    });
+    let stopped = false;
+    ev.slice(0, cur).forEach((e, i) => {
+      if (e.what === "stop") { stopped = true; return; }
+      const td = cells[e.id + "|" + e.stage];
+      const span = document.createElement("span");
+      span.className = "sev " + e.what + (i === cur - 1 ? " now" : "");
+      span.textContent = (i + 1) + " " + WHAT[e.what];
+      td.append(span);
+    });
+    cnt.textContent = ev.length ? "第 " + cur + " / " + ev.length + " 步" : "0 步";
+    document.getElementById("sprev").disabled = cur === 0;
+    document.getElementById("snext").disabled = cur >= ev.length;
+    const untouched = ITEMS.filter(it => !ev.slice(0, cur).some(e => e.id === it.id)).map(it => it.id);
+    if (!ev.length) note.textContent = "没有终端操作：流水线只是搭好了，一个元素都不会流过。实测：peek 一行都没打印。";
+    else if (cur < ev.length) note.textContent = "按“下一步”，看元素是一个一个走完整条流水线（竖着走），还是在某一站停下来等。";
+    else if (stopped) note.textContent = "短路：findFirst 拿到了就叫停。" + (untouched.length ? "根本没碰过的订单行：" + untouched.join("、") + "。" : "") + (kind === "sorted" ? " 但 sorted 要先收齐所有通过 filter 的元素才能排，所以 5 个全被 filter 看过（实测一致）。" : " 实测：peek 只打印了 filter 66、filter 88、map 88。");
+    else note.textContent = "toList 不短路：每个元素都走一遍，通过的 88、99、7 被收下。";
+  }
+  function choose(k) {
+    kind = k; ev = trace(k); cur = 0;
+    lab.querySelectorAll(".presets button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.p === k)));
+    draw();
+  }
+  lab.querySelectorAll(".presets button").forEach(b => b.addEventListener("click", () => choose(b.dataset.p)));
+  document.getElementById("sprev").addEventListener("click", () => { if (cur > 0) { cur--; draw(); } });
+  document.getElementById("snext").addEventListener("click", () => { if (cur < ev.length) { cur++; draw(); } });
+  document.getElementById("sall").addEventListener("click", () => { cur = ev.length; draw(); });
+  lab.addEventListener("keydown", e => {
+    if (e.key === "ArrowRight" && cur < ev.length) { cur++; draw(); e.preventDefault(); }
+    else if (e.key === "ArrowLeft" && cur > 0) { cur--; draw(); e.preventDefault(); }
+  });
+  choose("first");
+})();
+</script>
+
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
