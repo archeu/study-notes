@@ -133,3 +133,4 @@
 | # | 页面 | 内容 |
 |---|------|------|
 | 01 | [面向对象、接口与抽象类、泛型和类型擦除](https://archeu.github.io/study-notes/javase/oop-generics-erasure.html) | J01 第 1 个知识点：封装靠访问控制和防御性复制、多态靠运行时查方法表、接口与抽象类的分工和菱形问题、sealed 与 record、泛型从源码到运行的五步（编译期检查、擦除插 checkcast、Signature 留底、对象不知道元素类型）、为什么非擦除不可、桥方法与 TypeReference，JDK 17 实测与分步演示 |
+| 02 | [常用集合怎么选：ArrayList、LinkedList、Set、Queue](https://archeu.github.io/study-notes/javase/collections-choose.html) | J01 第 2 个知识点：按“怎么找”选 List / Set / Map / Queue，ArrayList 扩容与头插、LinkedList 节点与缓存不友好、哈希与红黑树、ArrayDeque 环形数组、PriorityQueue 二叉堆与 DelayQueue，交易靶场订单簿，8 个场景先猜再看 JDK 17 实测 |
