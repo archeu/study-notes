@@ -1,0 +1,1055 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>读写锁、StampedLock 与 JFR</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a mechanism topic, next round of the AQS page (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), depth 懂设计, JDK 17. Roles: pd blue = read side / ReentrantReadWriteLock, cg purple = write lock and synchronized, g2 brown = StampedLock optimistic read, bk teal = Semaphore and JFR, bad red = pitfalls, good green = right way.
+   Interaction (one): guess-then-reveal in ⑤: pick short or long reads, guess the fastest and slowest of four locks, then see measured read throughput bars. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:1.6}
+.gs{display:flex;flex-direction:column;gap:14px;outline:none}
+.gs-tabs{display:flex;flex-wrap:wrap;gap:6px}
+.gs-tabs button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:999px;padding:4px 12px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.gs-tabs button[aria-selected="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.gs-body{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px;align-items:start}
+.gs-code pre{white-space:pre-wrap}
+.gs-q{display:flex;flex-direction:column;gap:10px;min-width:0}
+.gs-ask{font-weight:700;font-size:15.5px}
+.gs-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
+.gs-row .lbl{font-size:13.5px;color:var(--muted);min-width:6em}
+.gs-q .btn{align-self:flex-start}
+.gs-res{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.gs-res[hidden]{display:none}
+.gs-hist{display:flex;flex-direction:column;gap:6px}
+.gh{display:grid;grid-template-columns:3.6em minmax(0,1fr) minmax(0,15em);gap:10px;align-items:center;font-size:13.5px}
+.gh code{font-size:13px}
+.gh .track{height:14px;background:var(--paper);border-radius:7px;overflow:hidden;display:block}
+.gh .fill{display:block;height:100%;background:var(--line-strong);border-radius:7px}
+.gh.hit .fill{background:var(--bad)}
+.gh.hit .v{color:var(--bad);font-weight:700}
+.gh.forbid .v{color:var(--good);font-weight:700}
+.gh .v{font-family:var(--font-mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+.gs-verdict{font-weight:700}
+.gs-why{font-size:14.5px;color:var(--muted)}
+@media (max-width:760px){.gs-body{grid-template-columns:minmax(0,1fr)}.gh{grid-template-columns:3.2em minmax(0,1fr)}.gh .v{grid-column:1 / -1}}
+.gh .nm{font-size:13.5px}
+.rk{display:flex;flex-direction:column;gap:14px;outline:none}
+.rk-q{display:flex;flex-direction:column;gap:10px}
+.rk-q .btn{align-self:flex-start}
+.rk-res{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.rk-res[hidden]{display:none}
+.rk-bars{display:flex;flex-direction:column;gap:6px}
+.rk .gh{grid-template-columns:9.5em minmax(0,1fr) minmax(0,15em)}
+.gh.best .fill{background:var(--good)}
+.gh.best .v{color:var(--good);font-weight:700}
+table.runs .bad-t{color:var(--bad);font-weight:700}
+@media (max-width:760px){.rk .gh{grid-template-columns:8em minmax(0,1fr)}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 并发</span><span aria-hidden="true">/</span><span class="tb-here">AQS 下一圈：读写锁、StampedLock、Semaphore 与 JFR</span></div></nav>
+<main>
+
+<header class="hero">
+  <p class="kicker">ReentrantReadWriteLock · state 高 16 位 / 低 16 位 · readerShouldBlock · 写锁饥饿 · 锁降级 · StampedLock · 乐观读 · validate · Semaphore · 舱壁 · JFR · jdk.JavaMonitorEnter · jdk.ThreadPark · jfr print</p>
+  <h1>AQS 下一圈：读多写少该用哪把锁，锁竞争怎么从线上抓出来</h1>
+  <p class="lead">上一圈的 <a href="aqs.html">AQS 源码</a>讲了 state 加一条队列。这一圈拿它解决交易靶场的三件事：库存查询读多写少，换成读写锁会不会快；下游库存服务扛不住，怎么限住同时调用的线程数；线上几十个线程卡住了，怎么不读代码就找出是哪把锁。实测结论有点反直觉：<b>读很短时，读写锁比普通锁还慢，公平读写锁慢 75 倍；StampedLock 的乐观读最快</b>，因为它读的时候什么都不写。找锁竞争靠 JFR，一行启动参数，录下每一次等锁超过 10 ms 的线程、锁的类型、等了多久、在哪一行。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j02-order-in-threadpool.html#s-6">一个下单请求在线程池里 · 第 6 站</a></span><span>地图：<a href="../java/roadmap.html#j02">J02 · AQS 与 ReentrantLock、Condition、Semaphore（第 4 个知识点，下一圈）</a></span><span>上一圈：<a href="aqs.html">AQS 源码</a></span><span>实验：JDK 17.0.20，2 核 ARM <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div>
+    <h2><span class="sn">①</span>为什么需要：全景第 6 站修好了超卖，又冒出三个问题</h2>
+    <p class="lead">在全景第 6 站，这一步要解决的是：锁加上了、不超卖了，但最多 47 个线程同时 BLOCKED。再往下想，交易靶场还有三件事等着：</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>靶场里的事</th><th>要回答的问题</th><th>本页在哪讲</th></tr></thead>
+      <tbody>
+        <tr><th>商品详情页每秒查几千次库存，下单才偶尔扣一次</th><td>读多写少，换读写锁会快吗？StampedLock 呢？</td><td>④-1、④-2、⑤ 实验 1</td></tr>
+        <tr><th>库存服务一次调用 30 ms，并发一高它就被打挂</th><td>怎么让同一时刻最多 3 个线程去调它，其余的等一会儿或直接降级</td><td>④-3、⑤ 实验 2</td></tr>
+        <tr><th>线上接口突然变慢，线程转储里一堆 BLOCKED 和 WAITING</th><td>不读代码，怎么知道是哪把锁、在哪一行、一共卡了多久</td><td>④-4、⑤ 实验 2</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="scene"><b>需求</b><span>地图上这一项的深度是“懂设计”。上一圈讲透了 AQS 的队列和 ReentrantLock，这一圈补上它的三个“兄弟”：读写锁、StampedLock、Semaphore，讲清它们各自把 state 用成了什么、什么时候真能更快；再学会用 JFR 在线上找锁竞争。</span></div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div>
+    <h2><span class="sn">②</span>没有它会怎样：只有一把互斥锁，和一张线程转储</h2>
+  </div>
+  <ul class="pains">
+    <li><b>读也要排队。</b>只用 ReentrantLock 或 synchronized，一千个查库存的线程也只能一个一个进；明明谁都没改数据，却在互相等。</li>
+    <li><b>下游没人护着。</b>线程池有 200 个线程，库存服务只扛得住几个并发，所有线程一起涌过去，它一慢，200 个线程全卡在它身上（全景第 2 站的池子被占满）。</li>
+    <li><b>线程转储只是一张照片。</b><code>jstack</code> 拍到的是那一瞬间：碰巧拍到几个 BLOCKED，不知道它们已经等了多久、一分钟里一共等了多少次、是不是每次都卡在同一把锁上。拍得不巧，问题就漏过去了。</li>
+    <li class="ok">缺的那一块：<b>按读写区分的锁、按名额放行的闸门，和一台一直开着的“录像机”</b>。前两个都是 AQS 换个用法；录像机是 JDK 自带的 JFR。</li>
+  </ul>
+  <p class="mismatch">不懂这一点时的典型误用：觉得“读多写少就上读写锁”是常识，把 ReentrantLock 换成 ReentrantReadWriteLock，再顺手传个 <code>true</code> 要公平。本机实测吞吐从每秒 1515 万次读掉到 20 万次（⑤）。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div>
+    <h2><span class="sn">③</span>相邻方案</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>要解决的</th><th>候选</th><th>一句话</th></tr></thead>
+      <tbody>
+        <tr><th rowspan="4">读多写少</th><td>ReentrantLock</td><td>读写都互斥，最简单</td></tr>
+        <tr class="hl"><td>ReentrantReadWriteLock</td><td>读和读能同时进，读和写互斥；读的时候也要改一下共享的计数</td></tr>
+        <tr class="hl"><td>StampedLock</td><td>乐观读：先不加锁读，读完核对版本号，被写过才退回去加读锁</td></tr>
+        <tr><td>不可变快照 + volatile 引用</td><td>写的时候整份复制一个新对象再替换引用，读完全不加锁（CopyOnWriteArrayList 的思路）</td></tr>
+        <tr><th rowspan="2">护住下游</th><td class="hl">Semaphore</td><td>限<b>同时进行</b>的个数（并发数）</td></tr>
+        <tr><td>限流器（令牌桶，如 Guava RateLimiter、Sentinel）</td><td>限<b>每秒</b>的次数（QPS），J12 讲</td></tr>
+        <tr><th rowspan="3">找锁竞争</th><td>jstack / jcmd Thread.print</td><td>一张照片，看得到谁在等谁</td></tr>
+        <tr class="hl"><td>JFR</td><td>一段录像，每次等锁超过阈值都记一条，开销低，能一直开</td></tr>
+        <tr><td>async-profiler 的 lock 模式</td><td>按锁等待时间画火焰图，适合深挖（J13）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line">选择规则：读多写少先问能不能做成不可变快照；不能，再拿实测比 ReentrantLock、读写锁、StampedLock，别凭直觉。护下游用 Semaphore 管并发，用限流器管 QPS。找锁竞争：先开 JFR 录一段，再用 jstack 看现场。<b>本页学读写锁、StampedLock、Semaphore 和 JFR 的锁事件。</b></p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div>
+    <h2><span class="sn">④</span>原理：同一个 AQS，state 换三种用法</h2>
+  </div>
+  <div class="todo">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>AQS 的 state 和队列</b>：一个 int 说明“能不能拿”，拿不到的线程排进双向队列 park（<a href="aqs.html">AQS 源码</a>机制 1～4）。</li>
+      <li><b>CAS 和缓存行</b>：很多线程 CAS 同一个地址，那条缓存行就在核之间来回搬（<a href="synchronized-cas-atomic.html#m-cas">synchronized 与 CAS</a>、<a href="jmm-jcstress-cache.html#p-fs">JMM 下一圈</a>）。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-rw"><span class="sn">④-1</span>ReentrantReadWriteLock：一个 int 劈成两半</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 250" role="img" aria-label="读写锁的 state：高 16 位是读锁被持有的次数，低 16 位是写锁重入次数。读线程加锁要 CAS 把高 16 位加一，所有读线程都在 CAS 同一个 int。">
+        <g class="t-s">
+          <text x="16" y="30" class="t-b">state（一个 int，32 位）</text>
+          <rect x="16" y="44" width="440" height="50" rx="8" class="b-pd"/><text x="32" y="74" class="t-b">高 16 位：读锁被持有几次（所有读线程合计）</text>
+          <rect x="460" y="44" width="440" height="50" rx="8" class="b-cg"/><text x="476" y="74" class="t-b">低 16 位：写锁重入几次</text>
+          <text x="16" y="124">读线程加锁：低 16 位是 0（没有写锁）→ CAS 把高 16 位 +1；每个线程自己重入了几次，另记在 ThreadLocal 里（HoldCounter）</text>
+          <text x="16" y="148">写线程加锁：整个 state 是 0（没人读也没人写）→ CAS 低 16 位 +1</text>
+          <text x="16" y="172">读锁最多 65535 次（2¹⁶ − 1），超了抛 Error</text>
+          <rect x="16" y="190" width="884" height="46" rx="10" class="b-bad"/>
+          <text x="32" y="212" class="t-b t-bad">代价：“读锁”也是一次写。</text>
+          <text x="32" y="230">每个读线程进出都要 CAS 同一个 state，这一个 int 所在的缓存行在所有核之间来回搬。读本身越短，这个代价越显眼。</text>
+        </g>
+      </svg>
+    </div>
+  </figure>
+  <ul class="callouts">
+    <li><b>1</b><span><b>写锁会不会被读锁饿死？</b>非公平模式下，新来的读线程只有在“队首等着的是一个写线程”时才让一让（源码里的 <code>readerShouldBlock()</code> 调 <code>apparentlyFirstQueuedIsExclusive()</code>，注释原话是“避免写线程无限饥饿的一个启发式办法，只在概率上有效”）。所以一般不会饿死，但写线程等的时间会被一串读拉长。<span class="tag-real">实测</span> 写线程等锁最久 10.0～10.6 ms，比 ReentrantLock 的 6.9～7.4 ms 长。</span></li>
+    <li><b>2</b><span><b>公平模式</b>：读线程只要看到前面有人排队（<code>hasQueuedPredecessors()</code>）就去排队。高并发下几乎每次加锁都要进队列、park、被叫醒，交接一次就是几微秒的上下文切换。</span></li>
+    <li><b>3</b><span><b>锁降级可以，升级不行。</b>拿着写锁再拿读锁，然后放写锁，可以（降级）；拿着读锁去拿写锁，要等所有读锁都放掉，而自己就拿着一个，于是永远等下去（⑥ 坑 4）。</span></li>
+  </ul>
+
+  <h3 id="m-stamp"><span class="sn">④-2</span>StampedLock：乐观读什么都不写</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 230" role="img" aria-label="StampedLock 乐观读的流程：tryOptimisticRead 拿一个版本戳（只读 state，不写）；把要用的字段复制到局部变量；validate 比较版本戳和当前 state，一样就直接用；不一样说明期间有人拿过写锁，退回加读锁再读一遍。">
+        <g class="t-s">
+          <rect x="16" y="40" width="200" height="70" rx="12" class="b-g2"/><text x="30" y="66" class="t-b">① tryOptimisticRead()</text><text x="30" y="90">只读 state，拿版本戳</text>
+          <rect x="246" y="40" width="200" height="70" rx="12" class="b-g2"/><text x="260" y="66" class="t-b">② 复制到局部变量</text><text x="260" y="90" class="t-mono">a = left; b = sold;</text>
+          <rect x="476" y="40" width="210" height="70" rx="12" class="b-bk"/><text x="490" y="66" class="t-b">③ validate(stamp)</text><text x="490" y="90">读屏障 + 比较版本位</text>
+          <rect x="716" y="20" width="228" height="50" rx="12" class="b-good"/><text x="730" y="50" class="t-b">没被写过：直接用 a、b</text>
+          <rect x="716" y="88" width="228" height="62" rx="12" class="b-bad"/><text x="730" y="112" class="t-b">被写过：退回 readLock()</text><text x="730" y="134">重读一遍再用</text>
+        </g>
+        <g class="e-ink"><line x1="216" y1="75" x2="242" y2="75" marker-end="url(#ar4)"/><line x1="446" y1="75" x2="472" y2="75" marker-end="url(#ar4)"/><line x1="686" y1="62" x2="712" y2="46" marker-end="url(#ar4)"/><line x1="686" y1="90" x2="712" y2="112" marker-end="url(#ar4)"/></g>
+        <text x="16" y="180" class="t-s"><tspan class="t-b">关键：</tspan>①和③都只读 state，所有读线程不写任何共享的东西，缓存行不用在核之间搬。写线程每次拿写锁都会让版本号变，读的一边靠 ③ 发现。</text>
+        <text x="16" y="204" class="t-s"><tspan class="t-b">代价：</tspan>② 读到的可能是“写了一半”的值，所以只能先复制、核对完再用，期间不能拿它去做有副作用的事；不可重入；没有 Condition。</text>
+        <defs><marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+      </svg>
+    </div>
+    <figcaption>JDK 17 源码：<code>tryOptimisticRead()</code> 就一行，state 里没有写锁位就返回版本位，否则返回 0；<code>validate(stamp)</code> 是 <code>U.loadFence()</code> 加一次比较。和上一页 jcstress 里的 MP 写法同一个道理：先读版本，再读数据，最后用一个读屏障保证“数据读在核对之前”。</figcaption>
+  </figure>
+
+  <h3 id="m-sem"><span class="sn">④-3</span>Semaphore：state 是剩下几个名额</h3>
+  <ul class="callouts">
+    <li><b>1</b><span><code>new Semaphore(3)</code> 把 AQS 的 state 设成 3。<code>acquire()</code> 是 AQS 的共享模式：CAS 把 state 减一，减不下去（已经是 0）就排队 park；<code>release()</code> 加一，再叫醒排队的。和 ReentrantLock 不一样，它不记“谁拿了”，任何线程都能 release。</span></li>
+    <li><b>2</b><span>拿它护住下游，叫<b>舱壁</b>（bulkhead）：调库存服务前先拿一个名额，名额用完就等一会儿，等不到就降级（返回“稍后再试”或读缓存）。这样库存服务最多同时被 3 个线程调用，它慢了也只卡住这 3 个，线程池里其他 197 个照样干别的。</span></li>
+    <li><b>3</b><span>它限的是<b>同时进行的个数</b>，不是每秒次数。调用 30 ms 的服务、3 个名额，大约每秒能过 100 次；调用变成 300 ms，就只剩每秒 10 次。要按 QPS 限，用令牌桶（J12）。</span></li>
+  </ul>
+
+  <h3 id="m-jfr"><span class="sn">④-4</span>JFR：JVM 自带的录像机</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>事件</th><th>什么时候记一条</th><th>带着什么</th></tr></thead>
+      <tbody>
+        <tr><th><code>jdk.JavaMonitorEnter</code></th><td>进 synchronized 时等锁超过阈值</td><td>等了多久、锁对象的类、锁地址、<b>上一个持有者</b>、等锁线程的栈</td></tr>
+        <tr><th><code>jdk.ThreadPark</code></th><td>LockSupport.park 超过阈值（ReentrantLock、读写锁、Semaphore、阻塞队列底下都是它）</td><td>等了多久、<code>parkedClass</code>（比如 <code>ReentrantLock$NonfairSync</code>）、栈</td></tr>
+        <tr><th><code>jdk.JavaMonitorWait</code></th><td>Object.wait 超过阈值</td><td>等了多久、有没有超时、被谁叫醒</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul class="callouts">
+    <li><b>1</b><span>阈值：JDK 自带的 <code>default.jfc</code> 是 20 ms，<code>profile.jfc</code> 是 10 ms（本页用 profile）。短于阈值的等待不记，所以 JFR 抓的是“等得久的”，不是“所有的”。</span></li>
+    <li><b>2</b><span>怎么开：启动时加 <code>-XX:StartFlightRecording:filename=x.jfr,settings=profile</code>；已经在跑的进程用 <code>jcmd &lt;pid&gt; JFR.start</code>、<code>JFR.dump</code>。看：<code>jfr summary</code>、<code>jfr print --events …</code>，或者用 JDK Mission Control 打开。官方说 default 配置开销通常在 1% 以内，所以很多团队生产上一直开着、出事了 dump 最近一段。</span></li>
+  </ul>
+
+  <h3 id="m-design"><span class="sn">④-5</span>为什么这样设计：读锁要不要“写一下”</h3>
+  <div class="design">
+    <div class="way" data-role="pd">
+      <h4>悲观读：读锁也记账<small>ReentrantReadWriteLock</small></h4>
+      <ul class="pains">
+        <li class="ok">写线程能知道“现在有几个人在读”，等他们读完再写，读到的永远是完整的数据</li>
+        <li class="ok">可重入、可以 Condition、可以降级，用法和 ReentrantLock 一样</li>
+        <li>每次读都 CAS 同一个 state：读越短、核越多，这一个 int 越成为瓶颈</li>
+      </ul>
+    </div>
+    <div class="way" data-role="g2">
+      <h4>乐观读：读完再核对<small>StampedLock（JDK 8）</small></h4>
+      <ul class="pains">
+        <li class="ok">读的时候不写任何共享状态，读线程之间完全不互相影响</li>
+        <li>可能读到写了一半的数据，代码必须“先复制、后核对、再使用”</li>
+        <li>不可重入、没有 Condition，用错了容易死锁</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict">决定胜负的约束：<b>读的临界区有多长，和写有多频繁</b>。读很短时，CAS 共享计数的开销盖过了“读能并行”的好处，读写锁反而输给普通锁；读很长、写很少时，读写锁才赚。乐观读把读的开销降到几乎为零，代价是写法变难，所以 JDK 把它做成一个单独的类，而不是改掉读写锁。</p>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">API</span><b>最少要会的几行</b></div>
+<pre><code>ReentrantReadWriteLock rw = new ReentrantReadWriteLock();     <span class="cm">// 别传 true，见坑 2</span>
+rw.readLock().lock();  try { return left; } finally { rw.readLock().unlock(); }
+rw.writeLock().lock(); try { left--; }      finally { rw.writeLock().unlock(); }
+
+StampedLock sl = new StampedLock();
+long st = sl.tryOptimisticRead();
+long a = left, b = sold;                                      <span class="cm">// 先复制到局部变量</span>
+if (!sl.validate(st)) {                                       <span class="cm">// 被写过：退回读锁</span>
+  st = sl.readLock(); try { a = left; b = sold; } finally { sl.unlockRead(st); }
+}
+
+Semaphore permits = new Semaphore(3);
+if (permits.tryAcquire(100, TimeUnit.MILLISECONDS)) {         <span class="cm">// 拿不到就降级</span>
+  try { callInventory(); } finally { permits.release(); }     <span class="cm">// 只有拿到了才 release</span>
+}
+
+<span class="cm"># JFR</span>
+java -XX:StartFlightRecording:filename=app.jfr,settings=profile …
+jfr print --events jdk.JavaMonitorEnter,jdk.ThreadPark app.jfr</code></pre>
+  </div>
+  <p class="tip">JFR 的阈值怎么改、synchronized 为什么只记了 7 条、各版本的 JFR 工具差别，放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div>
+    <h2><span class="sn">⑤</span>亲眼看到：四把锁比吞吐，JFR 抓慢锁，Semaphore 护下游</h2>
+    <p class="lead">两个程序，<code>--release 8</code> 编译，JDK 17 运行。完整代码：<a href="https://github.com/archeu/study-labs/tree/main/java/juc/aqs-rwlock-jfr">study-labs/java/juc/aqs-rwlock-jfr →</a></p>
+  </div>
+
+  <h3>实验 1：库存查询读 95%、扣减写 5%，四把锁，先猜再看</h3>
+  <div class="lab rk" id="rk" tabindex="0" aria-label="先猜再看：四把锁谁最快">
+    <div class="rk-top">
+      <div class="seg" id="rk-scn" role="tablist" aria-label="读的工作量">
+        <button type="button" data-v="short" aria-pressed="true">读很短（算 40 轮）</button>
+        <button type="button" data-v="long" aria-pressed="false">读很长（算 2000 轮）</button>
+      </div>
+    </div>
+    <div class="rk-q">
+      <p class="gs-ask">4 个线程、2 核。哪把锁的读吞吐最高？哪把最低？</p>
+      <div class="gs-row"><span class="lbl">最快</span><div class="seg" id="rk-best"></div></div>
+      <div class="gs-row"><span class="lbl">最慢</span><div class="seg" id="rk-worst"></div></div>
+      <button class="btn primary" type="button" id="rk-go">看结果</button>
+    </div>
+    <div class="rk-res" id="rk-res" hidden>
+      <div class="rk-bars" id="rk-bars"></div>
+      <p class="gs-verdict" id="rk-verdict"></p>
+      <p class="gs-why" id="rk-why"></p>
+    </div>
+  </div>
+  <ul class="callouts">
+    <li><b>1</b><span><span class="tag-real">实测</span> 读很短时两次运行：ReentrantLock 1515 / 1503 万次每秒，读写锁 1090 / 1052，<b>公平读写锁 20 / 24</b>，StampedLock 乐观读 2293 / 2328。乐观读有约 4% 核对失败、退回读锁（两次各约 184 万次）。</span></li>
+    <li><b>2</b><span>读很长时：读写锁 47 比 ReentrantLock 42，只领先 12%。2 核上同一时刻最多两个读真正并行，写又占了 5%；核越多、读越长，读写锁的优势才越大。StampedLock 75，领先 1.8 倍。</span></li>
+  </ul>
+
+  <h3>实验 2：锁里一次 30 ms 的慢 SQL，用 JFR 录下来</h3>
+  <div class="two">
+<pre class="console"><span class="w">$ java -XX:StartFlightRecording:filename=slow.jfr,settings=profile \
+       -cp … SlowLock</span>
+synchronized 里慢 SQL：80 单用了 <span class="r">2413 ms</span>（串行下限 2400 ms）
+ReentrantLock 里慢 SQL：80 单用了 <span class="r">2409 ms</span>
+Semaphore(3) 限并发：最多同时 <b>3</b> 个在调库存服务，
+  等 100 ms 拿不到许可被拒绝 <b>17</b> 次，用了 696 ms
+
+<span class="w">$ jfr summary slow.jfr</span>
+ jdk.ThreadSleep          223
+ jdk.ThreadPark           109
+ jdk.JavaMonitorWait        8
+ jdk.JavaMonitorEnter       7</pre>
+<pre class="console"><span class="w">$ jfr print --events jdk.JavaMonitorEnter slow.jfr</span>
+jdk.JavaMonitorEnter {
+  duration = <span class="r">599 ms</span>
+  monitorClass = java.lang.Object
+  previousOwner = "order-exec-7"
+  address = 0xE5ABF8001F80
+  eventThread = "order-exec-6"
+  stackTrace = [
+    …SlowLock.<b>deductStock()</b> line: 52
+    …SlowLock.lambda$main$0() line: 23
+  ]
+}</pre>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t runs">
+      <thead><tr><th>事件</th><th>锁</th><th>卡在哪个方法</th><th class="num">条数</th><th class="num">合计等待</th><th class="num">最长一次</th></tr></thead>
+      <tbody>
+        <tr><th><code>jdk.ThreadPark</code></th><td><code>ReentrantLock$NonfairSync</code></td><td><code>useCoupon</code></td><td class="num">74</td><td class="num bad-t">8899 ms</td><td class="num">1653 ms</td></tr>
+        <tr><th><code>jdk.JavaMonitorEnter</code></th><td><code>java.lang.Object</code></td><td><code>deductStock</code></td><td class="num">7</td><td class="num bad-t">8414 ms</td><td class="num">2107 ms</td></tr>
+        <tr><th><code>jdk.ThreadPark</code></th><td><code>Semaphore$NonfairSync</code></td><td>舱壁那一段</td><td class="num">35</td><td class="num">1932 ms</td><td class="num">100 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip"><span class="tag-real">实测</span> 用 <code>jfr print --json --stack-depth 20</code> 导出后按“事件类型 + 锁的类 + 第一个业务方法”汇总。注意 <code>jfr print</code> 默认只打印栈的前 5 帧，ThreadPark 的前 5 帧全是 JDK 内部，要加 <code>--stack-depth</code> 才看得到业务方法。</p>
+  <ul class="callouts">
+    <li><b>1</b><span>不读代码就能得出结论：<b>两把锁各让线程一共等了 8 秒多</b>，一把是 <code>deductStock</code> 里的 synchronized，一把是 <code>useCoupon</code> 里的 ReentrantLock；Semaphore 那段每次最多等 100 ms，是设计好的。两个慢锁的总耗时都等于“80 次 × 30 ms”，说明锁里的东西是完全串行的。</span></li>
+    <li><b>2</b><span>synchronized 只记了 7 条，ReentrantLock 记了 74 条，合计时间却差不多。原因在 ⑥ 第三圈：synchronized 放锁的线程马上又抢回来，其他线程一等就是一两秒。</span></li>
+    <li><b>3</b><span>Semaphore(3)：80 次调用最多同时 3 个，63 次拿到名额，17 次等 100 ms 没拿到被拒绝（这些在真实系统里就走降级），总共 696 ms，没有任何线程被库存服务拖住超过 100 ms。</span></li>
+  </ul>
+  <div class="done-box"><b>到这里已经能交差了：</b>你知道读多写少时该实测比较哪几把锁，会写 StampedLock 的乐观读，能用 Semaphore 给下游做舱壁，能用一行参数开 JFR、用 <code>jfr print</code> 找到最费时间的锁和它所在的方法。<br><b>已知还没处理的细节：</b>读写锁不一定快（<a href="#p-rw">⑥ 坑 1</a>）、公平读写锁（<a href="#p-fair">⑥ 坑 2</a>）、乐观读的写法（<a href="#p-opt">⑥ 坑 3</a>）、读锁升级（<a href="#p-up">⑥ 坑 4</a>）、Semaphore 多放了名额（<a href="#p-sem">⑥ 坑 5</a>）、JFR 的阈值和栈深（<a href="#p-jfr">⑥ 坑 6</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div>
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-rw"><b><em>坑 1</em>读多写少就换读写锁<a class="root" href="#m-rw">← ④-1 读锁也要 CAS 同一个 state</a></b>
+      <dl><dt>现象</dt><dd>换完更慢了。<span class="seen">⑤：读很短时 1090 对 1515 万次每秒</span></dd>
+      <dt>根源</dt><dd>每次读都 CAS state 的高 16 位，还要维护 ThreadLocal 里的重入计数；读本身只有几十纳秒时，这些开销比读还大。</dd>
+      <dt>做法</dt><dd class="fix">先测。读短：试 StampedLock 乐观读或不可变快照；读长、写少、核多：读写锁才值得。</dd></dl></div>
+    <div class="pit" id="p-fair"><b><em>坑 2</em>读写锁开了公平模式<a class="root" href="#m-rw">← ④-1 公平：前面有人就排队</a></b>
+      <dl><dt>现象</dt><dd>吞吐断崖式下跌。<span class="seen">⑤：每秒 20 万次，比非公平慢 50 倍、比 ReentrantLock 慢 75 倍</span></dd>
+      <dt>根源</dt><dd>公平模式下，只要队列里有人，新来的读线程也得排队、park、等着被叫醒；每次交接都是一次上下文切换。</dd>
+      <dt>做法</dt><dd class="fix">默认非公平。真需要“写一定能按时拿到”，先确认非公平模式下写线程等多久（本机最久 10 ms），再决定。</dd></dl></div>
+    <div class="pit" id="p-opt"><b><em>坑 3</em>乐观读没先复制就用<a class="root" href="#m-stamp">← ④-2 可能读到写了一半</a></b>
+      <dl><dt>现象</dt><dd>偶发 <code>NullPointerException</code>、数组越界，或者算出一个从没存在过的组合（剩余 0、已售 0）。</dd>
+      <dt>根源</dt><dd>乐观读期间写线程可能正在改，validate 之前读到的东西不可信。</dd>
+      <dt>做法</dt><dd class="fix">固定写法：tryOptimisticRead → 把字段复制到局部变量 → validate → 失败就加读锁重读 → 最后才用局部变量。另外 StampedLock 不可重入，拿着写锁再调一个也拿写锁的方法，会把自己锁死。</dd></dl></div>
+    <div class="pit" id="p-up"><b><em>坑 4</em>拿着读锁去拿写锁<a class="root" href="#m-rw">← ④-1 升级不行</a></b>
+      <dl><dt>现象</dt><dd>“查一下库存，不够了就补货”，线程永远卡在 <code>writeLock().lock()</code>，状态 WAITING。</dd>
+      <dt>根源</dt><dd>写锁要等所有读锁放掉，而等的人自己就拿着一个读锁。</dd>
+      <dt>做法</dt><dd class="fix">先放读锁再拿写锁，拿到后重新检查条件；或者用 StampedLock 的 <code>tryConvertToWriteLock</code>。</dd></dl></div>
+    <div class="pit" id="p-sem"><b><em>坑 5</em>没拿到名额也 release<a class="root" href="#m-sem">← ④-3 Semaphore 不记谁拿的</a></b>
+      <dl><dt>现象</dt><dd>说好最多 3 个并发，跑一阵变成了 5 个、10 个，下游又被打挂。</dd>
+      <dt>根源</dt><dd>release 只是把 state 加一，不检查你有没有拿过。<code>tryAcquire</code> 失败的分支里也走了 finally 里的 release，名额就越放越多。</dd>
+      <dt>做法</dt><dd class="fix">只在拿到之后进 try，finally 里 release（⑤ 的写法）。</dd></dl></div>
+    <div class="pit" id="p-jfr"><b><em>坑 6</em>JFR 里什么都没看到<a class="root" href="#m-jfr">← ④-4 阈值和栈深</a></b>
+      <dl><dt>现象</dt><dd>明明锁竞争很凶，JFR 里锁事件寥寥无几；或者看到了事件，栈里全是 JDK 内部方法。</dd>
+      <dt>根源</dt><dd>短于阈值（default 20 ms、profile 10 ms）的等待不记：竞争又多又短时要看总次数，不是单次时长。<code>jfr print</code> 默认只打印 5 帧栈。</dd>
+      <dt>做法</dt><dd class="fix">用 profile 配置或自定义阈值；看栈加 <code>--stack-depth</code>；短而多的竞争换 async-profiler 的 lock 模式。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>换锁之前先测</b><p>用接近真实的读写比例和读耗时，在和生产相同核数的机器上比。</p><p class="guard">坑 1、坑 2。</p></div>
+    <div class="rl"><b>读多写少优先考虑不加锁的读</b><p>不可变对象 + volatile 引用（写时整份替换），或者 ConcurrentHashMap。</p><p class="guard">读也要排队。</p></div>
+    <div class="rl"><b>调外部服务一律有舱壁和超时</b><p>Semaphore 或线程池隔离，<code>tryAcquire</code> 带超时，拿不到就降级。</p><p class="guard">一个慢服务拖死整个线程池。</p></div>
+    <div class="rl"><b>生产常开 JFR</b><p>default 配置、设好最大大小和保留时长，出事时 <code>jcmd JFR.dump</code> 拿最近一段。</p><p class="guard">问题过去了才去查，什么都没留下。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：公平、插队和工具</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="cg"><h4>synchronized 为什么只记了 7 条</h4>
+      <p>每个线程是“拿锁 → 睡 30 ms → 放锁 → 马上又去拿”。放锁的线程正在 CPU 上，被叫醒的线程还要几微秒才能跑起来，于是放锁的线程又抢到了：synchronized 不保证公平，<b>一个线程往往连着做完自己的 10 单</b>，其他线程一等就是一两秒（实测最长 2107 ms），只留下少数几条很长的事件。ReentrantLock 默认也不公平，但被叫醒的队首线程和插队者同时 CAS，换手更频繁，于是有 74 条较短的事件。两者合计等待时间差不多，因为锁里的 30 ms 本来就是串行的。</p></div>
+    <div class="dp" data-role="g2"><h4>StampedLock 的 state</h4>
+      <p>一个 long：低 7 位记读锁个数（满了溢出到一个额外的 int），第 8 位是写锁位，再往上是版本号。每次放写锁，版本号加一，所以 <code>validate</code> 只要比较“版本 + 写锁位”变没变。乐观读返回的戳就是当时的这几位（JDK 17 源码 <code>tryOptimisticRead</code>）。JDK 8 引入，JDK 14 起它的等待队列和 AQS 一起重写过。</p></div>
+    <div class="dp" data-role="bk"><h4>版本差异</h4>
+      <div class="tbl-wrap"><table class="t" style="min-width:0"><tbody>
+        <tr><th>JDK 5</th><td>ReentrantReadWriteLock、Semaphore（都基于 AQS）</td></tr>
+        <tr><th>JDK 8</th><td>StampedLock；8u262 起 OpenJDK 8 也带 JFR</td></tr>
+        <tr><th>JDK 11</th><td>JFR 开源，OpenJDK 里免费可用（JEP 328）；自带 <code>jfr</code> 命令行工具在 JDK 12 加入</td></tr>
+        <tr><th>JDK 14</th><td>JFR 事件流（JEP 349），可以在程序里边录边读</td></tr>
+        <tr><th>JDK 17</th><td>本页实测版本：<code>jfr summary</code>、<code>jfr print --json --stack-depth</code></td></tr>
+        <tr><th>JDK 21</th><td><code>jfr view</code> / <code>jcmd JFR.view</code>，直接出“竞争最多的锁”这类汇总表</td></tr>
+      </tbody></table></div>
+      <p class="tip">JDK 12 / 21 的工具改动按发布说明，本机没跑。</p></div>
+    <div class="dp" data-role="pd"><h4>面试官会怎么问</h4>
+      <div class="faq">
+        <details><summary>ReentrantReadWriteLock 的 state 怎么同时表示读和写？</summary><p>一个 int 劈成两半：高 16 位是读锁持有次数，低 16 位是写锁重入次数；每个线程自己的读重入次数存在 ThreadLocal 里（④-1）。</p></details>
+        <details><summary>读写锁会不会让写线程饿死？</summary><p>非公平模式下，新读线程看到队首是写线程就会让，所以通常不会无限饿死，但这只是启发式；写线程的等待会被拉长（④-1、⑤ 写等锁最久 10 ms）。</p></details>
+        <details><summary>StampedLock 和 ReentrantReadWriteLock 有什么区别？</summary><p>多一个乐观读：读时不写共享状态，读完 validate；不可重入、没有 Condition；读很短时快很多（⑤：2293 对 1090 万次每秒）（④-2）。</p></details>
+        <details><summary>线上怎么定位锁竞争？</summary><p>JFR 录 jdk.JavaMonitorEnter 和 jdk.ThreadPark，按锁和方法汇总等待时间；再用 jstack -l 看当前持有者；短而频繁的用 async-profiler lock 模式（④-4、⑤）。</p></details>
+      </div></div>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span></div>
+  <ul class="next">
+    <li>用 JFR 事件流（<code>RecordingStream</code>）在程序里实时统计锁等待，超过阈值就打日志或报警</li>
+    <li>JDK Mission Control 的“锁实例”和“线程”视图，配合 <code>jfr view</code>（JDK 21）</li>
+    <li>async-profiler 的 lock 和 wall 模式，看短而多的竞争（J13）</li>
+    <li><code>FutureTask</code> 为什么从 AQS 换成了自己的等待栈（上一圈列过，留给 CompletableFuture 那一页）</li>
+    <li>限流：令牌桶、漏桶、Sentinel 的并发线程数限流和 Semaphore 的关系（J12）</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div>
+    <h2><span class="sn">↺</span>回到⑤：改造你的案例</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="g2"><h4>1. 库存快照：读完全不加锁</h4><p>给 <code>RwBench</code> 加第五种：库存三个字段放进一个不可变对象，<code>volatile</code> 引用指向它；写的时候加锁、new 一个新对象替换引用，读直接读引用。和 StampedLock 比读吞吐。</p><p class="uses">用到：③、规范 2</p></div>
+    <div class="exc" data-role="cg"><h4>2. 把慢 SQL 挪到锁外，再录一次</h4><p>改 <code>SlowLock.deductStock</code>：锁里只做“检查 + 扣减”，30 ms 的 SQL 放在锁外。重新开 JFR，对比 <code>jfr summary</code> 里锁事件的条数和总耗时。</p><p class="uses">用到：坑 6、<a href="synchronized-cas-atomic.html#p-slow">synchronized 页坑 2</a></p></div>
+    <div class="exc" data-role="bk"><h4>3. 故意写错 Semaphore</h4><p>把舱壁改成 <code>try { if (!tryAcquire(…)) continue; … } finally { release(); }</code>，看“最多同时几个”还是不是 3。</p><p class="uses">用到：坑 5</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一圈的精华。</summary><p>读写锁、StampedLock、Semaphore 都是 AQS 换了 state 的用法：读写锁让读也去改共享计数，所以读短时不一定快；乐观读不写任何东西，最快但写法讲究；Semaphore 用名额限并发。锁竞争用 JFR 的锁事件录下来，按锁和方法汇总等待时间。</p></details>
+    <details><summary>2. 只有互斥锁和 jstack 时，疼在哪？</summary><p>读也互相排队；下游没人护着；jstack 只是一张照片，看不出等了多久、多少次（②）。</p></details>
+    <details><summary>3. 读写锁在读很短时反而慢，根源是 ④ 的哪一条？</summary><p>④-1：读锁加锁也要 CAS 同一个 state、维护 ThreadLocal 计数，那条缓存行在核之间来回搬。</p></details>
+    <details><summary>4. 预测：把实验 1 放到 32 核机器上、32 个线程，读很长时，读写锁和 ReentrantLock 的差距会变大还是变小？读很短时呢？</summary><p>读很长：差距变大，读写锁能让几十个读同时进行，ReentrantLock 只能一个一个来。读很短：读写锁可能更糟，32 个核一起 CAS 同一个 state，缓存行争用比 2 核严重得多；StampedLock 乐观读的优势会更明显（④-1、④-5）。</p></details>
+    <details><summary>5. 预测：库存服务的一次调用从 30 ms 变成 300 ms，Semaphore(3) 加 100 ms 超时的舱壁，每秒能放过去多少次？被拒绝的比例怎么变？</summary><p>3 个名额 × 每秒约 3.3 次 ≈ 每秒 10 次，比原来的约 100 次少一个数量级；排队的线程大多等不到 100 ms 就被拒绝，拒绝比例大幅上升。舱壁把损失限制在“这个功能降级”，线程池其他请求不受影响（④-3）。</p></details>
+    <details><summary>6. 放回全景：第 6 站 47 个线程 BLOCKED。如果那时生产上开着 JFR，你会看到哪种事件、哪个锁类、哪一行？第 2 站的线程池会怎样？</summary><p>jdk.JavaMonitorEnter，monitorClass 是那把锁对象的类（全景程序里是 <code>java.lang.Object</code>），栈顶在 StockService 的 sync 分支；previousOwner 告诉你上一个持有者。第 2 站：锁里慢，exec 线程大量 BLOCKED，200 个线程被占满后新请求排进 Tomcat 的队列，接口整体变慢。修法：锁里只放检查和扣减，或者交给第 8 站的条件更新。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准（下一圈）。实验在本机 2 核 ARM，JDK 17.0.20：<code>RwBench</code> 读很短跑两次、读很长（参数 2000）跑一次，每种锁 2 秒；<code>SlowLock</code> 在 <code>-XX:StartFlightRecording:…,settings=profile</code> 下跑一次，用 <code>jfr summary</code>、<code>jfr print</code> 和 <code>jfr print --json --stack-depth 20</code> 汇总。标“实测”的都来自这几次运行。</p>
+  <p>按源码（本机 JDK 17）：ReentrantReadWriteLock 的 <code>SHARED_SHIFT = 16</code>、<code>MAX_COUNT</code>、两种 <code>readerShouldBlock</code>（含原注释）、AQS 的 <code>apparentlyFirstQueuedIsExclusive</code>；StampedLock 的 <code>tryOptimisticRead</code>、<code>validate</code>（loadFence）和“不可重入”的类注释。按文档：JDK 自带 default.jfc / profile.jfc 的锁事件阈值、JFR 开销说明、JEP 328 / 349、JDK 21 的 <code>jfr view</code>。</p>
+  <p>相关：<a href="aqs.html">AQS 源码（上一圈）</a> · <a href="synchronized-cas-atomic.html">synchronized 与锁升级、CAS 与原子类</a> · <a href="jmm-jcstress-cache.html">JMM 下一圈</a> · <a href="../java/pano-j02-order-in-threadpool.html">全景：一个下单请求在线程池里</a> · <a href="../java/roadmap.html#j02">Java 地图 J02</a></p>
+</footer>
+
+</main>
+<script>
+/*SIM-START*/
+// 本机实测（JDK 17，2 核 ARM，4 线程，读 95% / 写 5%，每种 2 秒）：读吞吐，万次/秒。读很短取两次运行的第一次。
+const LOCKS = ["ReentrantLock", "读写锁", "公平读写锁", "StampedLock 乐观读"];
+const RK = {
+  short: { reads: [1515, 1090, 20, 2293], writeWait: [7.4, 10.6, 2.0, 6.0],
+    why: "读只有几十纳秒：读写锁每次读都要 CAS 共享的 state，比读本身还贵，于是输给普通锁；公平模式让每次加锁都排队、park、被叫醒，几乎全花在上下文切换上；乐观读什么都不写，最快。" },
+  long: { reads: [42, 47, 17, 75], writeWait: [10.4, 10.0, 2.4, 7.4],
+    why: "读变长以后，读能并行的好处显出来了，读写锁超过普通锁，但 2 核上最多两个读同时进行，只领先 12%；公平读写锁还是最慢；乐观读依然最快。" }
+};
+function rankOf(scn) {
+  const r = RK[scn].reads;
+  let best = 0, worst = 0;
+  r.forEach((v, i) => { if (v > r[best]) best = i; if (v < r[worst]) worst = i; });
+  return { best, worst };
+}
+function gradeRk(scn, gBest, gWorst) {
+  const t = rankOf(scn);
+  return { best: gBest === null ? null : gBest === t.best, worst: gWorst === null ? null : gWorst === t.worst, truth: t };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = s => document.querySelector(s);
+  if (!$("#rk")) return;
+  let scn = "short", gb = null, gw = null;
+  function seg(id, onPick) {
+    const box = $(id);
+    box.textContent = "";
+    LOCKS.forEach((n, i) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = n; b.dataset.i = i;
+      b.setAttribute("aria-pressed", "false");
+      b.addEventListener("click", () => {
+        box.querySelectorAll("button").forEach(x => { x.setAttribute("aria-pressed", String(x === b)); x.classList.remove("right", "wrong"); });
+        onPick(i);
+      });
+      box.append(b);
+    });
+  }
+  function reset() {
+    gb = gw = null;
+    seg("#rk-best", i => { gb = i; });
+    seg("#rk-worst", i => { gw = i; });
+    $("#rk-res").hidden = true;
+  }
+  document.querySelectorAll("#rk-scn button").forEach(b => b.addEventListener("click", () => {
+    scn = b.dataset.v;
+    document.querySelectorAll("#rk-scn button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    reset();
+  }));
+  $("#rk-go").addEventListener("click", () => {
+    const g = gradeRk(scn, gb, gw);
+    [["#rk-best", g.truth.best, gb], ["#rk-worst", g.truth.worst, gw]].forEach(([id, truth, guess]) => {
+      document.querySelectorAll(id + " button").forEach(b => {
+        const i = +b.dataset.i;
+        b.classList.toggle("right", i === truth);
+        b.classList.toggle("wrong", i === guess && i !== truth);
+      });
+    });
+    const d = RK[scn], max = Math.max(...d.reads), bars = $("#rk-bars");
+    bars.textContent = "";
+    LOCKS.forEach((n, i) => {
+      const row = document.createElement("div");
+      row.className = "gh" + (i === g.truth.best ? " best" : i === g.truth.worst ? " hit" : "");
+      row.innerHTML = '<span class="nm"></span><span class="track"><span class="fill"></span></span><span class="v"></span>';
+      row.querySelector(".nm").textContent = n;
+      row.querySelector(".fill").style.width = Math.max(1, d.reads[i] / max * 100) + "%";
+      row.querySelector(".v").textContent = d.reads[i] + " 万次/秒 · 写等锁最久 " + d.writeWait[i] + " ms";
+      bars.append(row);
+    });
+    const parts = [];
+    if (g.best !== null) parts.push("最快" + (g.best ? "猜对了" : "猜错了"));
+    if (g.worst !== null) parts.push("最慢" + (g.worst ? "猜对了" : "猜错了"));
+    $("#rk-verdict").textContent = (parts.length ? parts.join("，") + "。" : "") + "最快是 " + LOCKS[g.truth.best] + "，最慢是 " + LOCKS[g.truth.worst] + "。";
+    $("#rk-why").textContent = d.why;
+    $("#rk-res").hidden = false;
+  });
+  reset();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
