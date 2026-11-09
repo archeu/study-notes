@@ -28,6 +28,7 @@
 |---|------|------|
 | 00 | [Java 后端架构学习地图](https://archeu.github.io/study-notes/java/roadmap.html) | 从高级工程师到架构师（每站先看场景全景，J04 用“从输入 URL 到页面展示”）：三个等级、十六站路线（117 个知识点，J06 含 PostgreSQL 对照，J11 含 TiDB、OceanBase、GoldenDB、过关检验、待做页）、25 份招聘要求统计和已有页面的缺口、交易靶场贯穿、两段式安排（AI 主线期间按需补，走完后约 15 周系统学）、版本基线，先定位搜索 |
 | 01 | [全景：一个订单对象的一生](https://archeu.github.io/study-notes/java/pano-j01-order-object-life.html) | J01 的场景全景：用户 1024 下单 2 件 88 号商品，一个 Order 经过 Tomcat 收字节、Jackson 反序列化成 record、Spring 代理开事务、HashMap 查商品、new 实体与泛型擦除、Stream 和模式匹配算价、扣库存抛异常回滚、放进集合、DelayQueue、序列化写回、留在堆里十一站，每站挂上 J01 知识点；本机 Spring Boot 实测每站类名、桶下标、冷热耗时和存活对象数，分步演示 |
+| 02 | [全景：一个下单请求在线程池里](https://archeu.github.io/study-notes/java/pano-j02-order-in-threadpool.html) | J02 的场景全景：1000 人抢 100 件 88 号键盘，一个请求经过 Tomcat Acceptor 和 Poller、exec 线程池、ThreadLocal 绑用户、读库存、写回撞车超卖，再分三种修法（synchronized、CAS、数据库条件更新），最后进 ConcurrentHashMap、CompletableFuture 异步通知、清 ThreadLocal 回池十一站，每站挂上 J02 知识点；本机 Spring Boot 实测五种写法的超卖件数、BLOCKED 线程数和虚拟线程，分步演示 |
 
 ## Spring
 
