@@ -1,0 +1,1320 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>JIT、逃逸分析与常见的性能误区</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a mechanism (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), J03 panorama stop 2. Roles: other grey = interpreter, g2 brown = C1, of amber = C2 / escape analysis (page accent), pd blue = heap allocation (stop 3), cg purple = class loading (stop 1, deopt trigger), bk teal = GC; bad / good fixed. Interaction: one escape-analysis bench in ④-3 (pick a code shape, guess heap or not, toggle -XX:-DoEscapeAnalysis, show measured B/call) — sim in SIM block, checked in node. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+body{overflow-x:clip}
+.lab-h{font-family:var(--font-display);font-weight:400;font-size:20px}
+#eb-res p{margin:0 0 4px}
+#eb-res .note-p{font-size:13px;color:var(--muted)}
+#eb pre{white-space:pre;overflow-x:auto}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>JVM</span><span aria-hidden="true">/</span><span class="tb-here">JIT、逃逸分析与常见的性能误区</span></div></nav>
+
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-good" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-of" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+
+<header class="hero">
+  <p class="kicker">解释器 · 分层编译 · C1 · C2 · 方法计数器 · 回边计数器 · OSR · profile · 内联 · 去虚化 · 逃逸分析 · 标量替换 · 锁消除 · 去优化 · 代码缓存 · JMH · OmitStackTraceInFastThrow</p>
+  <h1>JIT 与逃逸分析：先解释、边跑边记，热了再按记下的情况大胆编译；逃逸分析靠内联才看得见，看见了，new 就不进堆</h1>
+  <p class="lead">Java 方法一开始由<b>解释器</b>一条条执行字节码，同时记下调用次数、走了哪条分支、调用点上来的是哪个实现类。方法热了，<b>C1</b> 先快速编出一版，<b>C2</b> 再按这些记录做激进优化：把被调用的方法<b>内联</b>进来，于是能看清一个对象有没有<b>逃出</b>这段代码；没逃出的，就拆成几个局部变量（<b>标量替换</b>），<code>new</code> 不再发生。记录要是不再成立（新加载了一个实现类），就退回解释器重来（<b>去优化</b>）。交易靶场里实测：算价方法纯解释 358 ns/次，C2 编译后 3.7 ns/次、堆上分配 0 字节；同一个 <code>Money</code> 一旦传给“见过三种支付渠道”的接口调用，就又进了堆。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j03-object-new-to-gc.html#s-2">一个对象从 new 到被回收 · 第 2 站</a></span><span>地图：<a href="../java/roadmap.html#j03">J03 · JIT、逃逸分析与常见的性能误区</a></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：算价方法一秒要跑几百万次，字节码不能一直“念”着执行</h2>
+    <p class="lead">在全景第 2 站，第 1 站已经把 <code>Order</code>、<code>Money</code> 的类加载好了，下单线程开始反复执行算价代码。这一步要解决两件事：一是<b>快</b>，字节码是给虚拟机看的指令，逐条解释执行比机器码慢上百倍；二是<b>少分配</b>，算价里每一步运算都 <code>new</code> 一个临时 <code>Money</code>，要是每个都进 Eden（第 3 站），堆很快就满，第 5 站的 Young GC 就得频繁出来干活。全景里那组数：循环 5000 万次 <code>new Money</code>，编译之后线程在堆上只分配了 0.7 MB；关掉逃逸分析或者纯解释，都是 1144.4 MB。</p>
+  </div>
+  <div class="facts">
+    <div class="fact" data-role="other"><h4>358 ns</h4><p>纯解释（<code>-Xint</code>）跑一次 <code>priceOf</code>，每次在堆上分配 72 字节 <span class="tag-real">实测</span></p></div>
+    <div class="fact" data-role="g2"><h4>17 ns</h4><p>只用 C1（<code>-XX:TieredStopAtLevel=1</code>）：编译了，但 3 个 <code>Money</code> 照样进堆 <span class="tag-real">实测</span></p></div>
+    <div class="fact" data-role="of"><h4>3.7 ns · 0 B</h4><p>默认分层编译：C2 接手后，3 个 <code>Money</code> 都被标量替换，堆上 0 字节 <span class="tag-real">实测</span></p></div>
+    <div class="fact" data-role="bad"><h4>24 B</h4><p>同一个 <code>Money</code> 传给见过 3 种实现的接口方法：C2 不内联，它就进堆 <span class="tag-real">实测</span></p></div>
+  </div>
+  <div class="scene"><b>场景</b><span>交易靶场的算价：一个订单行 = 单价 × 数量，满 10 件打 95 折。<code>Money</code> 是不可变的金额类，每次运算返回一个新的。代码写得很“面向对象”，一次算价 new 了 3 个 <code>Money</code>。问题是：这样写，线上会不会很慢、会不会给 GC 添很多活？</span></div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">交易靶场</span><b>Warmup.priceOf</b><span class="tip" style="margin-left:auto">⑤ 会跑它</span></div>
+<pre><code>final class Money {                       <span class="cm">// 对象头 12 字节 + long 8 字节 → 24 字节</span>
+    final long cents;
+    Money(long cents) { this.cents = cents; }
+    Money times(int qty) { return <span class="hl">new Money</span>(cents * qty); }
+    Money off(int pct)   { return <span class="hl">new Money</span>(cents * (100 - pct) / 100); }
+}
+static long priceOf(int sku, int qty) {
+    Money unit = <span class="hl">new Money</span>(BASE[sku &amp; 1023]);
+    return unit.times(qty).off(qty &gt;= 10 ? 5 : 0).cents;   <span class="cm">// 三个 Money 都没离开这个方法</span>
+}</code></pre>
+  </div>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="第 2 站发生的事：第 1 站把类加载进元空间后，priceOf 的字节码先交给解释器执行，同时计数和记录 profile；调用次数过了阈值，C1 编出带计数的机器码；更热以后，C2 按 profile 内联 times 和 off，做逃逸分析，把三个 Money 拆成局部的 long，机器码放进代码缓存。只有逃出去的对象才去第 3 站在 Eden 的 TLAB 里分配。">
+  <rect class="b-cg" x="16" y="30" width="130" height="64" rx="12"/>
+  <text class="t-b" x="30" y="56">第 1 站</text><text class="t-xs" x="30" y="78">类已加载 · 字节码</text>
+  <path class="e-ink" d="M146 62 L176 62" marker-end="url(#ah-ink)"/>
+  <rect class="b-neu" x="180" y="22" width="170" height="80" rx="12"/>
+  <text class="t-b" x="196" y="48">解释器</text><text class="t-xs" x="196" y="70">一条条执行字节码</text><text class="t-xs" x="196" y="88">边跑边计数、记 profile</text>
+  <path class="e-ink" d="M350 62 L380 62" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="352" y="50">200 次</text>
+  <rect class="b-g2" x="384" y="22" width="160" height="80" rx="12"/>
+  <text class="t-b" x="400" y="48">C1</text><text class="t-xs" x="400" y="70">几毫秒编好，优化少</text><text class="t-xs" x="400" y="88">继续计数、记 profile</text>
+  <path class="e-ink" d="M544 62 L574 62" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="542" y="50">5000 次</text>
+  <rect class="b-of" x="578" y="14" width="200" height="96" rx="12"/>
+  <text class="t-b" x="594" y="40">C2（本页主角）</text><text class="t-xs" x="594" y="62">按 profile 内联 times、off</text><text class="t-xs" x="594" y="80">逃逸分析：3 个 Money 没逃</text><text class="t-xs" x="594" y="98">拆成局部 long（标量替换）</text>
+  <path class="e-ink" d="M778 62 L808 62" marker-end="url(#ah-ink)"/>
+  <rect class="b-card" x="812" y="22" width="132" height="80" rx="12"/>
+  <text class="t-b" x="826" y="48">代码缓存</text><text class="t-xs" x="826" y="70">堆外，放机器码</text><text class="t-xs" x="826" y="88">之后直接跑它</text>
+  <path class="e-ofd" d="M678 110 L678 160" marker-end="url(#ah-of)"/>
+  <text class="t-xs" x="688" y="140">逃出去的对象才走这条</text>
+  <rect class="b-pd" x="560" y="164" width="236" height="56" rx="12"/>
+  <text class="t-b" x="576" y="188">第 3 站：Eden 里的 TLAB</text><text class="t-xs" x="576" y="208">指针往后挪 24 字节</text>
+  <text class="t-xs" x="16" y="160">阈值是 JDK 17 默认值的简化说法：</text>
+  <text class="t-xs" x="16" y="178">调用 200 次左右交给 C1，5000 次左右交给 C2；</text>
+  <text class="t-xs" x="16" y="196">循环转得多的方法，看的是回边计数，见 ④-1。</text>
+  <text class="t-xs" x="16" y="232">没逃出去的 Money 根本不会到第 3 站，也就不会给第 5 站的 Young GC 添活。</text>
+</svg>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：只解释，或者只做保守的编译</h2>
+    <p class="lead">把 JIT 拿掉一半看看。下面四根条是同一个 <code>priceOf</code> 在本机的稳态耗时（第 3～30 批的中位数，每批 20 万次）和每次在堆上分配的字节。</p>
+  </div>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 266" role="img" aria-label="同一个 priceOf 四种跑法的稳态耗时：纯解释 358 纳秒每次，分配 72 字节；只用 C1 17 纳秒，72 字节；C2 但关掉逃逸分析 23 纳秒，72 字节；默认分层编译 3.7 纳秒，0 字节。条长按对数刻度画。">
+  <text class="t-xs" x="200" y="20">每次耗时（对数刻度）</text>
+  <line class="g-axis" x1="200" y1="28" x2="200" y2="210"/>
+  <text class="t-xs" x="196" y="226">1 ns</text><text class="t-xs" x="384" y="226">10 ns</text><text class="t-xs" x="570" y="226">100 ns</text><text class="t-xs" x="752" y="226">1000 ns</text>
+  <line class="g-axis" x1="386" y1="28" x2="386" y2="210" stroke-dasharray="3 4"/><line class="g-axis" x1="572" y1="28" x2="572" y2="210" stroke-dasharray="3 4"/><line class="g-axis" x1="758" y1="28" x2="758" y2="210" stroke-dasharray="3 4"/>
+  <text class="t-b" x="16" y="56">纯解释 -Xint</text>
+  <rect class="b-neu" x="200" y="38" width="475" height="28" rx="6"/><text class="t-b" x="684" y="58">358 ns · 72 B</text>
+  <text class="t-b" x="16" y="100">只用 C1</text>
+  <rect class="b-g2" x="200" y="82" width="229" height="28" rx="6"/><text class="t-b" x="438" y="102">17 ns · 72 B</text>
+  <text class="t-b" x="16" y="144">C2，关逃逸分析</text>
+  <rect class="b-bad" x="200" y="126" width="254" height="28" rx="6"/><text class="t-b" x="463" y="146">23 ns · 72 B</text>
+  <text class="t-b" x="16" y="188">默认分层编译</text>
+  <rect class="b-of" x="200" y="170" width="106" height="28" rx="6"/><text class="t-b" x="315" y="190">3.7 ns · 0 B</text>
+  <text class="t-xs" x="16" y="244">本机 2 核 ARM，JDK 17.0.20.1，G1 默认堆。72 B = 3 个 Money × 24 B。</text><text class="t-xs" x="16" y="260">只用 C1 和关掉 EA 的两组，单批最慢分别到 41 ns 和 47 ns（Young GC 插进来），这两组谁快不要当结论。</text>
+</svg>
+  </div>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>只解释</h4>
+      <ul class="pains">
+        <li>每条字节码都要“取指令、查表、跳到对应的处理代码”，一次加法变成几十条机器指令</li>
+        <li>慢两个数量级：358 ns 对 3.7 ns，差了将近 100 倍</li>
+        <li>每个 <code>new</code> 都真的分配，72 B/次全进 Eden</li>
+      </ul>
+    </div>
+    <div class="way" data-role="g2">
+      <h4>编译了，但只做保守的优化</h4>
+      <ul class="pains">
+        <li>C1 编得快，但不做逃逸分析：3 个 <code>Money</code> 照样进堆</li>
+        <li>C2 关掉逃逸分析也是 72 B/次：内联做了，对象还是要分配</li>
+        <li>每秒几百万次算价，就是每秒几百 MB 的短命垃圾，Young GC 次数跟着翻倍</li>
+      </ul>
+    </div>
+  </div>
+  <p class="tip">缺的是两样：<b>只给热的代码</b>花大力气编译（冷代码解释就够，编译它不划算），以及编译时能<b>看穿方法调用</b>，知道一个对象是不是只在这一小段代码里用。前者是分层编译，后者是“内联 + 逃逸分析”。不懂这一点的典型误用：为了“省 GC”给 <code>Money</code> 这种小对象做对象池，结果对象全变成长寿的、进了老年代，还得自己处理并发，比让 C2 标量替换掉慢得多；见 <a href="#p-pool">⑥ 误区 1</a>。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：什么时候编译、谁来编译</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>什么时候编译</th><th>能用上运行时信息吗</th><th>启动</th><th>峰值</th><th>谁在用</th></tr></thead>
+      <tbody>
+        <tr><th>纯解释</th><td>不编译</td><td>不需要</td><td>快</td><td>很慢</td><td><code>-Xint</code>，只用来排查 JIT 的问题</td></tr>
+        <tr class="hl"><th>JIT 分层编译</th><td>运行中，热了再编</td><td>能：调用次数、分支走向、调用点上的实际类型</td><td>要预热</td><td>最高</td><td>HotSpot 默认（解释器 + C1 + C2）</td></tr>
+        <tr><th>AOT 提前编译</th><td>构建时编成机器码</td><td>只能靠构建时的一次训练运行，或者不用</td><td>最快</td><td>通常低一些</td><td>GraalVM Native Image；C/C++、Go 也是这一路</td></tr>
+        <tr><th>JIT + 提前存档</th><td>先跑一次训练，把加载、链接、profile 存起来，正式启动直接用</td><td>能，训练时记下的加上运行时的</td><td>较快</td><td>和 JIT 一样</td><td>JDK 24 起的 AOT 缓存（Project Leyden），见 ⑥ 版本差异</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">选择规则：长期运行的后端服务，峰值吞吐最要紧，用默认的 JIT 分层编译，把“要预热”当成发布流程的一部分处理；冷启动比峰值重要的（命令行工具、函数计算、频繁扩缩容的小服务），考虑 Native Image 或 AOT 缓存。本页学 HotSpot 的分层编译，和 C2 里最影响你写代码方式的两件事：内联和逃逸分析。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：分层编译、内联、逃逸分析、去优化，以及为什么偏要在运行时编译</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>字节码</b>是一种栈式指令，比如 <code>lload_0; iload_1; i2l; lmul</code>。<code>javap -c</code> 能看到。解释器的工作就是一条条取出来执行。</li>
+      <li>编译好的机器码放在<b>代码缓存</b>（Code Cache），在堆外，有大小上限，见 <a href="jvm-memory-structure.html">JVM 内存结构</a>。</li>
+      <li>对象在堆里怎么分配、24 字节是怎么算出来的，见 <a href="jvm-object-new-layout.html">new 一个对象的全过程</a>。“堆上分配了多少”用 <code>ThreadMXBean.getThreadAllocatedBytes</code> 量，它统计的是这个线程在 TLAB 里和 TLAB 外分出去的字节。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-tier">④-1 分层编译：一个方法从冷到热，换三次“身体”</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="分层编译的五个级别：0 级解释执行并记 profile；1 级 C1 编译、不记 profile，给很简单的方法用；2 级 C1 只记调用和回边次数；3 级 C1 记完整 profile；4 级 C2 按 profile 深度优化。常见路径是 0 到 3 到 4。C2 队列太长时先走 2 级。C2 的假设失效时去优化回到 0 级。长循环靠回边计数触发 OSR，在循环中途换成编译好的代码。">
+  <rect class="b-neu" x="16" y="70" width="150" height="90" rx="12"/>
+  <text class="t-h" x="32" y="96">0 级</text><text class="t-s" x="32" y="120">解释器</text><text class="t-xs" x="32" y="140">计数 + 记 profile</text>
+  <path class="e-ink" d="M166 115 L262 115" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="174" y="104">调用 200 次</text><text class="t-xs" x="174" y="136">或回边 6 万次</text>
+  <rect class="b-g2" x="266" y="70" width="190" height="90" rx="12"/>
+  <text class="t-h" x="282" y="96">3 级 C1</text><text class="t-s" x="282" y="120">带完整 profile 的机器码</text><text class="t-xs" x="282" y="140">比解释快，比 1 级慢一点</text>
+  <path class="e-ink" d="M456 115 L552 115" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="462" y="104">调用 5000 次</text><text class="t-xs" x="462" y="136">或回边 4 万次</text>
+  <rect class="b-of" x="556" y="60" width="220" height="110" rx="12"/>
+  <text class="t-h" x="572" y="88">4 级 C2</text><text class="t-s" x="572" y="112">按 profile 激进优化</text><text class="t-xs" x="572" y="132">内联 · 去虚化 · 逃逸分析</text><text class="t-xs" x="572" y="150">循环优化 · 锁消除</text>
+  <path class="e-bad" d="M666 170 C666 250, 91 250, 91 166" marker-end="url(#ah-bad)"/>
+  <text class="t-bad" x="300" y="246">去优化：假设不成立了，回到解释器，重新攒 profile（④-4）</text>
+  <rect class="b-g2" x="266" y="8" width="150" height="46" rx="10"/><text class="t-b" x="280" y="28">2 级 C1</text><text class="t-xs" x="280" y="44">C2 太忙时先待在这</text>
+  <rect class="b-g2" x="800" y="70" width="144" height="90" rx="12"/>
+  <text class="t-h" x="814" y="96">1 级 C1</text><text class="t-xs" x="814" y="120">不记 profile</text><text class="t-xs" x="814" y="140">getter 这种小方法</text>
+  <text class="t-xs" x="16" y="196">计数器有两种：方法被调用一次加 1；循环往回跳一次（回边）加 1。</text>
+  <text class="t-xs" x="16" y="214">一个循环转 5000 万圈的方法可能只被调用一次，靠回边计数触发 <tspan class="t-mono">OSR</tspan>（栈上替换）：在循环中途换成编译好的版本。</text>
+  <text class="t-xs" x="16" y="286">阈值是 JDK 17 的 Tier3InvocationThreshold=200、Tier4InvocationThreshold=5000、Tier3BackEdgeThreshold=60000、Tier4BackEdgeThreshold=40000（本机 PrintFlagsFinal），实际判定还会按编译队列长度调整。</text>
+</svg>
+  </div>
+  <p class="tip">为什么要三层，不直接上 C2：C2 编一个方法要几毫秒到几十毫秒、还要一份足够长的 profile，C1 编得快一个量级。先用 C1 让代码“快起来”，同时让 3 级代码继续记 profile，攒够了再交给 C2。编译在后台的编译线程里做（本机 2 核，<code>CICompilerCount=2</code>：C1、C2 各一个），业务线程不用等，期间照常跑旧版本。⑤ 的 <code>-XX:+PrintCompilation</code> 里能看到 <code>priceOf</code> 先出现 3 级，再出现 4 级，接着 3 级那版被标成 <code>made not entrant</code>（不再给新调用用）。</p>
+
+  <h3 id="m-inline">④-2 内联和去虚化：C2 先把调用“抹平”，后面的优化才看得见</h3>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">你写的</span><b>priceOf</b></div>
+<pre><code>Money unit = new Money(BASE[sku &amp; 1023]);
+return unit.<span class="hl">times</span>(qty)
+           .<span class="hl">off</span>(qty &gt;= 10 ? 5 : 0)
+           .cents;</code></pre>
+    </div>
+    <div class="codebox">
+      <div class="code-bar"><span class="n">C2 内联之后，再标量替换</span><b>等价于</b></div>
+<pre><code>long c1 = BASE[sku &amp; 1023];   <span class="cm">// unit.cents</span>
+long c2 = c1 * qty;           <span class="cm">// times() 的 new 没了</span>
+int  p  = qty &gt;= 10 ? 5 : 0;
+long c3 = c2 * (100 - p) / 100; <span class="cm">// off() 的 new 没了</span>
+return c3;                    <span class="cm">// 0 次分配</span></code></pre>
+    </div>
+  </div>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 220" role="img" aria-label="接口调用点的三种情况。调用点只见过一种实现：C2 加一个类型检查，直接把这个实现内联进来，检查失败走去优化。见过两种：两个类型检查，各自内联。见过三种及以上：老老实实走虚方法表查找，不内联，传进去的对象就算逃逸。">
+  <text class="t-b" x="16" y="24">调用点 <tspan class="t-mono">channel.fee(m)</tspan> 的 profile 里记着“来过哪些类”</text>
+  <rect class="b-of" x="16" y="40" width="292" height="130" rx="12"/>
+  <text class="t-b" x="32" y="66">只见过 MockPay（单态）</text>
+  <text class="t-xs" x="32" y="90">if (类型 == MockPay) 内联 MockPay.fee</text><text class="t-xs" x="32" y="108">否则 → 去优化</text>
+  <text class="t-good" x="32" y="140">m 看得见：不逃逸，0 B</text>
+  <rect class="b-of" x="334" y="40" width="292" height="130" rx="12"/>
+  <text class="t-b" x="350" y="66">见过两种（双态）</text>
+  <text class="t-xs" x="350" y="90">两个类型检查，各自内联</text><text class="t-xs" x="350" y="108">都不是 → 去优化</text>
+  <text class="t-good" x="350" y="140">仍然看得见</text>
+  <rect class="b-bad" x="652" y="40" width="292" height="130" rx="12"/>
+  <text class="t-b" x="668" y="66">见过三种以上（多态）</text>
+  <text class="t-xs" x="668" y="90">查虚方法表 / 接口表，真的发起调用</text><text class="t-xs" x="668" y="108">C2 不知道 fee 里会拿 m 干什么</text>
+  <text class="t-bad" x="668" y="140">m 被当成逃逸：24 B（④-3 E）</text>
+  <text class="t-xs" x="16" y="200">内联还受大小限制：热的方法字节码不超过 FreqInlineSize=325 字节、不热的不超过 MaxInlineSize=35 字节、嵌套不超过 MaxInlineLevel=15 层（JDK 17 本机默认值），已经编译过的大方法另有 InlineSmallCode 限制。</text>
+</svg>
+  </div>
+  <p class="tip">内联本身省的是一次调用的开销，几个纳秒；它真正值钱的地方是让 C2 能把调用方和被调用方放在一起看，常量传播、去掉多余的检查、逃逸分析都要在这之后才做得成。所以 JIT 时代的“小方法、多层调用”并不慢；被调用的方法大到内联不进来，或者调用点见过太多实现，后面的优化才会一起丢掉。</p>
+
+  <h3 id="m-ea">④-3 逃逸分析：对象有三种结局，只有一种能不进堆</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 210" role="img" aria-label="逃逸分析在 C2 编译一个方法、并把能内联的都内联进来之后做。它看每个 new 出来的对象会流到哪里：只在这段代码里读写，叫不逃逸，可以标量替换，字段变成局部变量，也可以去掉对它加的锁；被当参数传给一个没有内联的方法，叫参数逃逸，对象还要分配，但对它加的锁可以消除；被返回、存进字段或静态变量、交给别的线程，叫全局逃逸，正常在堆上分配。HotSpot 不做栈上分配。">
+  <rect class="b-good" x="16" y="30" width="300" height="128" rx="12"/>
+  <text class="t-b" x="32" y="56">不逃逸 NoEscape</text>
+  <text class="t-xs" x="32" y="80">只在这段（内联后的）代码里读写字段</text>
+  <text class="t-s" x="32" y="108">→ 标量替换：字段变成局部变量</text>
+  <text class="t-s" x="32" y="130">→ 对它加的 synchronized 也去掉</text>
+  <text class="t-good" x="32" y="150">0 B</text>
+  <rect class="b-warn" x="330" y="30" width="300" height="128" rx="12"/>
+  <text class="t-b" x="346" y="56">参数逃逸 ArgEscape</text>
+  <text class="t-xs" x="346" y="80">传给一个没被内联的方法，但没有被存起来</text>
+  <text class="t-s" x="346" y="108">→ 还要分配</text>
+  <text class="t-s" x="346" y="130">→ 对它加的锁可以去掉</text>
+  <text class="t-bad" x="346" y="150">24 B</text>
+  <rect class="b-bad" x="644" y="30" width="300" height="128" rx="12"/>
+  <text class="t-b" x="660" y="56">全局逃逸 GlobalEscape</text>
+  <text class="t-xs" x="660" y="80">被返回、存进字段 / 静态变量 / 数组、交给别的线程</text>
+  <text class="t-s" x="660" y="108">→ 正常在堆上分配</text>
+  <text class="t-s" x="660" y="130">→ 走第 3 站的 TLAB</text>
+  <text class="t-bad" x="660" y="150">24 B</text>
+  <text class="t-xs" x="16" y="186">HotSpot 的 C2 不做“栈上分配”：没逃逸的对象不是挪到栈上，而是根本不存在了，只剩它的字段散落在寄存器和栈槽里。</text>
+  <text class="t-xs" x="16" y="204">分析是按“这一次编译的范围”做的：没内联进来的方法，C2 只能按最坏情况算。</text>
+</svg>
+  </div>
+
+  <h4 class="lab-h" id="m-bench" style="margin-top:6px">逃逸判定台<small style="font-family:var(--font-body);font-size:14px;color:var(--muted);margin-left:8px">选一种写法，先猜进不进堆，再看本机实测</small></h4>
+  <div class="lab walker" id="eb" tabindex="0" aria-label="逃逸判定台：选一种写法，猜结果，方向键左右切换写法">
+    <div class="presets" id="eb-presets"></div>
+    <div class="codebox"><div class="code-bar"><span class="n">写法</span><b id="eb-name">—</b></div><pre><code id="eb-code"></code></pre></div>
+    <div class="guess" data-role="of" id="eb-guess">
+      <p id="eb-q">这样写，C2 编译后，每次调用在堆上分配多少？</p>
+      <div class="opts" id="eb-opts"></div>
+    </div>
+    <div class="toggles" style="grid-template-columns:minmax(0,1fr)"><label><input type="checkbox" id="eb-noea"> 加上 <code>-XX:-DoEscapeAnalysis</code>（关掉逃逸分析）</label></div>
+    <div class="lab-res" data-role="of" id="eb-res">先选一种写法，再猜。</div>
+  </div>
+  <p class="tip">数字来自 ⑤ 的 <code>Escape</code>：每种写法先预热 300 万次，再量 1000 万次，取每次的平均分配字节。本机 2 核 ARM，JDK 17.0.20.1。</p>
+
+  <h3 id="m-deopt">④-4 推测和去优化：C2 敢赌，是因为输了能退回去</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="C2 按 profile 下注：这个调用点只来过 MockPay，于是只内联 MockPay，在入口放一个类型检查；这个分支从没走过，于是不编译它，只放一个陷阱。运行中第 1 站加载了一个新的支付渠道 AliPay，第一次走到这个调用点，类型检查失败，触发去优化：这一帧回到解释器继续执行，编译好的版本作废，重新攒 profile，之后按两种类型重新编译。">
+  <rect class="b-of" x="16" y="30" width="270" height="120" rx="12"/>
+  <text class="t-b" x="32" y="56">C2 下注</text>
+  <text class="t-xs" x="32" y="80">“这里只来过 MockPay” → 只内联它</text>
+  <text class="t-xs" x="32" y="100">“这个分支从没走过” → 不编，放陷阱</text>
+  <text class="t-xs" x="32" y="120">“这个接口只有一个实现” → 直接调</text>
+  <text class="t-xs" x="32" y="140">每个赌注都留了一个检查点</text>
+  <path class="e-ink" d="M286 90 L336 90" marker-end="url(#ah-ink)"/>
+  <rect class="b-cg" x="340" y="30" width="250" height="120" rx="12"/>
+  <text class="t-b" x="356" y="56">第 1 站又加载了一个类</text>
+  <text class="t-xs" x="356" y="80">新上了支付渠道 AliPay</text>
+  <text class="t-xs" x="356" y="100">或者冷门分支第一次走到</text>
+  <text class="t-xs" x="356" y="120">检查点不通过</text>
+  <path class="e-bad" d="M590 90 L640 90" marker-end="url(#ah-bad)"/>
+  <rect class="b-bad" x="644" y="30" width="300" height="120" rx="12"/>
+  <text class="t-b" x="660" y="56">去优化（deoptimization）</text>
+  <text class="t-xs" x="660" y="80">这一帧按字节码位置还原成解释器的帧</text>
+  <text class="t-xs" x="660" y="100">编译版标成 made not entrant</text>
+  <text class="t-xs" x="660" y="120">重新攒 profile，过一会儿按新情况再编</text>
+  <text class="t-xs" x="660" y="140">结果不会错，只是这段时间变慢</text>
+  <text class="t-xs" x="16" y="186">“结果永远对”是 JIT 的硬约束：所有激进优化都必须有一个能精确退回字节码语义的出口。</text>
+  <text class="t-xs" x="16" y="206">所以 C2 编出来的代码里到处是“如果不是这样，就退回去”的检查，正常路径上它们几乎不花时间。</text>
+  <text class="t-xs" x="16" y="234">偶尔一次去优化没关系；反复“编译 → 去优化 → 再编译”才会伤吞吐，见 ⑥ 坑 4。</text>
+</svg>
+  </div>
+
+  <h3 id="m-design">为什么这样设计：编译放在运行时，而不是构建时</h3>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>被放弃的：构建时一次编完（AOT）</h4>
+      <ul class="pains">
+        <li>编译器只能看源码：<code>Channel</code> 接口将来会有几个实现、哪个分支热，构建时不知道</li>
+        <li>不知道就只能保守：接口调用不敢内联，传进去的 <code>Money</code> 一律算逃逸</li>
+        <li>Java 允许运行时加载新类（第 1 站、SPI、动态代理），构建时根本看不到全部代码</li>
+        <li>好处是启动就快，没有预热，内存里也不用放编译器</li>
+      </ul>
+    </div>
+    <div class="way" data-role="of">
+      <h4>HotSpot 选的：先跑，看清了再编（JIT）</h4>
+      <ul class="pains">
+        <li>解释器和 C1 的 3 级代码顺手记下真实的类型和分支，C2 按它下注</li>
+        <li>赌错了有去优化兜底，所以敢做单态内联、只编热分支、标量替换</li>
+        <li>只编热的那一小部分代码，编译预算花在刀刃上</li>
+        <li>代价：要预热；编译线程占 CPU；代码缓存要内存</li>
+      </ul>
+    </div>
+  </div>
+  <p class="tip">决定胜负的约束：<b>Java 是动态的</b>（虚方法默认可重写、类可以运行时加载），而后端服务<b>一跑就是几天</b>。动态让静态编译只能保守，长期运行又让“前几十秒慢一点”摊得很薄。冷启动成了瓶颈的场景（Serverless、弹性扩容），这个账就要重算，这正是 Native Image 和 JDK 24 起 AOT 缓存出现的原因。</p>
+
+  <h3 id="m-api">基本用法：看 JIT 在干什么的几条参数</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">诊断参数</span><b>JDK 8 / 17 / 21 都能用</b><span class="tip" style="margin-left:auto">排查和实验用，不是调优参数</span></div>
+<pre><code>-XX:+PrintCompilation                <span class="cm">// 每编一个方法打一行：级别、% 表示 OSR、made not entrant</span>
+-XX:TieredStopAtLevel=1              <span class="cm">// 只用 C1（启动快、峰值低）</span>
+-Xint                                <span class="cm">// 只解释，对照用</span>
+-XX:-DoEscapeAnalysis                <span class="cm">// 关掉逃逸分析，对照用</span>
+-XX:-OmitStackTraceInFastThrow       <span class="cm">// 热点异常也保留堆栈（⑥ 坑 1）</span>
+jcmd &lt;pid&gt; Compiler.codecache         <span class="cm">// 代码缓存用了多少</span>
+jcmd &lt;pid&gt; Compiler.queue             <span class="cm">// 编译队列里排着谁</span>
+-XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining   <span class="cm">// 每个调用点内联没有、为什么</span></code></pre>
+  </div>
+  <p class="tip">阈值、内联大小这些参数为什么一般不该动，放到 ⑥ 第三圈。JMH 怎么写也在 ⑥。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：交易靶场里的三个小实验</h2>
+    <p class="lead">一个 Maven 模块，三个 main，不依赖任何第三方库。<code>--release 8</code> 编译，用 JDK 17 运行。<a href="https://github.com/archeu/study-labs/tree/main/java/jvm/jvm-jit-escape">完整代码 →</a></p>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">怎么跑</span><b>study-labs/java</b></div>
+<pre><code>cd java &amp;&amp; JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64 mvn -q -pl jvm/jvm-jit-escape compile
+cd jvm/jvm-jit-escape &amp;&amp; J=/usr/lib/jvm/java-17-openjdk-arm64/bin/java; M=labs.jvm.jvm_jit_escape
+$J -cp target/classes $M.Warmup                                   <span class="cm"># 1. 预热曲线</span>
+$J -XX:+PrintCompilation -Dbatches=3 -cp target/classes $M.Warmup | grep -E "priceOf|batch|Money"
+$J -cp target/classes $M.Escape                                   <span class="cm"># 2. 八种写法进不进堆</span>
+$J -XX:-DoEscapeAnalysis -cp target/classes $M.Escape
+$J -cp target/classes $M.Myths                                    <span class="cm"># 3. 两个误区</span>
+$J -XX:-OmitStackTraceInFastThrow -cp target/classes $M.Myths</code></pre>
+  </div>
+
+  <h3 id="e-warm">1. 预热：第一批 20 万次就完成了从解释到 C2</h3>
+  <div class="two">
+    <div>
+<pre class="console"><span class="w">$ java … Warmup</span>
+批  1     <b>24.7 ns/次    6.1 B/次</b>  累计   30.5 ms
+批  2      4.1 ns/次    0.0 B/次  累计   46.9 ms
+批  3      8.5 ns/次    0.0 B/次  累计   49.1 ms
+批  4      3.7 ns/次    0.0 B/次  累计   50.4 ms
+批 10      3.7 ns/次    0.0 B/次  累计   58.7 ms
+批 30      3.7 ns/次    0.0 B/次  累计   84.0 ms
+<span class="w">$ java -Xint … Warmup</span>
+批  1    <b>359.6 ns/次   72.0 B/次</b>  累计   94.1 ms
+批  5    353.1 ns/次   72.0 B/次  累计  395.0 ms</pre>
+    </div>
+    <div>
+<pre class="console"><span class="w">$ java -XX:+PrintCompilation … | grep …</span>
+<span class="w">时间ms 编号  级别</span>
+68   69       3   Money::off (22 bytes)
+69   67       3   Warmup::priceOf (40 bytes)
+69   66       2   Money::&lt;init&gt; (10 bytes)
+69   70       <b>4</b>   Warmup::priceOf (40 bytes)
+70   67       3   Warmup::priceOf   <b>made not entrant</b>
+71   73 <b>%</b>     3   Warmup::batch @ 5 (36 bytes)
+72   75 <b>%</b>     4   Warmup::batch @ 5 (36 bytes)
+93  143       4   Warmup::batch (36 bytes)</pre>
+    </div>
+  </div>
+  <p class="tip">读法：第 1 批的 6.1 B/次说明，这 20 万次里大约前 8% 还在解释器和 C1 里跑（6.1 ÷ 72）；从第 2 批起 0 字节。右边，<code>priceOf</code> 在 69 ms 时先被 C1 编成 3 级，几乎同时进了 C2 的 4 级，3 级那版随即作废；<code>%</code> 是 OSR：<code>@ 5</code> 是循环头所在的字节码偏移，<code>batch</code> 的循环转到一半就被换成了编译版，没等它返回。第 3 批 8.5 ns 的那一下，和 93 ms 时 <code>batch</code> 被整个重新编译的时刻对得上。</p>
+
+  <h3 id="e-escape">2. 八种写法，哪些 new 真的发生了</h3>
+  <div class="two">
+<pre class="console"><span class="w">$ java … Escape                 （默认）</span>
+A 只在方法里用                   <b>0.0 B/次</b>
+B 被返回                        24.0 B/次
+C 存进静态字段                   24.0 B/次
+D 传参·调用点只见过 1 种实现       <b>0.0 B/次</b>
+E 传参·调用点见过 3 种实现        24.0 B/次
+F 两条分支各 new 再合流           24.0 B/次
+G 小数组 long[4]                 <b>0.0 B/次</b>
+H 大数组 long[100]              816.0 B/次</pre>
+<pre class="console"><span class="w">$ java -XX:-DoEscapeAnalysis … Escape</span>
+A 只在方法里用                  <b>48.0 B/次</b>
+B 被返回                        24.0 B/次
+C 存进静态字段                   24.0 B/次
+D 传参·调用点只见过 1 种实现      <b>24.0 B/次</b>
+E 传参·调用点见过 3 种实现        24.0 B/次
+F 两条分支各 new 再合流           24.0 B/次
+G 小数组 long[4]                  0.0 B/次
+H 大数组 long[100]              816.0 B/次</pre>
+  </div>
+  <p class="tip">D 和 E 调的是同一个接口、同样的 <code>fee</code> 方法，区别只在调用点的 profile（④-2）。A 关掉 EA 是 48 B：<code>m</code> 和 <code>m.times(2)</code> 两个对象。G 关掉 EA 也是 0 B，这一条和逃逸分析无关：数组的读写在编译时就被折叠成常量，数组成了没人用的死代码，被直接删掉（按现象推断，没有对照编译日志）。这八行就是 ④-3 判定台里的数字。</p>
+
+  <h3 id="e-myth">3. 两个误区，现场看</h3>
+  <div class="two">
+<pre class="console"><span class="w">① 手写微基准（每轮 5000 万次 priceOf）</span>
+第 1 轮  结果丢掉    6.47 ms   结果用上   77.09 ms
+第 2 轮  结果丢掉    1.37 ms   结果用上   72.01 ms
+第 3 轮  结果丢掉    <b>0.00 ms</b>   结果用上   67.65 ms
+第 5 轮  结果丢掉    <b>0.00 ms</b>   结果用上   67.05 ms</pre>
+<pre class="console"><span class="w">② 同一行代码反复 NPE：异常的堆栈有几层</span>
+第 1 次：2 层，message=Cannot read field "code"
+         because "o.coupon" is null
+<b>第 6761 次起：0 层，message=null</b>
+<span class="w">$ java -XX:-OmitStackTraceInFastThrow …</span>
+20 万次里堆栈一直都在</pre>
+  </div>
+  <p class="tip">左边：<code>discard</code> 把 <code>priceOf</code> 的结果丢掉，C2 内联后发现整个循环没有任何可见效果，就把它删了，5000 万次“0.00 ms”。拿这种数字说“X 比 Y 快 1000 倍”，测的是编译器有多聪明。右边：同一个位置 NPE 抛了几千次以后，C2 编译的版本改抛一个预先建好的 NPE，没有堆栈、没有 message。</p>
+  <div class="done-box" data-role="done"><b>到这里已经能交差了</b>：能说清代码是怎么从解释变成 C2 的，能用 <code>PrintCompilation</code> 看到它，能判断一个 <code>new</code> 会不会进堆，也知道手写微基准为什么不可信。<b>已知还没处理的细节</b>：线上偶尔出现的 NPE 没有堆栈怎么查（<a href="#p-npe">坑 1</a>）；发布后前几十秒为什么 RT 高（<a href="#p-warm">坑 2</a>）；方法太大不编译（<a href="#p-huge">坑 3</a>）；新加一种实现以后变慢（<a href="#p-deopt">坑 4</a>）；代码缓存满了（<a href="#p-cc">坑 5</a>）；该怎么写基准（<a href="#r-jmh">规范 1</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：坑、常见的性能误区、规范、更深一层</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-npe"><b><em>坑 1</em>线上日志里一堆 NullPointerException，没有堆栈、没有 message<a class="root" href="#m-tier">← ④-1 C2 编译版</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>日志里只有一行 <code>java.lang.NullPointerException</code>，下面一行堆栈都没有；重启后头几次又有堆栈。</dd>
+      <dt>根源</dt><dd>C2 编译的代码里，同一个位置反复出 NPE、除零、数组越界、类型转换失败时，改抛 JVM 预先建好的那个异常对象，省掉填堆栈的开销（<code>OmitStackTraceInFastThrow</code>，JDK 8 起默认开）。⑤ 实测第 6761 次起变成 0 层。这是实现上的取舍，不是能从原理推出来的。</dd>
+      <dt>做法</dt><dd class="fix">往前翻日志，找这个异常第一次出现的那条，它有完整堆栈；日志告警按“异常类型 + 第一次的堆栈”聚合。排查期间可以加 <code>-XX:-OmitStackTraceInFastThrow</code>，代价是每次都要填堆栈，异常多时会变慢。</dd></dl>
+    </div>
+    <div class="pit" id="p-warm"><b><em>坑 2</em>刚发布、刚扩容的实例，前几十秒 RT 高，甚至超时<a class="root" href="#m-tier">← ④-1 分层编译要攒次数</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>新实例一接流量，P99 飙高，CPU 也高（编译线程在忙），过一会儿自己好了。压测第一分钟的数据也总是很难看。</dd>
+      <dt>根源</dt><dd>热点代码要先在解释器和 C1 里跑够次数，C2 才接手；真实服务里有成千上万个方法排队等编译，不是 ⑤ 里一个方法 70 毫秒的事。编译线程和业务线程抢 CPU，容器 CPU 限得紧时更明显。</dd>
+      <dt>做法</dt><dd class="fix">接流量之前先预热：启动后用回放流量或脚本把核心接口各打几千次，再让就绪探针返回成功；发布时逐步放量；压测丢掉预热阶段的数据。启动时间特别敏感的，看 ⑥ 版本差异里 JDK 24 起的 AOT 缓存。</dd></dl>
+    </div>
+    <div class="pit" id="p-huge"><b><em>坑 3</em>一个超大的方法，永远在解释执行<a class="root" href="#m-inline">← ④-2 编译和内联都有大小上限</a><span class="seen">源码核对</span></b>
+      <dl><dt>现象</dt><dd>代码生成器、规则引擎、几千行的 <code>switch</code> 生成的方法，热得发烫却一直很慢；<code>PrintCompilation</code> 里找不到它。</dd>
+      <dt>根源</dt><dd>字节码超过 8000 字节的方法默认不编译（<code>DontCompileHugeMethods=true</code>，<code>HugeMethodLimit=8000</code>，JDK 8 / 17 / 21 一致）。没那么大、但超过 325 字节的，也内联不进调用方，后面的逃逸分析跟着失效。</dd>
+      <dt>做法</dt><dd class="fix">把大方法拆开，让热路径落在小方法里；生成代码的工具按方法大小切分。<code>HugeMethodLimit</code> 是开发版才能改的参数，产品版只能用 <code>-XX:-DontCompileHugeMethods</code> 整体放开，不推荐。</dd></dl>
+    </div>
+    <div class="pit" id="p-deopt"><b><em>坑 4</em>新加了一个实现类，热点接口反而变慢了<a class="root" href="#m-deopt">← ④-4 推测和去优化</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>上了第三个支付渠道，算手续费的那段代码吞吐掉了一截，GC 也变多了；代码本身没改。</dd>
+      <dt>根源</dt><dd>调用点原来只见过一两种实现，C2 内联了它们（④-2）；第三种一来，类型检查失败，去优化，重新编译时这个调用点成了多态，不再内联，传进去的 <code>Money</code> 也变成逃逸。⑤ 里同一个 <code>fee</code>：见过 1 种是 0 B，见过 3 种是 24 B；本机另测见过 2 种也是 0 B。</dd>
+      <dt>做法</dt><dd class="fix">真正热的路径上，让一个调用点只面对一两种类型，比如按渠道分开调用；用 JFR 的 Deoptimization 事件或 <code>PrintCompilation</code> 里反复出现的 <code>made not entrant</code> 确认。不热的地方随便多态，不值得为它改设计。</dd></dl>
+    </div>
+    <div class="pit" id="p-cc"><b><em>坑 5</em>CodeCache is full. Compiler has been disabled.<a class="root" href="#m-tier">← ④-1 机器码放在代码缓存</a><span class="seen">源码核对</span></b>
+      <dl><dt>现象</dt><dd>运行很久以后整体变慢，日志里有上面这句（JDK 8）；JDK 9 起代码缓存分了段，写成 <code>CodeHeap 'xxx' is full. Compiler has been disabled.</code>。</dd>
+      <dt>根源</dt><dd>代码缓存默认 240 MB（开分层编译时 48 MB × 5）。动态生成大量类的应用（脚本引擎、大量代理、Groovy 规则）编译出的机器码多，塞满以后编译器停下，新热起来的代码只能解释执行。</dd>
+      <dt>做法</dt><dd class="fix">用 <code>jcmd &lt;pid&gt; Compiler.codecache</code> 看用量，把它纳入监控；确实不够就调大 <code>-XX:ReservedCodeCacheSize</code>，同时查清是谁在不停生成新代码。</dd></dl>
+    </div>
+  </div>
+
+  <h3 id="myths" style="margin-top:14px">常见的性能误区</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>误区</th><th>实际情况</th><th>依据</th></tr></thead>
+      <tbody>
+        <tr id="p-pool"><th>1. 小对象 new 很贵，做个对象池</th><td>new 一个短命对象是在 TLAB 里挪指针，C2 还可能把它整个标量替换掉；死掉的对象 Young GC 不用复制。池化反而让对象变长寿、进老年代，还要加锁。只有贵的东西才池化：连接、线程、大块直接内存。</td><td>⑤ 实测 A：0 B；<a href="jvm-object-new-layout.html">new 一个对象的全过程</a></td></tr>
+        <tr><th>2. 逃逸分析就是栈上分配</th><td>HotSpot 不做栈上分配。没逃逸的对象被拆成字段（标量替换），根本不存在；参数逃逸的对象还要分配，只是锁可以去掉。</td><td>Oracle JDK 8 文档 “Escape Analysis”：“It does not replace a heap allocation with a stack allocation”</td></tr>
+        <tr><th>3. 方法写成 final、手工合并成大方法会更快</th><td>内联看的是 profile 和大小，不看 final：单态的虚方法照样内联。手工合并出来的大方法超过 325 字节就内联不进来，超过 8000 字节干脆不编译。</td><td>④-2；坑 3</td></tr>
+        <tr><th>4. for 循环跑一百万次、前后各取一次时间，就是性能</th><td>没预热测的是解释器；结果没用上，整个循环会被删掉；循环里的常量会被提前算好；一个长 main 走的是 OSR 版本，和线上的正常编译版不一样。</td><td>⑤ 实测：5000 万次 0.00 ms；规范 1</td></tr>
+        <tr><th>5. 接口、多态天生比直接调用慢</th><td>调用点只见过一两种实现时，内联后和直接调用一样。真正慢的是“热点 + 多态”：不能内联，后面的优化一起丢掉。</td><td>⑤ 实测 D 和 E；坑 4</td></tr>
+        <tr><th>6. 调 JIT 参数是常规调优手段</th><td>阈值、内联大小的默认值是在大量程序上调出来的。改它们之前，先用 JMH 或 JFR 证明瓶颈就在这里；绝大多数时候该改的是代码（拆方法、减少热点多态）或预热流程。</td><td>规范 4</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl" id="r-jmh"><b>1. 性能结论用 JMH 测，不用手写循环</b><p>JMH 负责预热（<code>@Warmup</code>）、每组新开 JVM（<code>@Fork</code>）、用 <code>Blackhole</code> 吃掉结果防止被删、按时间而不是次数采样。代码评审里出现“我测过，快 10 倍”，先问是不是 JMH。</p><p class="guard">误区 4：测到的是编译器把代码删掉了，或者测的是解释器。</p></div>
+    <div class="rl"><b>2. 热路径上的方法保持小，调用点少一点多态</b><p>不用刻意追求，但别把热路径塞进一个几百行的方法；一个热调用点要面对很多实现时，考虑按类型分开。</p><p class="guard">坑 3、坑 4：内联失败，逃逸分析跟着失效。</p></div>
+    <div class="rl"><b>3. 先预热，再接流量</b><p>就绪探针在预热脚本跑完之后才返回成功；发布、扩容都逐步放量。压测报告注明预热了多久。</p><p class="guard">坑 2：冷实例一上来就挨满流量。</p></div>
+    <div class="rl"><b>4. JIT 参数默认不动，动了要有证据</b><p>能留在启动参数里的，是排查用的（<code>-XX:-OmitStackTraceInFastThrow</code>、<code>ReservedCodeCacheSize</code> 调大），而且要写明原因和日期。</p><p class="guard">误区 6：凭感觉调参，升级 JDK 后反而变慢。</p></div>
+    <div class="rl"><b>5. 异常告警按类型聚合，保留第一次的堆栈</b><p>无堆栈的 NPE 不要当成“查不了”，第一次的那条就在日志里。</p><p class="guard">坑 1。</p></div>
+    <div class="rl"><b>6. 代码缓存进监控</b><p>Micrometer 的 <code>jvm.memory.used</code> 里，非堆区有 <code>CodeHeap '…'</code> 几项（JDK 9 起分段），加一条接近上限的告警。</p><p class="guard">坑 5：编译器悄悄停了，只能从变慢发现。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>更深一层</h3></div>
+  <div class="two">
+    <div class="way" data-role="of"><h4>内联的预算，以及怎么看它为什么没内联</h4>
+      <p>热的调用点内联字节码不超过 <code>FreqInlineSize</code>（x86 和 aarch64 是 325 字节，ppc、s390 是 175）；不热的不超过 <code>MaxInlineSize=35</code>；嵌套最多 <code>MaxInlineLevel</code> 层，JDK 8 是 9 层，JDK 14 起改成 15 层（JDK-8234863），所以深调用链的框架代码升级 JDK 后可能自己变快。加 <code>-XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining</code>，每个调用点后面会写 <code>inline (hot)</code>、<code>too big</code>、<code>hot method too big</code>、<code>not inlineable</code> 这类原因。</p></div>
+    <div class="way" data-role="bad"><h4>逃逸分析的边界：合流、数组、看不见的方法</h4>
+      <p>⑤ 里 F（两条分支各 new 一个再合流）在 JDK 17 和 21 上都会分配：C2 的标量替换不处理“几个对象在 phi 处合流”。JDK 22 加入 <code>ReduceAllocationMerges</code>（JDK-8287061），22 正式版默认关，23 起默认开。数组要长度是常量、不超过 <code>EliminateAllocationArraySizeLimit=64</code>，下标也要是常量。Graal 编译器做的是“部分逃逸分析”：对象只在某条分支上逃逸，就只在那条分支上分配。</p></div>
+    <div class="way" data-role="cg"><h4>锁消除和锁粗化</h4>
+      <p>局部的 <code>StringBuffer</code>、<code>Vector</code>，或者对一个没逃出去的对象 <code>synchronized</code>，C2 会把加锁解锁删掉（<code>EliminateLocks</code>）。参数逃逸的对象，锁也能删。相邻几段对同一把锁的同步块，可能被合并成一段（锁粗化），少几次加解锁。所以“局部 StringBuffer 比 StringBuilder 慢很多”在 C2 编译后通常不成立。</p></div>
+    <div class="way" data-role="g2"><h4>代码缓存里有什么</h4>
+      <p>JDK 9 起分成三段（JEP 197）：JVM 自己的桩代码、C1 带 profile 的代码、C2 的最终代码，互不挤占。JDK 20 移除了专门清理冷代码的 sweeper（JDK-8290025），不再使用的机器码改由 GC 卸载类时顺带回收。<code>made not entrant</code> 的旧版本不会马上消失，等到没有线程还在执行它时才回收。</p></div>
+  </div>
+
+  <h3 id="v-diff" style="margin-top:12px">版本差异</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>JDK</th><th>变化</th><th>对你意味着什么</th></tr></thead>
+      <tbody>
+        <tr><td>8</td><td>分层编译默认开（JDK 7 引入）；逃逸分析从 6u23 起默认开；<code>MaxInlineLevel=9</code>；代码缓存不分段，满了打印 <code>CodeCache is full</code></td><td>本页的机制在 8 上都成立；阈值和 17、21 相同</td></tr>
+        <tr><td>9</td><td>分段代码缓存（JEP 197）</td><td>坑 5 的报错信息变成 <code>CodeHeap '…' is full</code></td></tr>
+        <tr><td>14 / 15</td><td><code>MaxInlineLevel</code> 9 → 15（JDK 14）；Helpful NPE（JEP 358）14 引入，15 起默认开</td><td>NPE 的 message 会写出是哪个变量为 null，但坑 1 的“热点 NPE”仍然是 <code>message=null</code>（⑤ 实测）</td></tr>
+        <tr><td>17</td><td>移除实验性的 AOT（<code>jaotc</code>）和 Graal JIT（JEP 410）</td><td>想用 Graal 编译器，改用 GraalVM 发行版</td></tr>
+        <tr><td>20 / 21</td><td>移除 sweeper（JDK-8290025）；21 的分层阈值、内联参数和 17 一致，没有 <code>ReduceAllocationMerges</code></td><td>17 → 21 本页的实测结论不变（全景里的 0.7 MB 就是在 21 上测的）</td></tr>
+        <tr><td>22 / 23</td><td><code>ReduceAllocationMerges</code>（JDK-8287061）：22 引入、默认关，23 起默认开</td><td>⑤ 里 F 那种写法，新版本上可能不再分配</td></tr>
+        <tr><td>24 / 25</td><td>AOT 缓存：类的加载和链接提前做（JEP 483，24）；方法的 profile 提前存下（JEP 515，25）</td><td>训练一次，正式启动时 JIT 一开始就有 profile，预热变短；坑 2 有了 JVM 层面的解法</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 style="margin-top:12px">下一圈</h3>
+  <ul class="next">
+    <li>JMH 实战：<code>@State</code>、<code>Blackhole</code>、<code>@Fork</code>，以及用 <code>-prof gc</code>、<code>-prof perfasm</code> 看分配和热点汇编</li>
+    <li>JITWatch 读 <code>-XX:+LogCompilation</code>：看清每个方法的内联树和去优化原因</li>
+    <li>C2 的循环优化：范围检查消除、循环展开、自动向量化，以及 Vector API</li>
+    <li>JDK 24 / 25 的 AOT 缓存实测：训练运行怎么做，启动和预热时间各省多少</li>
+    <li>GraalVM：Graal JIT 的部分逃逸分析，和 Native Image 的封闭世界假设</li>
+    <li>JVM 故障排查（全景第 9 站，下一个知识点）：CPU 飙高时，怎么分清是业务代码、GC 还是编译线程</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改造你的案例</h2>
+  </div>
+  <div class="trio">
+    <div class="ess" data-role="of"><h4>1. 不让 times 内联</h4><p>按 ④-2，给 <code>Warmup</code> 加 <code>-XX:CompileCommand=dontinline,labs.jvm.jvm_jit_escape.Money::times</code>。先猜稳态每次分配几字节（原来 0 B），再跑，说出是哪个 <code>Money</code> 进了堆、为什么。</p></div>
+    <div class="ess" data-role="bad"><h4>2. 给 E 减掉一个渠道</h4><p>按坑 4，把 <code>Escape.THREE</code> 改成只有 <code>MockPay</code> 和 <code>AliPay</code>，下标改成 <code>i % 2</code>。先猜 E 那一行是 0 B 还是 24 B，再跑；然后再加回第三种，用 <code>PrintCompilation</code> 找 <code>passMega</code> 的 <code>made not entrant</code>。</p></div>
+    <div class="ess" data-role="g2"><h4>3. 救活被删掉的循环</h4><p>按规范 1，把 <code>Myths.discard</code> 里的结果异或进一个 <code>static volatile long</code> 字段，先猜“结果丢掉”那一列会变成多少，再跑。然后用 JMH 重写一遍（加 <code>jmh-core</code> 依赖），比较两种写法测出来的 ns/次。</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>HotSpot 先解释执行并记下真实的运行情况，热了再让 C2 按这些记录大胆优化：内联让它看清对象的去向，没逃出去的对象被标量替换、不进堆；赌错了就去优化退回解释器，所以结果永远对，代价是要预热。</p></details>
+    <details><summary>2. 只解释、或者只用 C1，疼在哪？</summary><p>只解释慢两个数量级（⑤ 实测 358 ns 对 3.7 ns）；只用 C1 快了，但没有逃逸分析，每次算价照样往 Eden 里塞 72 字节，Young GC 次数跟着上去。</p></details>
+    <details><summary>3. 线上 NPE 没有堆栈，根源是哪条原理？</summary><p>它发生在 C2 编译的代码里（④-1）：同一个位置的隐式异常抛得多了，C2 改抛 JVM 预先建好的异常对象，省掉填堆栈。这是 HotSpot 的实现取舍（<code>OmitStackTraceInFastThrow</code>），所以第一次出现时的那条日志是有堆栈的。</p></details>
+    <details><summary>4. 预测：练习 1 里不让 <code>Money::times</code> 内联，<code>priceOf</code> 稳态每次分配多少字节？</summary><p>48 B（本机实测）。<code>unit</code> 要当接收者传给一个没内联的方法，参数逃逸，得分配；<code>times</code> 里 new 的那个被返回了，在 <code>times</code> 自己的编译单元里是全局逃逸，也得分配；<code>off</code> 仍被内联进 <code>priceOf</code>，它 new 的那个没逃出去，被标量替换。3 个里进堆 2 个，2 × 24 = 48（④-2、④-3）。</p></details>
+    <details><summary>5. 预测：练习 2 里调用点只见过两种渠道，E 那一行是多少？在 JDK 17 上把 F 改写成“先算出 cents，再只 new 一次”呢？</summary><p>两种渠道是 0 B（本机实测）：双态调用点仍然内联，<code>m</code> 看得见、不逃逸（④-2）。F 改成只 new 一次也是 0 B（本机实测）：合流的是一个 long，不是两个对象，标量替换不再卡在 phi 上（⑥ 第三圈）。</p></details>
+    <details><summary>6. 放回全景：第 2 站的前后各发生了什么？JIT 或逃逸分析失效了，整条链路会怎样？</summary><p>前面是第 1 站：<code>Order</code>、<code>Money</code> 被加载进元空间，字节码可以执行了；加载新的实现类也可能让第 2 站已经编译好的代码去优化。后面是第 3 站：逃出去的对象在 Eden 的 TLAB 里挪指针分配。第 2 站失效（纯解释、只用 C1、热点多态让逃逸分析失效、代码缓存满了编译器停了）有两种后果：一是 CPU 时间暴涨，下单接口 RT 变长；二是本来不存在的临时对象全进了第 3 站，Eden 满得快，第 5 站 Young GC 次数成倍增加（全景里多出 1144 MB）。单次 Young GC 不会变长，因为这些对象马上就死，所以表现为吞吐下降、CPU 上升，而不是停顿变长。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机实测：2 核 ARM，JDK 17.0.20.1（G1、默认堆），<code>Warmup</code>、<code>Escape</code>、<code>Myths</code> 三个程序各跑默认参数和对照参数（<code>-Xint</code>、<code>-XX:TieredStopAtLevel=1</code>、<code>-XX:-DoEscapeAnalysis</code>、<code>-XX:-OmitStackTraceInFastThrow</code>），② 的耗时取第 3～30 批的中位数；↺ 自测 4、5 的答案另外跑过（<code>dontinline</code> 和双态调用点）。参数默认值来自本机 JDK 17 / 21 的 <code>-XX:+PrintFlagsFinal</code>；<code>HugeMethodLimit</code>、<code>ReduceAllocationMerges</code>、代码缓存报错原文、<code>OmitStackTraceInFastThrow</code> 覆盖的异常种类核对了 OpenJDK 8u / 17u / 21u / 22 / 23 的 HotSpot 源码；JEP 197、358、410、483、515 和 JDK-8234863、8287061、8290025 核对了 JEP 页面和 bug 记录；“不做栈上分配”出自 Oracle JDK 8 文档 Escape Analysis 一节。JDK 8 和 21 没有在本机跑这页的实验。G 小数组关掉 EA 也是 0 B 的解释是按现象推断的。</p>
+  <p>相关：<a href="../java/pano-j03-object-new-to-gc.html">全景：一个对象从 new 到被回收</a> · <a href="jvm-classloading.html">类加载与双亲委派</a> · <a href="jvm-object-new-layout.html">new 一个对象的全过程</a> · <a href="jvm-memory-structure.html">JVM 内存结构</a> · <a href="jvm-gc-log-tuning.html">GC 日志与调优</a> · <a href="../java/roadmap.html#j03">Java 地图 J03</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+var EB_CASES = [
+  { id: 'A', name: 'A 只在方法里用', short: '用完就扔',
+    code: 'static long local(int i) {\n    Money m = new Money(i);\n    return m.times(2).cents;\n}',
+    on: 0, off: 48, state: 'NoEscape', root: '#m-ea',
+    why: 'm 和 m.times(2) 都只在内联后的这段代码里读字段，不逃逸，两个都被标量替换。关掉 EA 就是 2 个 × 24 B。' },
+  { id: 'B', name: 'B 被返回', short: 'return m',
+    code: 'static Money returned(int i) {\n    return new Money(i);\n}\n// 调用方：sinkField = returned(i);',
+    on: 24, off: 24, state: 'GlobalEscape', root: '#m-ea',
+    why: '对象被返回，调用方又把它存进了静态字段：全局逃逸，正常分配。就算 returned 被内联进调用方，它最后还是被存进了字段。' },
+  { id: 'C', name: 'C 存进静态字段', short: 'sinkField = m',
+    code: 'static long stored(int i) {\n    Money m = new Money(i);\n    sinkField = m;\n    return m.cents;\n}',
+    on: 24, off: 24, state: 'GlobalEscape', root: '#m-ea',
+    why: '存进静态字段，别的线程随时能读到：全局逃逸。' },
+  { id: 'D', name: 'D 传参 · 见过 1 种实现', short: 'ONE[0].fee(m)',
+    code: 'static long passMono(int i) {\n    Money m = new Money(i);\n    return ONE[0].fee(m);   // 这个调用点只来过 MockPay\n}',
+    on: 0, off: 24, state: 'NoEscape', root: '#m-inline',
+    why: '调用点单态：C2 加一个类型检查，把 MockPay.fee 内联进来，看得见 fee 只读了 m.cents，m 不逃逸。' },
+  { id: 'E', name: 'E 传参 · 见过 3 种实现', short: 'THREE[i%3].fee(m)',
+    code: 'static long passMega(int i) {\n    Money m = new Money(i);\n    return THREE[i % 3].fee(m);   // MockPay、AliPay、WxPay\n}',
+    on: 24, off: 24, state: 'ArgEscape', root: '#m-inline',
+    why: '调用点多态：不内联，真的发起接口调用。C2 看不见 fee 里会拿 m 干什么，只能当它逃逸，m 要分配。和 D 是同一个方法，差别只在 profile。' },
+  { id: 'F', name: 'F 两条分支各 new 再合流', short: 'cond ? new : new',
+    code: 'static long merged(int i) {\n    Money m = (i & 1) == 0 ? new Money(i)\n                           : new Money(-i);\n    return m.cents;\n}',
+    on: 24, off: 24, state: 'NoEscape（但合流）', root: '#s6',
+    why: '两个对象都没逃出方法，可它们在 m 这里合流（phi），JDK 17 / 21 的 C2 不对合流的对象做标量替换。JDK 22 加入 ReduceAllocationMerges，23 起默认开，新版本上可能是 0 B。' },
+  { id: 'G', name: 'G 小数组 long[4]', short: 'new long[4]',
+    code: 'static long smallArray(int i) {\n    long[] p = new long[4];\n    p[0] = i; p[3] = i * 2L;\n    return p[0] + p[3];\n}',
+    on: 0, off: 0, state: 'NoEscape', root: '#s6',
+    why: '长度是常量、不超过 64、下标都是常量，可以标量替换。关掉 EA 也是 0 B：读写在编译时被折叠，数组成了没人用的死代码，被直接删掉（按现象推断）。' },
+  { id: 'H', name: 'H 大数组 long[100]', short: 'new long[100]',
+    code: 'static long bigArray(int i) {\n    long[] p = new long[100];\n    p[0] = i; p[99] = i * 2L;\n    return p[0] + p[99];\n}',
+    on: 816, off: 816, state: 'NoEscape（但太大）', root: '#s6',
+    why: '没逃逸，但长度 100 超过 EliminateAllocationArraySizeLimit=64，不做标量替换。816 B = 16 B 数组头 + 100 × 8 B。' }
+];
+function ebResult(c, eaOn) {
+  var bytes = eaOn ? c.on : c.off;
+  return { bytes: bytes, heap: bytes > 0, label: bytes > 0 ? '进堆：' + bytes + ' B/次' : '不进堆：0 B/次' };
+}
+function ebJudge(c, guessHeap, eaOn) {
+  var r = ebResult(c, eaOn);
+  return { right: guessHeap === r.heap, r: r };
+}
+/*SIM-END*/
+(function () {
+  var box = document.getElementById('eb'); if (!box) return;
+  var pre = document.getElementById('eb-presets'), name = document.getElementById('eb-name'), code = document.getElementById('eb-code');
+  var opts = document.getElementById('eb-opts'), res = document.getElementById('eb-res'), noea = document.getElementById('eb-noea');
+  var cur = -1, guess = null;
+  EB_CASES.forEach(function (c, i) {
+    var b = document.createElement('button'); b.type = 'button'; b.setAttribute('aria-pressed', 'false');
+    b.innerHTML = '<b>' + c.id + '</b><span></span>'; b.querySelector('span').textContent = c.name.slice(2);
+    b.addEventListener('click', function () { pick(i); }); pre.appendChild(b);
+  });
+  [['堆上 0 字节（new 没发生）', false], ['进堆（真的分配了）', true]].forEach(function (o) {
+    var b = document.createElement('button'); b.type = 'button'; b.textContent = o[0]; b.dataset.heap = o[1] ? '1' : '0';
+    b.setAttribute('aria-pressed', 'false');
+    b.addEventListener('click', function () { if (cur < 0) return; guess = o[1]; render(); }); opts.appendChild(b);
+  });
+  function pick(i) { cur = i; guess = null; render(); }
+  function render() {
+    Array.prototype.forEach.call(pre.children, function (b, i) { b.setAttribute('aria-pressed', i === cur ? 'true' : 'false'); });
+    if (cur < 0) return;
+    var c = EB_CASES[cur], eaOn = !noea.checked;
+    name.textContent = c.name; code.textContent = c.code;
+    var r = ebResult(c, eaOn);
+    Array.prototype.forEach.call(opts.children, function (b) {
+      var h = b.dataset.heap === '1';
+      b.classList.remove('right', 'wrong'); b.setAttribute('aria-pressed', guess === h ? 'true' : 'false');
+      if (guess !== null) { if (h === r.heap) b.classList.add('right'); else if (guess === h) b.classList.add('wrong'); }
+    });
+    res.dataset.role = r.heap ? 'bad' : 'done';
+    if (guess === null) { res.textContent = '先猜：' + (eaOn ? '默认参数下' : '关掉逃逸分析以后') + '，这样写每次调用在堆上分配多少？'; return; }
+    var j = ebJudge(c, guess, eaOn);
+    res.innerHTML = '';
+    var h = document.createElement('p'); h.innerHTML = '<b></b>'; h.firstChild.textContent = (j.right ? '猜对了。' : '猜错了。') + '本机实测 ' + r.label + '（' + (eaOn ? '默认' : '-XX:-DoEscapeAnalysis') + '）';
+    var p = document.createElement('p'); p.textContent = (eaOn ? '判定：' + c.state + '。' : '') + c.why;
+    var a = document.createElement('p'); a.innerHTML = '<a></a>'; a.firstChild.href = c.root; a.firstChild.textContent = '← 回到对应的原理';
+    var other = ebResult(c, !eaOn);
+    var o = document.createElement('p'); o.className = 'note-p'; o.textContent = (eaOn ? '关掉逃逸分析：' : '默认参数：') + other.label;
+    res.appendChild(h); res.appendChild(p); res.appendChild(o); res.appendChild(a);
+  }
+  noea.addEventListener('change', function () { guess = null; render(); });
+  box.addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'ArrowRight') { pick(cur < 0 ? 0 : (cur + 1) % EB_CASES.length); e.preventDefault(); }
+    if (e.key === 'ArrowLeft') { pick(cur <= 0 ? EB_CASES.length - 1 : cur - 1); e.preventDefault(); }
+  });
+  pick(3);
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
