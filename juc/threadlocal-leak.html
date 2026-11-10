@@ -1,0 +1,1178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>ThreadLocal 与内存泄漏</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a mechanism topic (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), depth 懂机制, JDK 17. Roles: rn pink = ThreadLocal and its map, pd blue = threads and pools, of amber = weak references / GC, bk teal = passing values across threads, g2 brown = Tomcat / Spring, cg purple = interview, neutral grey = old way / rejected design, bad red = 串号 and leaks, good green = right way.
+   Interaction (one): ThreadLocalMap lab in ④-3 — a line-by-line port of JDK 17 set / get / remove / expunge, with a guess-first question. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:1.6}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.bad-t{color:var(--bad);font-weight:700}
+table.runs td.good,td.good{color:var(--good);font-weight:700}
+.tlm{display:flex;flex-direction:column;gap:14px;outline:none}
+.tlm-btns{display:flex;flex-wrap:wrap;gap:8px}
+.tlm-btns .btn{font-size:13.5px}
+.tlm-btns .btn code{font-size:12.5px;background:none;padding:0}
+.tlm-grid{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px}
+.tlm-grid .cell{border:1.5px dashed var(--line);border-radius:8px;padding:4px 6px;min-height:58px;display:flex;flex-direction:column;gap:1px;min-width:0;font-family:var(--font-mono);font-size:11.5px;background:var(--card)}
+.tlm-grid .cell small{font-size:10.5px;color:var(--muted)}
+.tlm-grid .cell b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tlm-grid .cell span{color:var(--muted)}
+.tlm-grid .cell.live{border-style:solid;border-color:var(--rn);background:var(--rn-tint)}
+.tlm-grid .cell.orphan{border-style:solid;border-color:var(--of);background:var(--of-tint)}
+.tlm-grid .cell.stale{border-style:solid;border-color:var(--bad);background:var(--bad-tint)}
+.tlm-grid .cell.stale b,.tlm-grid .cell.stale span{color:var(--bad);font-weight:700}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-live::before{border-color:var(--rn);background:var(--rn-tint)}
+.tlm-legend .lg-orphan::before{border-color:var(--of);background:var(--of-tint)}
+.tlm-legend .lg-stale::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-log{font-size:15px;background:var(--rn-tint);border-radius:10px;padding:10px 14px;min-height:3em}
+@media (max-width:640px){.tlm-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.calc-out{grid-template-columns:minmax(0,1fr)}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 并发</span><span aria-hidden="true">/</span><span class="tb-here">ThreadLocal 与内存泄漏</span></div></nav>
+<main>
+
+<header class="hero">
+  <p class="kicker">ThreadLocal · ThreadLocalMap · WeakReference · 串号 · remove · expungeStaleEntry · cleanSomeSlots · InheritableThreadLocal · TransmittableThreadLocal · TaskDecorator · ScopedValue</p>
+  <h1>ThreadLocal：值挂在线程上，线程不死，值就不走</h1>
+  <p class="lead">ThreadLocal 让一个请求不用层层传参，就能在任何地方取到“当前用户”。代价是：值存在<b>线程</b>上，而线程池里的线程比请求活得长得多。请求结束了不 <code>remove()</code>，下一个请求会读到上一个人的用户号（<b>串号</b>）；值一直挂在线程上，就是<b>泄漏</b>。弱引用只救得了 key，救不了 value。<span class="tag-real">实测</span> 不 remove 时，4 个不带登录头的请求全部记到了别人头上；每个请求 new 一个 ThreadLocal 放 1 MB，GC 之后线程上还挂着 22～41 MB。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j02-order-in-threadpool.html#s-3">一个下单请求在线程池里 · 第 3、11 站</a></span><span>地图：<a href="../java/roadmap.html#j02">J02 · ThreadLocal 与内存泄漏（第 7 个知识点）</a></span><span>结构的上一圈：<a href="../javase/hashmap-relatives.html#m-tl">HashMap 的亲戚们 ④-4（ThreadLocalMap 和 0x61c88647）</a></span><span>实验：JDK 17.0.20，2 核 ARM <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div>
+    <h2><span class="sn">①</span>为什么需要：用户号要跟着请求走，却不想层层传参</h2>
+    <p class="lead">在全景第 3 站，这一步要解决的是：过滤器从请求头读出 <code>X-User: 1024</code>，后面的 Controller、Service、日志、审计都要用它，但不想给每个方法都加一个 <code>userId</code> 参数。第 11 站要解决的是：请求处理完，线程回到池子里，挂在它身上的 1024 必须清掉。</p>
+  </div>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 250" role="img" aria-label="同一个 exec-1 线程先后处理两个请求：请求 A 带 X-User 1024，过滤器 set 1024，下单时 get 到 1024，结束时忘了 remove；请求 B 不带头，过滤器不 set，下单时 get 到的还是 1024，串号。线程身上的 threadLocals 从头到尾一直挂着 1024。">
+        <g class="t-s">
+          <rect x="16" y="20" width="928" height="34" rx="8" class="b-pd"/>
+          <text x="30" y="42" class="t-b">Thread exec-1（Tomcat 池里的线程，一直活着，一个接一个处理请求）</text>
+
+          <text x="30" y="84" class="t-b">请求 A · X-User: 1024</text>
+          <rect x="30" y="94" width="150" height="44" rx="8" class="b-rn"/><text x="42" y="113" class="t-mono">USER.set(1024)</text><text x="42" y="130" class="t-xs">第 3 站 过滤器</text>
+          <rect x="196" y="94" width="150" height="44" rx="8" class="b-rn"/><text x="208" y="113" class="t-mono">USER.get() → 1024</text><text x="208" y="130" class="t-xs">下单记到 1024</text>
+          <rect x="362" y="94" width="130" height="44" rx="8" class="b-bad"/><text x="374" y="113">第 11 站 回池</text><text x="374" y="130" class="t-xs">忘了 remove()</text>
+
+          <text x="520" y="84" class="t-b">请求 B · 没带头（本该是“未登录”）</text>
+          <rect x="520" y="94" width="170" height="44" rx="8" class="b-neu"/><text x="532" y="113">过滤器：没头，不 set</text><text x="532" y="130" class="t-xs">第 3 站</text>
+          <rect x="706" y="94" width="230" height="44" rx="8" class="b-bad"/><text x="718" y="113" class="t-mono">USER.get() → 1024</text><text x="718" y="130" class="t-xs">订单记到了别人头上：串号</text>
+
+          <rect x="30" y="170" width="906" height="34" rx="8" class="b-rn"/>
+          <text x="44" y="192" class="t-mono">exec-1.threadLocals：USER → 1024</text>
+          <text x="420" y="192" class="t-xs">这张表挂在线程上，不随请求结束而消失，从 A 一直留到 B</text>
+          <text x="30" y="232" class="t-xs">加上 finally { USER.remove(); }：A 结束时表里的 1024 被删掉，B 读到 null，按未登录处理。</text>
+        </g>
+        <g class="e-ink"><line x1="180" y1="116" x2="194" y2="116" marker-end="url(#ar1)"/><line x1="346" y1="116" x2="360" y2="116" marker-end="url(#ar1)"/><line x1="492" y1="116" x2="518" y2="116" marker-end="url(#ar1)"/><line x1="690" y1="116" x2="704" y2="116" marker-end="url(#ar1)"/></g>
+        <defs><marker id="ar1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+      </svg>
+    </div>
+    <figcaption>全景第 2 站保证“一个请求从头到尾在同一个线程上跑”，ThreadLocal 就靠这个保证，把“属于这个请求的东西”挂在线程上。可是线程池里的线程会接着处理下一个请求。</figcaption>
+  </figure>
+  <div class="scene"><b>需求</b><span>地图上这一项的深度是“懂机制”：说得出值到底存在哪、谁引用着它；为什么不 remove 会串号、会泄漏；弱引用管什么、不管什么；以及值为什么不会自己跟到别的线程去（下一个知识点 CompletableFuture 要用）。</span></div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div>
+    <h2><span class="sn">②</span>没有它会怎样：层层传参，或者自己建一张全局表</h2>
+  </div>
+  <ul class="pains">
+    <li><b>层层传参</b>：<code>placeOrder(userId, traceId, tenantId, …)</code>，每加一个上下文字段就要改一串方法签名；中间夹着框架代码（AOP、MyBatis 拦截器、日志 Appender）时，参数根本传不进去。</li>
+    <li><b>自己建 <code>static Map&lt;Thread, Long&gt;</code></b>：所有线程抢同一张表，要用 ConcurrentHashMap；表强引用着 Thread 对象，线程结束了也不会自动删；请求结束忘了删，照样串号。</li>
+    <li class="ok">缺的那一块：<b>每个线程自己的一格存储，只有本线程读写，不用加锁</b>。这就是 ThreadLocal。它省掉了锁和参数，但没有省掉“用完要删”这件事。</li>
+  </ul>
+  <p class="mismatch">不懂这一点时的典型误用：把 ThreadLocal 当成“线程安全的全局变量”，只 set 不 remove，还觉得“请求结束了，值自然就没了”。<span class="tag-real">实测</span> 2 个线程的池子，先来两个登录用户，再来 4 个不带头的请求，4 个全部读到了前一个用户的号（⑤）。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div>
+    <h2><span class="sn">③</span>相邻方案：上下文怎么带</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>值存在哪</th><th>跨线程</th><th>谁负责清</th></tr></thead>
+      <tbody>
+        <tr><th>显式传参 / 上下文对象</th><td>方法参数</td><td>跟着参数走</td><td>不用清</td></tr>
+        <tr class="hl"><th>ThreadLocal</th><td>当前线程的 ThreadLocalMap</td><td>不跟</td><td><b>你</b>：<code>remove()</code></td></tr>
+        <tr><th>InheritableThreadLocal</th><td>同上，另一张表</td><td>只在 <code>new Thread</code> 时复制一次</td><td>你</td></tr>
+        <tr><th>TransmittableThreadLocal（阿里开源）</th><td>同上</td><td>提交任务时抓取，执行前放进去，执行后恢复</td><td>包装器</td></tr>
+        <tr><th>ScopedValue（JDK 25 正式）</th><td>当前线程的绑定，只在一段代码里有效</td><td>结构化并发的子任务自动继承</td><td>出了作用域自动没了</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line">选择规则：能传参就传参；要穿过框架代码时用 ThreadLocal，但 set 和 remove 必须成对；要跨到线程池里，用包装器显式带过去（⑥第三圈）；JDK 25 起新代码可以考虑 ScopedValue。<b>本页学 ThreadLocal 本身，以及它怎么泄漏。</b></p>
+  <p class="tip">ThreadLocal 还有第二种用法：给每个线程一份线程不安全的对象，比如 <code>ThreadLocal.withInitial(() -&gt; new SimpleDateFormat(…))</code>。机制一样，坑也一样，只是这种通常不用清（值不属于某个请求）。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div>
+    <h2><span class="sn">④</span>原理：引用链、两种坏事、“顺手”的清理</h2>
+  </div>
+  <div class="todo">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>值存在线程上</b>：每个 <code>Thread</code> 对象有个 <code>threadLocals</code> 字段，是一张 ThreadLocalMap；ThreadLocal 对象本身只带一个哈希值，充当 key。表的开放寻址和 0x61c88647 在<a href="../javase/hashmap-relatives.html#m-tl">HashMap 的亲戚们 ④-4</a> 讲过，这里不重讲。</li>
+      <li><b>弱引用</b>：一个对象如果只剩弱引用指着，下次 GC 就会被回收，弱引用变成 null（<a href="../javase/hashmap-relatives.html#m-weak">WeakHashMap 那节</a>）。</li>
+      <li><b>活着的线程是 GC Root</b>：从它出发能走到的对象都不会被回收。线程池里的线程几乎不死（<a href="threadpool-execute.html">线程池执行流程</a>）。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-chain"><span class="sn">④-1</span>引用链：key 是弱的，value 是强的</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 330" role="img" aria-label="引用链：静态字段 USER 强引用 ThreadLocal 对象 USER；请求里的局部变量 tl 强引用 ThreadLocal 对象 tl7，请求结束后这条引用消失，tl7 被 GC 回收。线程 exec-1 是 GC Root，强引用 threadLocals，也就是 ThreadLocalMap，再强引用 Entry 数组。每个 Entry 用弱引用指向 key，用强引用指向 value。tl7 的 Entry 的 key 变成了 null，但 value，一个 1 MB 的数组，仍然被线程强引用着。">
+        <g class="t-s">
+          <text x="20" y="24" class="t-b">谁指着 ThreadLocal 对象</text>
+          <rect x="20" y="40" width="200" height="50" rx="8" class="b-rn"/><text x="32" y="61" class="t-mono">static final USER</text><text x="32" y="80" class="t-xs">类活着就一直指着</text>
+          <rect x="20" y="200" width="200" height="50" rx="8" class="b-dash"/><text x="32" y="221" class="t-mono">请求里的局部变量 tl</text><text x="32" y="240" class="t-xs">请求结束，这条引用就没了</text>
+
+          <text x="280" y="24" class="t-b">ThreadLocal 对象（key）</text>
+          <rect x="280" y="40" width="180" height="50" rx="8" class="b-rn"/><text x="292" y="61" class="t-mono">ThreadLocal USER</text><text x="292" y="80" class="t-xs">只有哈希值，不存数据</text>
+          <rect x="280" y="200" width="180" height="50" rx="8" class="b-bad"/><text x="292" y="221" class="t-mono">ThreadLocal tl#7</text><text x="292" y="240" class="t-xs">只剩弱引用 → 被 GC 回收</text>
+
+          <rect x="540" y="14" width="404" height="40" rx="8" class="b-pd"/><text x="554" y="39" class="t-b">Thread exec-1 · 活着 = GC Root</text>
+          <rect x="540" y="72" width="404" height="34" rx="8" class="b-pd"/><text x="554" y="94" class="t-mono">threadLocals → ThreadLocalMap → Entry[] table</text>
+
+          <rect x="540" y="126" width="404" height="70" rx="10" class="b-card"/>
+          <text x="554" y="148" class="t-mono">Entry extends WeakReference&lt;ThreadLocal&gt;</text>
+          <text x="554" y="168">key ┄┄ 弱 → USER</text>
+          <text x="554" y="188">value ━━ 强 → 1024L</text>
+
+          <rect x="540" y="214" width="404" height="80" rx="10" class="b-bad"/>
+          <text x="554" y="236" class="t-mono">Entry（tl#7 的那格）</text>
+          <text x="554" y="256">key = null（referent 被 GC 清掉了）</text>
+          <text x="554" y="278" class="t-b">value ━━ 强 → byte[1 MB]，还在</text>
+          <text x="540" y="318" class="t-xs">红色这条全是强引用：线程 → 表 → Entry → value。线程不死、这格没被清，1 MB 就一直在。</text>
+        </g>
+        <g class="e-ink"><line x1="220" y1="65" x2="276" y2="65" marker-end="url(#ar2)"/><line x1="742" y1="54" x2="742" y2="70" marker-end="url(#ar2)"/><line x1="742" y1="106" x2="742" y2="124" marker-end="url(#ar2)"/></g>
+        <g class="e-mut"><line x1="220" y1="225" x2="276" y2="225" stroke-dasharray="5 5"/></g>
+        <text x="236" y="216" class="t-s t-bad">✕</text>
+        <g class="e-of"><path d="M540 164 C 500 164, 500 80, 464 72" fill="none" stroke-dasharray="5 4" marker-end="url(#ar2o)"/></g>
+        <g class="e-bad"><path d="M540 250 C 505 250, 500 232, 464 228" fill="none" stroke-dasharray="5 4"/></g>
+        <text x="476" y="262" class="t-s t-bad">✕</text>
+        <defs>
+          <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+          <marker id="ar2o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="f-of"/></marker>
+        </defs>
+      </svg>
+    </div>
+    <figcaption>虚线是弱引用：只用来找 key，不拦着 GC 回收 ThreadLocal 对象。实线是强引用。value 只有表里这一条引用，所以它不能是弱的，否则下次 GC 就没了。</figcaption>
+  </figure>
+  <ul class="callouts">
+    <li><b>1</b><span><b>key 弱</b>：ThreadLocal 对象没人用了（比如它是某个请求对象的字段），GC 能回收它，表里那格的 key 变成 null，成了“能认出来的垃圾”。</span></li>
+    <li><b>2</b><span><b>value 强</b>：value 只有表里这一条引用。它要等这一格被<b>清理</b>（④-3）、被 <code>remove()</code>，或者线程死掉（<code>Thread.exit()</code> 把 <code>threadLocals</code> 置 null）才会被放开。</span></li>
+    <li><b>3</b><span><b>线程池让第三条几乎不成立</b>：Tomcat 的 exec 线程、业务线程池的线程跟进程同寿。所以在服务端代码里，“线程结束就没了”不能当清理手段。</span></li>
+  </ul>
+
+  <h3 id="m-bad"><span class="sn">④-2</span>两种坏事：串号和泄漏</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>坏事</th><th>怎么出现</th><th>后果</th><th>会自己好吗</th></tr></thead>
+      <tbody>
+        <tr><th>串号</th><td>static 的 ThreadLocal，set 是有条件的（有头才 set），请求结束不 remove</td><td>下一个请求读到上一个请求的值：订单记错人、越权</td><td>不会。key 一直被 static 字段强引用着，弱引用根本用不上</td></tr>
+        <tr><th>泄漏 ①：大值 × 线程数</th><td>static 的 ThreadLocal 放大对象（缓存、整个查询结果），不 remove</td><td>每个线程都挂一份。200 个线程 × 5 MB = 1 GB</td><td>被下一次 set 覆盖才放旧的；线程不死就一直占一份</td></tr>
+        <tr><th>泄漏 ②：key 没了 value 还在</th><td>ThreadLocal 不是 static：每个请求或对象 new 一个，不 remove</td><td>GC 清掉 key 以后 value 还挂在线程上</td><td>只在“碰巧被扫到”时清（④-3）。<span class="tag-real">实测</span> 挂着 22～41 MB</td></tr>
+        <tr><th>泄漏 ③：整个类加载器</th><td>Web 应用重新部署，旧应用的 value 还挂在容器的线程上</td><td>value 的类 → 旧的类加载器 → 它加载的所有类都卸不掉，Metaspace 一次次涨</td><td>不会。Tomcat 停应用时会检测并打警告（⑥第三圈）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">串号比泄漏更常见，也更危险：它不报错，只是把数据写错人。弱引用只跟泄漏 ② 有关；另外三种它都管不着。</p>
+
+  <h3 id="m-clean"><span class="sn">④-3</span>清理是“顺手”的：动手看 ThreadLocalMap</h3>
+  <p>key 变成 null 以后，表并不会马上知道。JDK 17 的源码注释原话是：没有用引用队列，所以过期条目<b>只有在表快满的时候才保证会被清掉</b>（“stale entries are guaranteed to be removed only when the table starts running out of space”）。平时只在这几个时候顺手清：</p>
+  <ul class="callouts">
+    <li><b>1</b><span><code>get()</code> 没在第一格命中、往后探测时，遇到 key 为 null 的格子就清（<code>expungeStaleEntry</code>，顺带把后面的条目往前挪）。第一格就命中时什么都不清。</span></li>
+    <li><b>2</b><span><code>set()</code> 放进新条目后，往后扫 log₂(条目数) 格（<code>cleanSomeSlots</code>）；扫到一个过期的，就把扫描次数重置成 log₂(表长) 继续扫。</span></li>
+    <li><b>3</b><span>条目数到了表长的 2/3：先全表清一遍（<code>expungeStaleEntries</code>），剩下的还多才扩容。</span></li>
+    <li><b>4</b><span><code>remove()</code>：清掉这一格，再顺着往后清一段。这是唯一确定的清理。</span></li>
+  </ul>
+  <div class="lab tlm" id="tlm" tabindex="0" aria-label="ThreadLocalMap 实验台">
+    <div class="guess" data-role="rn">
+      <p id="g-q"><b>先猜</b>：一个请求 new 了一个 ThreadLocal，放了 1 MB，没 remove。请求结束、GC 跑过之后，那 1 MB 会怎样？</p>
+      <div class="opts" id="g-opts">
+        <button type="button" data-g="a">被 GC 回收了：key 是弱引用嘛</button>
+        <button type="button" data-g="b">key 变成 null，1 MB 还挂在线程上</button>
+        <button type="button" data-g="c">整格被删掉，什么都不剩</button>
+      </div>
+      <p class="res" id="g-res" hidden></p>
+    </div>
+    <div class="tlm-btns">
+      <button type="button" class="btn" data-act="static">请求：<code>USER.set(用户号)</code>，不 remove</button>
+      <button type="button" class="btn" data-act="leak">请求：<code>new ThreadLocal().set(1 MB)</code>，不 remove</button>
+      <button type="button" class="btn" data-act="leak5">同上，连来 5 个</button>
+      <button type="button" class="btn" data-act="clean">请求：同上，但 finally <code>remove()</code></button>
+      <button type="button" class="btn primary" data-act="gc">GC</button>
+      <button type="button" class="btn" data-act="get"><code>USER.get()</code></button>
+      <button type="button" class="btn" data-act="reset">从头来</button>
+    </div>
+    <div class="tlm-grid" id="tlm-grid" aria-live="polite"></div>
+    <div class="tlm-legend"><span class="lg-live">key 活着</span><span class="lg-orphan">key 没人用了，还没 GC</span><span class="lg-stale">key = null，value 还在</span></div>
+    <div class="calc-out" id="tlm-out"></div>
+    <p class="tlm-log" id="tlm-log">表是线程 exec-1 的 ThreadLocalMap，初始 16 格。点上面的按钮，每一步都按 JDK 17 源码的 set / get / remove 算。</p>
+  </div>
+  <p class="tip">模拟逻辑是 JDK 17 <code>ThreadLocalMap</code> 的 <code>set</code>、<code>getEntry</code>、<code>remove</code>、<code>replaceStaleEntry</code>、<code>expungeStaleEntry</code>、<code>cleanSomeSlots</code>、<code>rehash</code>、<code>resize</code> 逐行翻译，在 node 里跑过。真实 JVM 里 GC 什么时候来由堆决定，这里由你点。</p>
+
+  <h3 id="m-design"><span class="sn">④-4</span>为什么这样设计：弱 key、强 value、不用引用队列</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>Entry 怎么引用</th><th>ThreadLocal 对象没人用了以后</th><th>结果</th></tr></thead>
+      <tbody>
+        <tr><th>key 强、value 强</th><td>表里的 key 拉着它，永远回收不了</td><td class="bad-t">key 和 value 都泄漏，表里还认不出哪格是垃圾</td></tr>
+        <tr><th>key 弱、value 弱</th><td>value 只有这一条引用，下次 GC 就没了</td><td class="bad-t">正在用的值也会凭空消失，get 拿到 null，不能用</td></tr>
+        <tr class="hl"><th>key 弱、value 强（JDK 的选择）</th><td>key 被回收，格子变成“key = null”</td><td>能认出垃圾，下次碰到就清；value 要等到清理</td></tr>
+        <tr><th>再加上及时 <code>remove()</code></th><td>根本不会出现没人用的格子</td><td class="good">唯一确定不泄漏的做法</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="design">
+    <div class="way" data-role="rn">
+      <h4>ThreadLocalMap：碰到再清<small>弱 key + 探测时顺手清理</small></h4>
+      <ul class="pains">
+        <li class="ok">表只有本线程读写，清理也在本线程里做，不需要任何同步</li>
+        <li class="ok">大多数程序只有几个 static ThreadLocal，key 从不过期，这套清理几乎不花时间</li>
+        <li>过期条目什么时候被碰到，没人说得准：<span class="tag-real">实测</span> GC 后挂着 22～41 MB</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>被放弃的：引用队列<small>WeakHashMap 的做法</small></h4>
+      <ul class="pains">
+        <li class="ok">GC 把清掉的 Entry 放进队列，每次操作先把队列里的删干净，清得及时</li>
+        <li>队列由 GC 和 Reference Handler 线程往里放，本线程往外取，要同步；每次 get 都要先查一下队列</li>
+        <li>每个 Entry 多带一个队列引用，而这条最热的路径上，绝大多数时候没有任何东西可清</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict">决定胜负的约束：<b>get 要快、表只属于一个线程、key 几乎从不过期</b>。所以 JDK 把弱引用当成兜底，把“及时清”交还给使用者：<code>remove()</code>。（源码注释只写了“不用引用队列”；右边几条是按这个约束推出来的，不是源码原话。）</p>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">API</span><b>最少要会的几行</b></div>
+<pre><code>public final class UserContext {
+  private static final ThreadLocal&lt;Long&gt; USER = new ThreadLocal&lt;&gt;();   <span class="cm">// static final：全进程一个 key</span>
+  public static Long get()        { return USER.get(); }
+  public static void set(Long id) { USER.set(id); }
+  public static void clear()      { USER.remove(); }
+}
+
+<span class="cm">// 过滤器（全景第 3 站和第 11 站）：set 和 remove 在同一层，用 finally 配对</span>
+UserContext.set(parseHeader(req));          <span class="cm">// 没头也 set（null），不留上一个请求的值</span>
+try {
+  chain.doFilter(req, resp);
+} finally {
+  UserContext.clear();
+}
+
+ThreadLocal&lt;DateTimeFormatter&gt; f = ThreadLocal.withInitial(() -&gt; …);   <span class="cm">// 第一次 get 时建</span></code></pre>
+  </div>
+  <p class="tip">跨线程怎么带（InheritableThreadLocal、TTL、TaskDecorator）、Tomcat 的类加载器泄漏、虚拟线程和 ScopedValue，放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div>
+    <h2><span class="sn">⑤</span>亲眼看到：串号，和挂在线程上的 1 MB</h2>
+    <p class="lead">两个程序，<code>--release 8</code> 编译，JDK 17 运行，模拟交易靶场里的 <code>UserContext</code>。完整代码：<a href="https://github.com/archeu/study-labs/tree/main/java/juc/threadlocal-leak">study-labs/java/juc/threadlocal-leak →</a></p>
+  </div>
+  <h3>实验 1：2 个 exec 线程，先来两个登录用户，再来 4 个不带头的请求</h3>
+<pre class="console"><span class="w">$ java -cp … Mixup</span>
+请求 1  头 X-User=1024  线程 exec-1  下单用户=1024
+请求 2  头 X-User=2048  线程 exec-2  下单用户=2048
+请求 3  头 X-User=null  线程 exec-1  下单用户=<span class="r">1024  &lt;-- 串号！</span>
+请求 4  头 X-User=null  线程 exec-2  下单用户=<span class="r">2048  &lt;-- 串号！</span>
+请求 5  头 X-User=null  线程 exec-1  下单用户=<span class="r">1024  &lt;-- 串号！</span>
+请求 6  头 X-User=null  线程 exec-2  下单用户=<span class="r">2048  &lt;-- 串号！</span>
+
+<span class="w">$ java -cp … Mixup remove</span>        <span class="cm"># finally 里 USER.remove()</span>
+请求 3  头 X-User=null  线程 exec-1  下单用户=<b>null</b>
+请求 4 … 请求 6                      下单用户=<b>null</b></pre>
+  <ul class="callouts">
+    <li><b>1</b><span>串号跟着线程走：exec-1 上的请求都读到 1024，exec-2 上的都读到 2048。真实的 Tomcat 有几十个线程，哪个请求落到哪个线程上是随机的，所以这个 bug 时有时无，很难复现。</span></li>
+    <li><b>2</b><span>加一行 <code>finally { USER.remove(); }</code> 就全对了。也可以在入口无条件 set（没头就 set null），两样都做最稳。</span></li>
+  </ul>
+
+  <h3>实验 2：池里 1 个线程，跑 200 个请求，每个请求往 ThreadLocal 里放 1 MB</h3>
+<pre class="console"><span class="w">$ java -Xmx512m --add-opens java.base/java.lang=ALL-UNNAMED -cp … Leak perobj 200</span>
+模式 perobj，200 个请求跑完                 <span class="cm"># 每个请求 new 一个 ThreadLocal，不 remove</span>
+  [请求刚结束]       表长 128，活条目 22（22 MB），key=null 的条目 0
+  [Full GC 之后]     表长 128，活条目 2（0 MB），<span class="r">key=null 的条目 22（还挂着 22 MB）</span>
+  [再来一次 set 之后] 表长 128，活条目 2（0 MB），<span class="r">key=null 的条目 20（还挂着 20 MB）</span>
+
+<span class="w">$ java … Leak static 200</span>               <span class="cm"># static ThreadLocal，不 remove</span>
+  [Full GC 之后]     表长 16，活条目 3（<b>1 MB</b>），key=null 的条目 0
+
+<span class="w">$ java … Leak remove 200</span>               <span class="cm"># 每个请求 new 一个，finally remove</span>
+  [Full GC 之后]     表长 16，活条目 1（<b>0 MB</b>），key=null 的条目 0</pre>
+  <div class="tbl-wrap">
+    <table class="t runs">
+      <thead><tr><th>模式</th><th class="num">GC 后线程上挂着</th><th class="num">表长</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><th>perobj，200 个请求（两次）</th><td class="num bad-t">22 MB、29 MB</td><td class="num">128</td><td>key 被 GC 清成 null，value 没走</td></tr>
+        <tr><th>perobj，1000 个请求</th><td class="num bad-t">41 MB</td><td class="num">128</td><td>没有涨到 1000 MB：GC 一清 key，后面的 set 就能顺手清掉一些</td></tr>
+        <tr><th>static</th><td class="num">1 MB</td><td class="num">16</td><td>每次 set 覆盖同一格，一个线程只挂最新的一份</td></tr>
+        <tr><th>remove</th><td class="num good">0</td><td class="num">16</td><td>表都不用扩容</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul class="callouts">
+    <li><b>1</b><span><b>弱引用只救了 key</b>：Full GC 后 22 个 key 全变成 null，22 MB 一个字节都没少。再来一次 set，<code>cleanSomeSlots</code> 只扫几格，清掉 2 个。</span></li>
+    <li><b>2</b><span><b>泄漏有上限，但上限没人说得准</b>：取决于 GC 什么时候来、新的 set 碰巧扫到哪几格。三次分别是 22、29、41 MB。线程池里有 200 个线程，就要乘 200。</span></li>
+    <li><b>3</b><span>堆比开始时多占了约 2 倍（44～82 MB），因为 G1 这里的 region 是 1 MB，1 MB 的数组加上对象头放不进一个 region，按“大对象”占了两个。</span></li>
+  </ul>
+  <div class="done-box"><b>到这里已经能交差了：</b>你能说清值存在线程的 ThreadLocalMap 里、key 弱 value 强；知道不 remove 会串号、会泄漏；会写“入口 set、finally remove”的过滤器。<br><b>已知还没处理的细节：</b>有条件的 set（<a href="#p-mix">⑥ 坑 1</a>）、每次 new ThreadLocal（<a href="#p-new">⑥ 坑 2</a>）、往里放大对象（<a href="#p-big">⑥ 坑 3</a>）、异步线程里拿不到（<a href="#p-async">⑥ 坑 4</a>）、InheritableThreadLocal 碰上线程池（<a href="#p-inherit">⑥ 坑 5</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div>
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-mix"><b><em>坑 1</em>有条件的 set，加上不 remove：串号<a class="root" href="#m-bad">← ④-2 串号</a></b>
+      <dl><dt>现象</dt><dd>偶发：订单、日志、审计记到了另一个用户头上；不带 token 的请求“登录”成了别人。<span class="seen">⑤ 实验 1：4 个请求全串号</span></dd>
+      <dt>根源</dt><dd>线程被复用，上一个请求的值还在表里；static 的 key 一直活着，弱引用不起作用。</dd>
+      <dt>做法</dt><dd class="fix">入口无条件 set（包括 null），出口 finally remove；放在同一个 Filter 或 <code>HandlerInterceptor</code> 的 <code>preHandle</code> / <code>afterCompletion</code> 里。</dd></dl></div>
+    <div class="pit" id="p-new"><b><em>坑 2</em>ThreadLocal 不是 static：每个请求或对象 new 一个<a class="root" href="#m-clean">← ④-3 顺手清理</a></b>
+      <dl><dt>现象</dt><dd>堆慢慢涨，堆转储里一堆 <code>ThreadLocalMap$Entry</code> 的 referent 是 null，value 很大。<span class="seen">⑤ 实验 2：GC 后挂着 22～41 MB</span></dd>
+      <dt>根源</dt><dd>key 被 GC 回收了，value 还是强引用；过期格子要等“碰巧被扫到”。</dd>
+      <dt>做法</dt><dd class="fix">ThreadLocal 一律 <code>private static final</code>；真需要每个对象一份，就自己在对象里放字段，别用 ThreadLocal。</dd></dl></div>
+    <div class="pit" id="p-big"><b><em>坑 3</em>往 ThreadLocal 里放大对象或缓存<a class="root" href="#m-chain">← ④-1 线程是 GC Root</a></b>
+      <dl><dt>现象</dt><dd>上线后老年代一直下不去；堆转储里每个 exec 线程都挂着一份几 MB 的列表。</dd>
+      <dt>根源</dt><dd>每个线程一份，线程不死就不放：线程数 × 值的大小。</dd>
+      <dt>做法</dt><dd class="fix">只放 ID 这类小东西，要用实体时再查；缓存交给 Caffeine 这类有容量上限的缓存。</dd></dl></div>
+    <div class="pit" id="p-async"><b><em>坑 4</em>异步任务、线程池里拿不到值<a class="root" href="#m-chain">← ④-1 值存在当前线程上</a></b>
+      <dl><dt>现象</dt><dd>CompletableFuture、@Async 里的日志没有 traceId，<code>UserContext.get()</code> 是 null。<span class="seen">全景第 10 站 <span class="tag-real">实测</span>：在 Thread-552 上拿到 null</span></dd>
+      <dt>根源</dt><dd><code>get()</code> 查的是<b>当前线程</b>的表，换了线程就是另一张表。</dd>
+      <dt>做法</dt><dd class="fix">提交任务时把值抓出来，任务开始时 set、结束时 remove：Spring 的 <code>TaskDecorator</code>，或者阿里的 TTL（第三圈）。下一个知识点 CompletableFuture 会用到。</dd></dl></div>
+    <div class="pit" id="p-inherit"><b><em>坑 5</em>InheritableThreadLocal 碰上线程池<a class="root" href="#d-pass">← ⑥ 第三圈 只在建线程时复制</a></b>
+      <dl><dt>现象</dt><dd>子任务里的用户号是“很早以前的某个人”：恰好是池子建这个线程时，提交任务的那个请求的值。</dd>
+      <dt>根源</dt><dd>JDK 17 源码：只在 <code>Thread</code> 的构造方法里把父线程的 <code>inheritableThreadLocals</code> 复制一份；池子里的线程建好以后就不再复制。</dd>
+      <dt>做法</dt><dd class="fix">线程池场景不要用 InheritableThreadLocal 传请求上下文，用装饰器在每次提交时传。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>private static final，封装在一个类里</b><p>只暴露 get / set / clear，不把 ThreadLocal 对象传来传去。</p><p class="guard">坑 2：每次 new 一个。</p></div>
+    <div class="rl"><b>set 和 remove 成对，放在同一层的 try / finally</b><p>谁 set 谁 remove，入口无条件 set。阿里巴巴 Java 开发手册把“线程池场景下必须回收自定义的 ThreadLocal”列为强制。</p><p class="guard">坑 1：串号。</p></div>
+    <div class="rl"><b>只放小东西</b><p>用户号、traceId、租户号；不放实体、列表、缓存。</p><p class="guard">坑 3：线程数 × 大小。</p></div>
+    <div class="rl"><b>跨线程显式传</b><p>线程池统一包一层装饰器，提交时抓取、执行前放入、执行后清掉。</p><p class="guard">坑 4、坑 5。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：跨线程传递、容器泄漏、版本差异</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="bk" id="d-pass"><h4>跨线程传递的三种做法</h4>
+      <p><b>InheritableThreadLocal</b>：<code>new Thread</code> 时，构造方法调 <code>ThreadLocal.createInheritedMap</code> 把父线程的表复制一份，<code>childValue</code> 默认原样返回（浅拷贝，父子拿到的是同一个对象）。只复制一次，所以只适合“每个任务新建线程”。<b>Spring 的 TaskDecorator</b>：包住每个 Runnable，在提交线程里抓取、在执行线程里放入和清掉，MDC、SecurityContext 都这么带（<a href="../spring/spring-async-pool.html">@Async 页</a>）。<b>TransmittableThreadLocal</b>（阿里开源）把这套做成通用的：提交时 capture，执行前 replay，执行后 restore 回执行线程原来的值，还能用 Java Agent 把 JDK 线程池整个包起来。</p></div>
+    <div class="dp" data-role="g2"><h4>Tomcat 重新部署时的类加载器泄漏</h4>
+      <p>Tomcat 的线程属于容器，比 Web 应用活得久。应用里的 value 是应用类加载器加载的类，它挂在容器线程上，应用停了这个类加载器也卸不掉，连带它加载的所有类。按 Tomcat 文档，停应用时它会检查线程的 ThreadLocal，发现没清的就打一条 SEVERE 日志（“created a ThreadLocal with key of type … but failed to remove it”），并会逐步替换掉池里的线程来止损。Spring Boot 的 fat jar 一个进程一个应用，不重新部署，所以基本碰不到；Spring 自己的 <code>RequestContextHolder</code>、事务同步、日志 MDC 都是在 finally 里清的。</p></div>
+    <div class="dp" data-role="pd"><h4>JDK 8 / 17 / 21 有什么不同</h4>
+      <p>8 和 17 的算法一样，17 只是把 <code>e.get() == key</code> 换成了 JDK 16 新加的 <code>e.refersTo(key)</code>，不用把 referent 取出来。21 加了虚拟线程：每个虚拟线程有自己的 ThreadLocalMap，而且一定支持 ThreadLocal（JEP 444 去掉了预览版里“不支持 ThreadLocal 的虚拟线程”这个选项）。百万个虚拟线程各挂一份缓存，内存就炸了，所以“每线程一份对象”的用法在虚拟线程上要换掉；JDK 21 源码里有个 <code>-Djdk.traceVirtualThreadLocals=true</code>，虚拟线程每次 set 都会打出调用栈，用来找这种代码。</p></div>
+    <div class="dp" data-role="rn"><h4>ScopedValue：没有 remove 这回事</h4>
+      <p>JDK 21 预览（JEP 446），JDK 25 正式（JEP 506）。写法是 <code>ScopedValue.where(USER, 1024).run(() -&gt; …)</code>：值只在 run 里面有效，出来自动解绑；不能 set，只能在更内层重新绑定；结构化并发里的子任务自动继承。串号和泄漏从结构上就不可能发生，代价是值必须在一个代码块里用完。</p></div>
+    <div class="dp" data-role="cg"><h4>面试官会怎么问</h4>
+      <div class="faq">
+        <details><summary>ThreadLocal 的值存在哪？</summary><p>存在当前 Thread 对象的 threadLocals 字段（一张 ThreadLocalMap）里，ThreadLocal 对象只充当 key，带一个哈希值（④-1）。</p></details>
+        <details><summary>为什么会内存泄漏？key 为什么用弱引用？</summary><p>Entry 的 key 弱、value 强。ThreadLocal 对象没人用时 key 被回收，但 value 还被线程 → 表 → Entry 强引用，要等到被顺手清理、remove 或线程结束；线程池的线程不结束。key 用弱引用是为了让这种格子能被认出来并清掉，value 不能弱，否则正在用的值会被 GC（④-1、④-4）。</p></details>
+        <details><summary>static 的 ThreadLocal 还会泄漏吗？</summary><p>key 不会被回收，弱引用不起作用；每个线程挂一份最新的值，是“线程数 × 值大小”的有界占用，更大的问题是串号（④-2，⑤ static 模式 1 MB）。</p></details>
+        <details><summary>父子线程、线程池之间怎么传 ThreadLocal？</summary><p>InheritableThreadLocal 只在建线程时复制一次，不适合线程池；用 TaskDecorator 或 TTL 在每次提交时抓取、执行前放入、执行后恢复（坑 5、第三圈）。</p></details>
+      </div></div>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span></div>
+  <ul class="next">
+    <li>TransmittableThreadLocal 源码：capture / replay / restore 怎么做到不串号，Java Agent 怎么包住 JDK 线程池</li>
+    <li>用 MAT 打开堆转储，从 <code>Thread</code> → <code>threadLocals</code> 找到泄漏的 value（J14 线上排障）</li>
+    <li>Netty 的 FastThreadLocal：用数组下标代替哈希探测，为什么更快、什么时候反而更费内存</li>
+    <li>ScopedValue 加 StructuredTaskScope：虚拟线程时代的上下文传递（第 9 个知识点）</li>
+    <li>在 Tomcat 里复现一次重新部署的类加载器泄漏，看 Metaspace 和那条 SEVERE 日志</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div>
+    <h2><span class="sn">↺</span>回到⑤：改造你的案例</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="rn"><h4>1. 把 Mixup 改成“入口无条件 set”</h4><p>不加 remove，只把 <code>if (header != null)</code> 去掉，看还串不串号；再想想这样做留下了什么问题（提示：value 还挂着）。</p><p class="uses">用到：④-2、坑 1</p></div>
+    <div class="exc" data-role="pd"><h4>2. 算一算 static 模式的上限</h4><p>把 <code>Leak</code> 的池子改成 8 个线程，用 static 模式跑 200 个请求，预测 GC 后一共挂着多少 MB，再跑一次对照。</p><p class="uses">用到：④-1、坑 3</p></div>
+    <div class="exc" data-role="bk"><h4>3. 写一个最小的 TaskDecorator</h4><p>写 <code>wrap(Runnable r)</code>：在提交线程里读出 USER，返回一个新的 Runnable，执行前 set、finally 里 remove。用它把全景第 10 站的通知任务包一下，看还是不是 null。</p><p class="uses">用到：坑 4、第三圈</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>值存在线程自己的表里，key 弱、value 强；线程池的线程不死，所以每次请求都要 finally remove，否则串号、泄漏，弱引用只能兜住 key。</p></details>
+    <details><summary>2. 自己建 static Map&lt;Thread, Long&gt;，疼在哪？</summary><p>所有线程抢一张表要同步；表强引用着线程对象，线程结束也删不掉；请求结束不删照样串号（②）。</p></details>
+    <details><summary>3. 串号的根源是 ④ 的哪一条？为什么弱引用帮不上忙？</summary><p>④-1 和 ④-2：值挂在被复用的线程上；key 是 static 字段，一直被强引用着，永远不会变成 null，弱引用这一层根本不起作用。</p></details>
+    <details><summary>4. 预测：⑤ 实验 2 的 perobj 模式，如果每个请求结束后都主动 System.gc() 一次，GC 后挂着的会比 22 MB 多还是少？</summary><p>少得多。每次 GC 后上一个请求的 key 就是 null 了，下一次 set 落点附近很容易扫到它并清掉（还会因此把扫描次数重置成 log₂ 表长，多清几个），表也不会扩到 128。用本页的实验台“连来 5 个”之间点 GC 可以看到同样的现象（④-3）。</p></details>
+    <details><summary>5. 预测：把 Tomcat 的线程数从 200 调到 20，坑 1 的串号会变多还是变少？坑 3 的占用呢？</summary><p>串号概率变大：线程少，每个线程被更多请求复用，不带头的请求更容易落到“有旧值”的线程上。坑 3 的占用变小：线程数 × 值大小，线程少了，挂的份数就少了（④-1、④-2）。</p></details>
+    <details><summary>6. 放回全景：第 3 站 set 了 1024，第 11 站忘了 remove，第 10 站的异步通知又是在 Thread-552 上发的。下一个请求和这次的通知各会看到什么？</summary><p>下一个请求如果落在同一个 exec 线程上，又没带头，会读到 1024，订单记到别人头上（串号）。这次的通知在 Thread-552 上，那里的表里没有 USER，读到 null，通知发不出去或发给了“未知用户”（坑 4）。一个是值留得太久，一个是值没跟过去，根源都是“值挂在线程上”。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。实验在本机 2 核 ARM，JDK 17.0.20，<code>--release 8</code> 编译：<code>Mixup</code> 两种模式各跑一次；<code>Leak</code> 的 perobj 模式 200 个请求跑两次、1000 个请求跑一次，static 和 remove 模式各一次，<code>-Xmx512m</code>，G1 region 1 MB。标“实测”的都来自这些运行。实验台的模拟逻辑在 node 里跑过 200、1000 个请求和几种 GC 节奏。</p>
+  <p>按源码（本机 JDK 17、21）：<code>ThreadLocal.ThreadLocalMap</code> 的 Entry、set、getEntry、remove、cleanSomeSlots、expungeStaleEntry、rehash（阈值 2/3、清理后不小于阈值的 3/4 才扩容）和那段关于引用队列的注释；<code>Thread</code> 构造方法里复制 inheritableThreadLocals、<code>exit()</code> 置空 threadLocals；JDK 21 的 <code>jdk.traceVirtualThreadLocals</code>。按文档：JEP 444、JEP 446、JEP 506；Tomcat 内存泄漏防护的说明；阿里巴巴 Java 开发手册；TransmittableThreadLocal 项目说明。</p>
+  <p>相关：<a href="../javase/hashmap-relatives.html#m-tl">HashMap 的亲戚们（ThreadLocalMap 结构）</a> · <a href="../spring/spring-async-pool.html">Spring @Async 与线程池</a> · <a href="threadpool-tuning.html">线程池下一圈</a> · <a href="../database/hikari-concurrentbag.html">HikariCP 的 ConcurrentBag（用 ThreadLocal 当线程口袋）</a> · <a href="../java/pano-j02-order-in-threadpool.html">全景：一个下单请求在线程池里</a> · <a href="../java/roadmap.html#j02">Java 地图 J02</a></p>
+</footer>
+
+</main>
+<script>
+/*SIM-START*/
+// ThreadLocalMap 模拟：照 JDK 17 java.lang.ThreadLocal.ThreadLocalMap 的 set / getEntry / remove /
+// replaceStaleEntry / expungeStaleEntry / cleanSomeSlots / rehash / resize 逐行翻译。
+// key 是 ThreadLocal 对象：reach = 还有强引用指着它；gone = 已被 GC 清掉（Entry 的 referent 变 null）。
+const HASH_INC = 0x61c88647;
+function tlNew() { return { nextHash: 0, seq: 0, table: new Array(16).fill(null), size: 0, threshold: 10, freed: 0, freedMb: 0 }; }
+function tlMake(m, name, isStatic) {
+  const h = m.nextHash; m.nextHash = (m.nextHash + HASH_INC) | 0;
+  return { id: ++m.seq, name: name || ("tl#" + (m.seq)), h, reach: true, isStatic: !!isStatic };
+}
+const nextI = (i, len) => (i + 1 < len ? i + 1 : 0);
+const prevI = (i, len) => (i - 1 >= 0 ? i - 1 : len - 1);
+const stale = e => e.key === null;
+function dropVal(m, e) { if (e.val) { m.freed++; m.freedMb += e.val.mb || 0; } e.val = null; }
+function expunge(m, slot) {
+  const tab = m.table, len = tab.length;
+  dropVal(m, tab[slot]); tab[slot] = null; m.size--;
+  let i, e;
+  for (i = nextI(slot, len); (e = tab[i]) != null; i = nextI(i, len)) {
+    if (e.key === null) { dropVal(m, e); tab[i] = null; m.size--; }
+    else {
+      let h = e.key.h & (len - 1);
+      if (h !== i) { tab[i] = null; while (tab[h] != null) h = nextI(h, len); tab[h] = e; }
+    }
+  }
+  return i;
+}
+function cleanSome(m, i, n) {
+  let removed = false; const tab = m.table, len = tab.length; let scanned = 0;
+  do {
+    i = nextI(i, len); scanned++;
+    const e = tab[i];
+    if (e != null && stale(e)) { n = len; removed = true; i = expunge(m, i); }
+  } while ((n >>>= 1) !== 0);
+  m.lastScan = scanned;
+  return removed;
+}
+function resize(m) {
+  const old = m.table, newLen = old.length * 2, nt = new Array(newLen).fill(null); let count = 0;
+  for (const e of old) {
+    if (e == null) continue;
+    if (e.key === null) dropVal(m, e);
+    else { let h = e.key.h & (newLen - 1); while (nt[h] != null) h = nextI(h, newLen); nt[h] = e; count++; }
+  }
+  m.threshold = Math.floor(newLen * 2 / 3); m.size = count; m.table = nt; m.resized = true;
+}
+function rehash(m) {
+  const tab = m.table;
+  for (let j = 0; j < tab.length; j++) { const e = m.table[j]; if (e != null && stale(e)) expunge(m, j); }
+  if (m.size >= m.threshold - Math.floor(m.threshold / 4)) resize(m);
+}
+function replaceStale(m, key, val, staleSlot) {
+  const tab = m.table, len = tab.length; let e, toExp = staleSlot;
+  for (let i = prevI(staleSlot, len); (e = tab[i]) != null; i = prevI(i, len)) if (stale(e)) toExp = i;
+  for (let i = nextI(staleSlot, len); (e = tab[i]) != null; i = nextI(i, len)) {
+    if (e.key === key) {
+      e.val = val; tab[i] = tab[staleSlot]; tab[staleSlot] = e;
+      if (toExp === staleSlot) toExp = i;
+      cleanSome(m, expunge(m, toExp), len); return;
+    }
+    if (stale(e) && toExp === staleSlot) toExp = i;
+  }
+  dropVal(m, tab[staleSlot]); tab[staleSlot] = { key, val };
+  if (toExp !== staleSlot) cleanSome(m, expunge(m, toExp), len);
+}
+function tlSet(m, key, val) {
+  m.resized = false; m.lastScan = 0;
+  const tab = m.table, len = tab.length; let i = key.h & (len - 1);
+  for (let e = tab[i]; e != null; e = tab[i = nextI(i, len)]) {
+    if (e.key === key) { e.val = val; return "hit"; }
+    if (stale(e)) { replaceStale(m, key, val, i); return "replace"; }
+  }
+  tab[i] = { key, val }; const sz = ++m.size;
+  if (!cleanSome(m, i, sz) && sz >= m.threshold) rehash(m);
+  return "new";
+}
+function tlGet(m, key) {
+  m.resized = false; m.lastScan = 0;
+  const tab = m.table, len = tab.length; let i = key.h & (len - 1); let e = tab[i];
+  if (e != null && e.key === key) return { val: e.val, path: "direct" };
+  while (e != null) {
+    if (e.key === key) return { val: e.val, path: "probe" };
+    if (stale(e)) expunge(m, i); else i = nextI(i, len);
+    e = m.table[i];
+  }
+  return { val: null, path: "miss" };
+}
+function tlRemove(m, key) {
+  const tab = m.table, len = tab.length;
+  for (let i = key.h & (len - 1), e = tab[i]; e != null; e = tab[i = nextI(i, len)]) {
+    if (e.key === key) { e.key = null; expunge(m, i); return true; }
+  }
+  return false;
+}
+// GC：没有强引用的 ThreadLocal 被回收，Entry 的弱引用 key 变 null；value 是强引用，不动
+function tlGc(m) {
+  let cleared = 0;
+  for (const e of m.table) if (e && e.key && !e.key.reach) { e.key = null; cleared++; }
+  return cleared;
+}
+function tlStats(m) {
+  let live = 0, liveMb = 0, st = 0, stMb = 0, orphan = 0, orphanMb = 0;
+  for (const e of m.table) {
+    if (!e) continue;
+    const mb = (e.val && e.val.mb) || 0;
+    if (e.key === null) { st++; stMb += mb; }
+    else if (!e.key.reach) { orphan++; orphanMb += mb; }
+    else { live++; liveMb += mb; }
+  }
+  return { len: m.table.length, size: m.size, live, liveMb, stale: st, staleMb: stMb, orphan, orphanMb, hangingMb: stMb + orphanMb };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = s => document.querySelector(s);
+  if (!$("#tlm")) return;
+  let m, USER, users, guessed = null, guessShown = false;
+  function reset() {
+    m = tlNew(); USER = tlMake(m, "USER", true); users = [1024, 2048, 3072, 4096];
+    $("#tlm-log").textContent = "表是线程 exec-1 的 ThreadLocalMap，初始 16 格，还没有任何条目。点上面的按钮，每一步都按 JDK 17 源码的 set / get / remove 算。";
+    render();
+  }
+  function cleanedSince(f0, mb0) {
+    const n = m.freed - f0, mb = m.freedMb - mb0;
+    return n > 0 ? "顺手清掉了 " + n + " 个过期条目，放开 " + mb + " MB。" : "没有清掉任何过期条目。";
+  }
+  function oneLeak(remove) {
+    const k = tlMake(m); const f0 = m.freed, mb0 = m.freedMb;
+    tlSet(m, k, { label: "1 MB", mb: 1 });
+    let msg = "tl#" + k.id + " 放进了第 " + (k.h & (m.table.length - 1)) + " 格附近。";
+    if (remove) { tlRemove(m, k); msg += "finally remove() 删掉了自己这格。"; }
+    k.reach = false;
+    msg += cleanedSince(f0, mb0) + (m.resized ? "条目太多，表扩容到 " + m.table.length + " 格。" : "");
+    return msg;
+  }
+  function act(a) {
+    let msg = "";
+    if (a === "reset") return reset();
+    if (a === "static") {
+      const u = users.shift() || 5000; users.push(u);
+      const f0 = m.freed, mb0 = m.freedMb; tlSet(m, USER, { label: String(u), mb: 0 });
+      msg = "USER.set(" + u + ")：static 的 key 永远活着，每次都覆盖同一格。" + cleanedSince(f0, mb0) + "下一个请求如果不 set，就会读到 " + u + "（串号）。";
+    } else if (a === "leak") msg = "请求结束，局部变量没了，tl 只剩表里的弱引用，但 GC 还没来。" + oneLeak(false);
+    else if (a === "leak5") { for (let i = 0; i < 5; i++) msg = oneLeak(false); msg = "连来 5 个请求，最后一个：" + msg; }
+    else if (a === "clean") msg = oneLeak(true);
+    else if (a === "gc") {
+      const before = tlStats(m), n = tlGc(m);
+      msg = n ? "GC：" + n + " 个没人用的 ThreadLocal 被回收，它们那格的 key 变成 null。value 是强引用，" + before.orphanMb + " MB 一个字节都没少。" : "GC：没有可回收的 key（static 的 USER 一直被强引用着）。";
+      if (n && guessed && !guessShown) showGuess();
+    } else if (a === "get") {
+      const f0 = m.freed, mb0 = m.freedMb; const r = tlGet(m, USER);
+      msg = "USER.get() → " + (r.val ? r.val.label : "null") + "（" + (r.path === "direct" ? "第一格就命中，什么都不清" : r.path === "probe" ? "往后探测了几格才找到" : "没找到") + "）。" + (r.path === "direct" ? "" : cleanedSince(f0, mb0));
+    }
+    $("#tlm-log").textContent = msg;
+    render();
+  }
+  function render() {
+    const g = $("#tlm-grid"); g.textContent = "";
+    m.table.forEach((e, i) => {
+      const d = document.createElement("div");
+      let cls = "cell", k = "", v = "";
+      if (e) {
+        if (e.key === null) { cls += " stale"; k = "key=null"; }
+        else { cls += e.key.reach ? " live" : " orphan"; k = e.key.name; }
+        v = e.val ? e.val.label : "";
+      }
+      d.className = cls;
+      d.innerHTML = "<small></small><b></b><span></span>";
+      d.querySelector("small").textContent = i;
+      d.querySelector("b").textContent = k;
+      d.querySelector("span").textContent = v;
+      g.append(d);
+    });
+    const s = tlStats(m), out = $("#tlm-out"); out.textContent = "";
+    [["表长 / 条目", s.len + " / " + s.size], ["key 活着", s.live + " 个"], ["线程上挂着的垃圾", s.hangingMb + " MB"]].forEach(([a, b], i) => {
+      const d = document.createElement("div"); d.className = "tile" + (i === 2 && s.hangingMb > 0 ? " warn" : "");
+      d.innerHTML = "<small></small><b></b>"; d.querySelector("small").textContent = a; d.querySelector("b").textContent = b; out.append(d);
+    });
+  }
+  function showGuess() {
+    guessShown = true;
+    const res = $("#g-res"); res.hidden = false;
+    $("#g-opts").querySelectorAll("button").forEach(b => b.classList.add(b.dataset.g === "b" ? "right" : (b.dataset.g === guessed ? "wrong" : "x")));
+    res.textContent = (guessed === "b" ? "猜对了。" : "没猜对。") + "GC 只回收了只剩弱引用的 ThreadLocal 对象（key），value 还被 线程 → 表 → Entry 强引用着（④-1）。格子要等之后的 set / get 碰巧扫到，或者表快满时才清（④-3）。";
+  }
+  $("#g-opts").querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+    if (guessShown) return;
+    guessed = b.dataset.g;
+    $("#g-opts").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    const res = $("#g-res"); res.hidden = false; res.textContent = "记下了。现在点“new ThreadLocal().set(1 MB)”，再点 GC 看结果。";
+  }));
+  $("#tlm").querySelectorAll("[data-act]").forEach(b => b.addEventListener("click", () => act(b.dataset.act)));
+  reset();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
