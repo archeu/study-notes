@@ -143,6 +143,7 @@
 | 05 | [类加载与双亲委派：SPI 为什么要打破它](https://archeu.github.io/study-notes/jvm/jvm-classloading.html) | 类的一生、三层加载器与 loadClass 源码、类的身份、为什么先问上级、SPI 借 TCCL 反向加载与 Tomcat 子优先、元空间泄漏实测，委派走一遍实验台 |
 | 06 | [JIT、逃逸分析与常见的性能误区](https://archeu.github.io/study-notes/jvm/jvm-jit-escape.html) | 分层编译、内联和去虚化、逃逸分析与标量替换、去优化、热点 NPE 丢堆栈和预热等坑、六个性能误区，逃逸判定台 |
 | 07 | [JVM 故障排查：OOM、频繁 Full GC、CPU 飙高](https://archeu.github.io/study-notes/jvm/jvm-troubleshooting.html) | 常见误判、先留现场再分两条路线、OOM 抛给了谁、Full GC 后降不降、shallow 和 retained、nid 对到一行、交易靶场三个雷实测（MAT、Humongous、JFR 分配和方法采样）、启动参数模板，排查练习台 |
+| 08 | [容器里的 JVM：内存和 CPU 限制](https://archeu.github.io/study-notes/jvm/jvm-container.html) | cgroup 限额写在哪、JVM 读到后怎么定堆和 GC 和线程数、内核怎么杀进程和节流、堆按比例切加堆外逐块封顶、版本差异，容器内存预算台 |
 
 ## Java 基础
 
