@@ -109,6 +109,7 @@
 | 09 | [ConcurrentHashMap 与阻塞队列](https://archeu.github.io/study-notes/juc/chm-blocking-queue.html) | HashMap 并发 put 丢数据实测（丢 4%～16%）、ConcurrentHashMap 的桶数组和三种特殊节点、putVal 的几条路（空桶 CAS、锁桶头、协助扩容）、TreeBin、分格计数、只保证单个方法原子（get 再 put 实测丢更新、merge 不丢）、Recursive update、初始容量，阻塞队列家族和 DelayQueue，JDK 17 反射实测，putVal 路径演示 |
 | 10 | [线程池下一圈：怎么配、拒绝策略、动态调参与监控](https://archeu.github.io/study-notes/juc/threadpool-tuning.html) | 线程池的下一圈：用利特尔法则和 CPU 占比算线程数、按可接受排队时间定队列、四种拒绝策略把代价给了谁（实测 100 条通知三种策略丢 86 条、CallerRuns 让提交方慢 40 倍）、运行中先调最大再调核心（实测 2→16 积压 1 秒消完）、监控五个数、优雅关闭三步，参数计算器 |
 | 11 | [ThreadLocal 与内存泄漏](https://archeu.github.io/study-notes/juc/threadlocal-leak.html) | 值存在线程的 ThreadLocalMap、key 弱 value 强的引用链、串号和三种泄漏、顺手清理与为什么不用引用队列、InheritableThreadLocal / TTL / ScopedValue，ThreadLocalMap 实验台 |
+| 12 | [CompletableFuture 与异步编排](https://archeu.github.io/study-notes/juc/completablefuture-orchestration.html) | result 加 Completion 栈的结构、回调在哪个线程跑、thenCompose / thenCombine / allOf 与异常、默认池和超时不取消的坑、ThreadLocal 怎么带，回调线程先猜再看实验台 |
 
 ## 网络
 
