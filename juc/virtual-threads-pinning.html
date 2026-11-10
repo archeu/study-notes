@@ -1,0 +1,1062 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>虚拟线程与 pinning</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a mechanism topic, next round of the virtual-thread part of the IO models page (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), depth 懂机制, JDK 21. Roles: pd blue = virtual threads and carriers, bk teal = scheduler / ForkJoinPool, of amber = waiting on IO, g2 brown = Spring / Tomcat, cg purple = interview, neutral grey = old way / rejected design, bad red = pinning and pitfalls, good green = right way.
+   Interaction (one): carrier-thread gantt lab in ④-2 (unmount vs pinned), guess-first, simulation checked against the Pinning experiment. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 并发</span><span aria-hidden="true">/</span><span class="tb-here">虚拟线程：什么时候用、pinning 的坑</span></div></nav>
+<main>
+
+<header class="hero">
+  <p class="kicker">虚拟线程 · 载体线程 · Continuation · mount / unmount · ForkJoinPool 调度器 · pinning · jdk.tracePinnedThreads · jdk.VirtualThreadPinned · ReentrantLock · Semaphore · JEP 444 · JEP 491</p>
+  <h1>虚拟线程：等的时候把线程让出来，但在 synchronized 里让不出来</h1>
+  <p class="lead">虚拟线程是 JVM 自己调度的轻量线程。它阻塞时，JVM 把它的栈存到堆里、把底下的操作系统线程（<b>载体线程</b>）让给别人，所以可以“一个请求一个线程”地写阻塞代码。它只对<b>等</b>有用，对<b>算</b>没用；在 JDK 21 上，如果在 <code>synchronized</code> 里阻塞，它让不出载体线程，这叫<b>钉住（pinning）</b>。<span class="tag-real">实测</span> 1 万个等 100 ms 的任务：200 线程的池子 5037 ms，虚拟线程 242～265 ms；100 个在 synchronized 里等 100 ms 的虚拟线程用了 5030 ms，换成 ReentrantLock 是 125 ms。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j02-order-in-threadpool.html#s-2">一个下单请求在线程池里 · 第 2 站</a></span><span>地图：<a href="../java/roadmap.html#j02">J02 · 虚拟线程：什么时候用、pinning 的坑（第 9 个知识点，下一圈）</a></span><span>上一圈：<a href="../network/io-models.html">网络 IO 模型</a>（虚拟线程怎么接住 1 万个连接）</span><span>实验：JDK 21.0.12，2 核 ARM <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div>
+    <h2><span class="sn">①</span>为什么需要：200 个 Tomcat 线程，大部分时间在等</h2>
+    <p class="lead">在全景第 2 站，这一步要解决的是：一个下单请求大约 50 ms，其中只有一两毫秒在用 CPU，其余都在等数据库和下游。Tomcat 默认最多 200 个线程，按<a href="threadpool-tuning.html#m-size">利特尔法则</a>最多扛每秒 4000 个请求；下游一慢到 500 ms，就只剩每秒 400 个，而 CPU 还闲着。Spring Boot 3.2 起一个开关 <code>spring.threads.virtual.enabled=true</code> 就能换成“每个请求一个虚拟线程”。这一圈要回答：<b>什么时候该开、开了以后哪里会出事</b>。</p>
+  </div>
+  <div class="scene"><b>需求</b><span>上一圈（<a href="../network/io-models.html">网络 IO 模型</a>）讲了虚拟线程能照样写阻塞代码，坑 7 提到“钉住”。这一圈是“懂机制”：说得清挂载和卸载是怎么回事、载体线程有几个、什么时候会被钉住，怎么用工具找到钉住、怎么修；再把它和 J02 前八个知识点逐个对照，这一站就收尾了。</span></div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div>
+    <h2><span class="sn">②</span>没有它会怎样：线程太贵，只能限着用</h2>
+  </div>
+  <ul class="pains">
+    <li><b>平台线程一对一占一个操作系统线程</b>：要预留一段栈，创建一个要几十微秒（<a href="thread-state-context-switch.html">线程页</a>实测 82～94 µs），切换一次几微秒。几千个就开始吃不消，所以只能放进池子、限着数量用。</li>
+    <li><b>池子满了，等的线程也占着名额</b>：<span class="tag-real">实测</span> 1 万个“等下游 100 ms”的任务，200 线程的池子要 5037 ms，CPU 几乎全程闲着（⑤）。</li>
+    <li><b>老办法一：加线程</b>，内存和切换跟着涨；<b>老办法二：改成异步</b>（CompletableFuture、Reactor），线程不再傻等，但代码被拆成一节一节的回调，异常栈、调试、ThreadLocal 全变难（<a href="completablefuture-orchestration.html">上一页</a>）。</li>
+    <li class="ok">缺的那一块：<b>线程便宜到“一个请求一个”，阻塞时自动把底下的操作系统线程让出来</b>。这就是虚拟线程（JDK 21 正式，JEP 444）。</li>
+  </ul>
+  <p class="mismatch">不懂这一点时的典型误用：以为“线程多了、快了”，什么都能解决。<span class="tag-real">实测</span> 全景第 2 站换成虚拟线程后，一次压测开出了 941 个线程，没加锁的扣库存照样超卖（109 件）：虚拟线程不改变并发正确性，竞态、锁、可见性的规矩一条都没少。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div>
+    <h2><span class="sn">③</span>相邻方案：怎么让“等”不占线程</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>代码长什么样</th><th>等的时候</th><th>代价</th></tr></thead>
+      <tbody>
+        <tr><th>加大平台线程池</th><td>同步</td><td>操作系统线程睡着</td><td>内存、切换；上限几千</td></tr>
+        <tr><th>CompletableFuture + 池</th><td>回调链</td><td>不占线程（回调到了才占）</td><td>难写难调，上下文要手动带</td></tr>
+        <tr><th>Reactor / WebFlux</th><td>操作符链</td><td>事件循环，不能阻塞</td><td>整条链和所有驱动都要非阻塞</td></tr>
+        <tr><th>async / await（C#、JS、Kotlin 协程）</th><td>同步样子，但函数分两种颜色</td><td>挂起</td><td>Java 没有这个语法</td></tr>
+        <tr class="hl"><th>虚拟线程（JDK 21）</th><td>同步，就是普通的 Thread</td><td>卸载，载体线程去跑别人</td><td>钉住；对计算没帮助</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line">选择规则：并发高、大部分时间在等 IO 的服务（典型的 Spring MVC 业务），JDK 21 以上用虚拟线程；计算密集的活继续用按核数配的平台线程池；已经是响应式的链路不用改。<b>本页学虚拟线程的机制、钉住，以及什么时候不该用。</b></p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div>
+    <h2><span class="sn">④</span>原理：挂载、卸载、钉住</h2>
+  </div>
+  <div class="todo">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>线程状态和上下文切换</b>：阻塞的平台线程在内核里睡着，切换由内核做（<a href="thread-state-context-switch.html">线程页</a>）。</li>
+      <li><b>ForkJoinPool</b>：每个工作线程一个任务队列，空了去别人那里偷（<a href="completablefuture-orchestration.html#m-pool">上一页 ④-4</a> 的 commonPool 也是它）。</li>
+      <li><b>阻塞 socket 在 JDK 13 起换成了 NIO 实现</b>，为虚拟线程铺了路（<a href="../network/io-models.html">网络 IO 模型</a>）。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-mount"><span class="sn">④-1</span>机制：虚拟线程 = 一段可以暂停的栈 + 一个调度器</h3>
+  <figure>
+    <div class="fig-box wide">
+      <svg class="sv" viewBox="0 0 960 320" role="img" aria-label="虚拟线程的挂载和卸载。左边是调度器：一个专用的 ForkJoinPool，工作线程就是载体线程，默认和 CPU 核数一样多。虚拟线程被挂载到载体线程上执行。遇到阻塞调用，比如读 socket、sleep、BlockingQueue.take、ReentrantLock 排队，虚拟线程调用 Continuation.yield，把栈帧拷到堆上的 StackChunk 里，载体线程空出来去跑别的虚拟线程。等的东西到了，unpark 把虚拟线程重新提交给调度器，可能挂到另一个载体线程上继续。如果此时持有 synchronized 的锁，yield 失败，虚拟线程被钉住，载体线程陪着一起等。">
+        <g class="t-s">
+          <rect x="20" y="20" width="270" height="280" rx="12" class="b-bk"/>
+          <text x="36" y="46" class="t-b">调度器：专用的 ForkJoinPool</text>
+          <text x="36" y="66" class="t-xs">载体线程数 = 核数（本机 2），最多 256</text>
+          <rect x="36" y="82" width="238" height="40" rx="8" class="b-pd"/><text x="48" y="107" class="t-mono">worker-1 ← 挂着 VT#21</text>
+          <rect x="36" y="130" width="238" height="40" rx="8" class="b-pd"/><text x="48" y="155" class="t-mono">worker-2 ← 挂着 VT#57</text>
+          <text x="36" y="196" class="t-xs">就绪队列：VT#88、VT#90、VT#12 …</text>
+          <text x="36" y="216" class="t-xs">（几万个虚拟线程排在这里，</text>
+          <text x="36" y="234" class="t-xs">只占堆内存，不占操作系统线程）</text>
+
+          <rect x="340" y="20" width="280" height="80" rx="10" class="b-of"/>
+          <text x="354" y="44" class="t-b">VT#21 调了阻塞方法</text>
+          <text x="354" y="64" class="t-xs">socket 读、sleep、queue.take、</text>
+          <text x="354" y="82" class="t-xs">ReentrantLock 排队、Future.get …</text>
+
+          <rect x="340" y="124" width="280" height="80" rx="10" class="b-card"/>
+          <text x="354" y="148" class="t-b">Continuation.yield：卸载</text>
+          <text x="354" y="168" class="t-xs">栈帧拷到堆上的 StackChunk，</text>
+          <text x="354" y="186" class="t-xs">worker-1 空出来，去跑就绪队列里的下一个</text>
+
+          <rect x="340" y="228" width="280" height="72" rx="10" class="b-card"/>
+          <text x="354" y="252" class="t-b">等的东西到了：unpark</text>
+          <text x="354" y="272" class="t-xs">VT#21 重新进就绪队列，</text>
+          <text x="354" y="290" class="t-xs">可能挂到 worker-2 上接着跑（挂载）</text>
+
+          <rect x="670" y="124" width="270" height="110" rx="10" class="b-bad"/>
+          <text x="684" y="148" class="t-b">yield 失败 = 钉住</text>
+          <text x="684" y="170" class="t-xs">JDK 21：持有 synchronized 的锁</text>
+          <text x="684" y="188" class="t-xs">（MONITOR）、栈上有 native 帧（NATIVE）</text>
+          <text x="684" y="210" class="t-xs">→ 状态变 PINNED，worker-1 陪着一起等，</text>
+          <text x="684" y="228" class="t-xs">谁也用不了它</text>
+        </g>
+        <g class="e-ink">
+          <line x1="274" y1="102" x2="336" y2="62" marker-end="url(#ar4)"/>
+          <line x1="480" y1="100" x2="480" y2="120" marker-end="url(#ar4)"/>
+          <line x1="480" y1="204" x2="480" y2="224" marker-end="url(#ar4)"/>
+          <path d="M340 264 C 300 264, 300 200, 278 192" fill="none" marker-end="url(#ar4)"/>
+        </g>
+        <g class="e-bad"><line x1="620" y1="60" x2="668" y2="140" marker-end="url(#ar4b)" stroke-dasharray="5 4"/></g>
+        <defs>
+          <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+          <marker id="ar4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+        </defs>
+      </svg>
+    </div>
+    <figcaption>按 JDK 21 源码：<code>VirtualThread</code> 里一个 <code>Continuation</code> 加一个调度器；默认调度器的并行度取 <code>availableProcessors()</code>，最大 256（<code>jdk.virtualThreadScheduler.parallelism / maxPoolSize</code> 可改）。钉住的原因是 <code>Continuation.Pinned</code> 的三个值：MONITOR、NATIVE、CRITICAL_SECTION。</figcaption>
+  </figure>
+  <ul class="callouts">
+    <li><b>1</b><span><b>阻塞点都被 JDK 改造过</b>：socket、<code>Thread.sleep</code>、<code>LockSupport.park</code>（所以 AQS 系的锁、阻塞队列、CompletableFuture.get 都行）在虚拟线程里会卸载，而不是让操作系统线程睡着。</span></li>
+    <li><b>2</b><span><b>有些阻塞卸不下来，但会补偿</b>：很多文件 IO 和 <code>Object.wait()</code> 会占住载体线程，JDK 21 用临时多开一个载体线程来补偿（按 JEP 444）。<b>synchronized 里的 sleep / IO 不补偿</b>，这就是 ⑤ 里 5030 ms 的由来。</span></li>
+    <li><b>3</b><span><b>没有时间片</b>：调度器不会把一个一直在算的虚拟线程强行换下来（按 JEP 444），它只在阻塞时让出。所以长计算会霸占载体线程。</span></li>
+  </ul>
+
+  <h3 id="m-gantt"><span class="sn">④-2</span>动手看载体线程：卸载和钉住</h3>
+  <div class="lab vtl" id="vtl" tabindex="0" aria-label="载体线程调度实验台">
+    <div class="guess" data-role="pd">
+      <p><b>先猜</b>：8 个虚拟线程，每个“算 10 ms → 等下游 100 ms → 算 10 ms”，2 个载体线程，等下游的那段写在 <code>synchronized</code> 里（JDK 21）。全部做完大约要多久？</p>
+      <div class="opts" id="v-opts">
+        <button type="button" data-g="150">约 150 ms</button>
+        <button type="button" data-g="480">约 480 ms</button>
+        <button type="button" data-g="960">约 960 ms</button>
+      </div>
+      <p class="res" id="v-res" hidden></p>
+    </div>
+    <div class="vtl-ctl">
+      <div><span class="lbl">等下游的那段</span><div class="seg" id="v-mode"><button type="button" data-v="vt">锁外或 ReentrantLock：卸载</button><button type="button" data-v="pin">synchronized 里：钉住</button></div></div>
+      <div class="ctl-grid">
+        <label class="ctl"><span class="lbl">虚拟线程 <output id="o-tasks"></output></span><input type="range" id="i-tasks" min="2" max="24" step="1" value="8"></label>
+        <label class="ctl"><span class="lbl">载体线程（核数） <output id="o-car"></output></span><input type="range" id="i-car" min="1" max="8" step="1" value="2"></label>
+        <label class="ctl"><span class="lbl">等下游 ms <output id="o-io"></output></span><input type="range" id="i-io" min="10" max="500" step="10" value="100"></label>
+        <label class="ctl"><span class="lbl">每段计算 ms <output id="o-cpu"></output></span><input type="range" id="i-cpu" min="1" max="50" step="1" value="10"></label>
+      </div>
+    </div>
+    <div class="gantt" id="v-gantt" aria-live="polite"></div>
+    <div class="tlm-legend"><span class="lg-cpu">在载体线程上计算</span><span class="lg-pin">钉住：载体线程陪着等</span><span class="lg-free">空闲（虚拟线程卸载后去等了）</span></div>
+    <div class="calc-out" id="v-out"></div>
+    <p class="calc-verdict" id="v-verdict"></p>
+  </div>
+  <p class="tip">就绪队列按先进先出排，真实的 ForkJoinPool 有工作窃取，顺序不同，但总耗时的量级一样。在 node 里用“100 个虚拟线程、2 个载体、只等 100 ms”跑了一遍：卸载 101 ms、钉住 5001 ms，⑤ 实测是 125 ms 和 5030 ms。</p>
+
+  <h3 id="m-pin"><span class="sn">④-3</span>钉住：怎么发现，怎么修</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>手段</th><th>怎么用</th><th>看到什么</th></tr></thead>
+      <tbody>
+        <tr><th>启动参数（JDK 21）</th><td><code>-Djdk.tracePinnedThreads=short</code> 或 <code>full</code></td><td>虚拟线程被钉住时打出栈，标着 <code>&lt;== monitors:1</code>（⑤ 实测）</td></tr>
+        <tr><th>JFR</th><td>默认就开着的 <code>jdk.VirtualThreadPinned</code> 事件，钉住超过 20 ms 记一条</td><td>⑤ 实测 100 条，每条约 100 ms，带栈</td></tr>
+        <tr><th>线程转储</th><td><code>jcmd &lt;pid&gt; Thread.dump_to_file -format=json 文件</code></td><td>虚拟线程也在里面（老的 jstack 只看得到载体线程）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul class="callouts">
+    <li><b>1</b><span><b>修法一：把 synchronized 换成 ReentrantLock</b>。它排队和等待走 <code>LockSupport.park</code>，能卸载。<span class="tag-real">实测</span> 5030 ms → 125 ms。只需要改“锁里面会阻塞”的那些，锁里只做内存操作的 synchronized 不用动。</span></li>
+    <li><b>2</b><span><b>修法二：把阻塞挪到锁外</b>：先查好、算好，锁里只改内存。</span></li>
+    <li><b>3</b><span><b>修法三：升级 JDK</b>。JDK 24 的 JEP 491 让 synchronized 不再钉住（它同时去掉了 <code>jdk.tracePinnedThreads</code>）；native 帧仍会钉住。第三方库（老版本 JDBC 驱动、连接池）里的 synchronized 你改不了，这条最省事。</span></li>
+  </ul>
+
+  <h3 id="m-when"><span class="sn">④-4</span>什么时候用，什么时候别用</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>场景</th><th>用不用</th><th>为什么</th></tr></thead>
+      <tbody>
+        <tr><th>大量并发请求，大部分时间在等数据库、HTTP、MQ</th><td class="good">用</td><td>等的时候卸载，载体线程一直有活干（⑤：5037 → 约 250 ms）</td></tr>
+        <tr><th>计算密集（压缩、加密、大循环）</th><td class="bad-t">不用</td><td>算力只有核数那么多，换成虚拟线程不会变快（⑤：后跑的都是 2.1～2.2 秒）；还会霸占载体线程</td></tr>
+        <tr><th>锁里做 IO（synchronized），JDK 21～23</th><td class="bad-t">先改</td><td>钉住；先换 ReentrantLock 或升级 JDK</td></tr>
+        <tr><th>需要限制对下游的并发</th><td>用，但加 Semaphore</td><td>线程不再限并发，限流要自己做（坑 3）</td></tr>
+        <tr><th>每线程一份的缓存（ThreadLocal 放大对象）</th><td class="bad-t">先改</td><td>每个虚拟线程一份，十万个就是十万份（<a href="threadlocal-leak.html">ThreadLocal 页</a>第三圈）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="m-map"><span class="sn">④-5</span>和 J02 前八个知识点对照</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>知识点</th><th>换成虚拟线程以后</th></tr></thead>
+      <tbody>
+        <tr><th><a href="thread-state-context-switch.html">线程与上下文切换</a></th><td>虚拟线程在 Java 层面也有 NEW / RUNNABLE / WAITING 等状态；卸载和挂载由 JVM 做，不进内核，切换比平台线程便宜</td></tr>
+        <tr><th><a href="java-memory-model.html">Java 内存模型</a></th><td>完全照旧：可见性、有序性、happens-before 规则一条不变</td></tr>
+        <tr><th><a href="synchronized-cas-atomic.html">synchronized 与 CAS</a></th><td>JDK 21～23：synchronized 里阻塞会钉住；CAS、原子类不阻塞，没影响</td></tr>
+        <tr><th><a href="aqs.html">AQS 与 ReentrantLock</a></th><td>首选：排队走 park，能卸载</td></tr>
+        <tr><th><a href="chm-blocking-queue.html">ConcurrentHashMap 与阻塞队列</a></th><td>照用；阻塞队列的 take / put 会卸载</td></tr>
+        <tr><th><a href="threadpool-tuning.html">线程池</a></th><td>不要池化虚拟线程：每个任务一个，用完就扔；“限并发”改用 Semaphore；计算型的池子保留</td></tr>
+        <tr><th><a href="threadlocal-leak.html">ThreadLocal</a></th><td>能用，每个虚拟线程一份；请求结束线程就没了，串号少了，但别放大对象；以后可换 ScopedValue</td></tr>
+        <tr><th><a href="completablefuture-orchestration.html">CompletableFuture</a></th><td>“并行调几个下游”可以写回同步代码：开几个虚拟线程再 join，或用 StructuredTaskScope（预览）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="m-design"><span class="sn">④-6</span>为什么这样设计：不给函数分颜色</h3>
+  <div class="design">
+    <div class="way" data-role="pd">
+      <h4>Java：线程还是 Thread，阻塞点由 JDK 改造<small>虚拟线程（JEP 444）</small></h4>
+      <ul class="pains">
+        <li class="ok">几十年的阻塞式代码、JDBC、调试器、异常栈、ThreadLocal 都能直接用</li>
+        <li class="ok">不需要新语法，同一个方法在平台线程和虚拟线程上都能跑</li>
+        <li>JDK 要一个个改造阻塞点，改不到的地方（synchronized、native）就会钉住</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>被放弃的：async / await<small>C#、JavaScript、Kotlin 的挂起函数</small></h4>
+      <ul class="pains">
+        <li class="ok">编译器明确知道哪里会挂起，不存在“钉住”</li>
+        <li>函数分成两种颜色：异步函数只能被异步函数调用，整个调用链都要改</li>
+        <li>Java 生态里海量的同步库都得出一套异步版</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict">决定胜负的约束：<b>Java 已经有海量的同步代码和库</b>。让它们原封不动地享受“等的时候不占线程”，比让所有人重写成异步划算。代价是 JDK 自己要把阻塞点都改造好，JDK 21 时还没改完 synchronized，到 JDK 24 才补上。</p>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">API</span><b>最少要会的几行</b></div>
+<pre><code>Thread.ofVirtual().name("order-", 0).start(() -&gt; placeOrder());   <span class="cm">// 起一个</span>
+
+try (ExecutorService es = Executors.newVirtualThreadPerTaskExecutor()) {   <span class="cm">// 每个任务一个，不是池</span>
+  for (Order o : orders) es.submit(() -&gt; notify(o));
+}                                                                   <span class="cm">// close() 等全部做完</span>
+
+Semaphore smsLimit = new Semaphore(20);                               <span class="cm">// 限并发靠它，不靠线程数</span>
+smsLimit.acquire(); try { sms.send(o); } finally { smsLimit.release(); }
+
+<span class="cm"># Spring Boot 3.2+：Tomcat 请求、@Async 等都换成虚拟线程</span>
+spring.threads.virtual.enabled=true</code></pre>
+  </div>
+  <p class="tip">Spring 打开开关后具体换了哪些执行器、JDK 24/25 的变化、怎么在线程转储里看虚拟线程，放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div>
+    <h2><span class="sn">⑤</span>亲眼看到：等的时候快 20 倍，算的时候一样快，钉住慢 40 倍</h2>
+    <p class="lead">两个程序，<code>--release 21</code> 编译，JDK 21.0.12 运行（虚拟线程只能在 21 上跑）。完整代码：<a href="https://github.com/archeu/study-labs/tree/main/java/juc/virtual-threads-pinning">study-labs/java/juc/virtual-threads-pinning →</a></p>
+  </div>
+  <h3>实验 1：1 万个“等下游 100 ms”的任务，和 200 个计算任务</h3>
+<pre class="console"><span class="w">$ java -cp … Throughput io</span>
+CPU 核数 2，任务 10000 个，类型 io
+  平台线程池 200        <span class="r">5037 ms</span>，真正干活的操作系统线程 200 个
+  虚拟线程 每任务一个    <b>265 ms</b>，真正干活的操作系统线程 <b>2</b> 个
+<span class="cm">（第二次：5034 ms / 242 ms）</span>
+
+<span class="w">$ java -cp … Throughput cpu [vt-first]</span>    <span class="cm"># 200 个任务，每个单独跑约 20 ms 的计算</span>
+平台先跑：平台 3733 ms，虚拟线程 2067 ms   <span class="cm">（两次：3733/2067、3901/2221）</span>
+虚拟先跑：虚拟线程 3197 ms，平台 2129 ms   <span class="cm">（两次：3197/2129、3373/2160）</span></pre>
+  <ul class="callouts">
+    <li><b>1</b><span><b>等 IO</b>：200 线程的池子要 1 万 ÷ 200 = 50 批，每批 100 ms，正好 5 秒；虚拟线程 1 万个同时睡，只用 2 个载体线程，约 0.25 秒。</span></li>
+    <li><b>2</b><span><b>算</b>：谁先跑谁慢（JIT 还没热身），后跑的那一组平台线程和虚拟线程都在 2.1～2.2 秒，正好是“4 秒计算量 ÷ 2 核”。虚拟线程不会多变出 CPU。</span></li>
+  </ul>
+
+  <h3>实验 2：100 个虚拟线程，各自拿一把锁，在锁里等 100 ms（2 个载体线程）</h3>
+<pre class="console"><span class="w">$ java -Djdk.virtualThreadScheduler.parallelism=2 -cp … Pinning sync</span>
+模式 sync ：100 个虚拟线程、各等 100 ms，用了 <span class="r">5030 ms</span>（载体线程 2 个）
+<span class="w">$ java … Pinning lock</span>
+模式 lock ：100 个虚拟线程、各等 100 ms，用了 <b>125 ms</b>（载体线程 2 个）
+
+<span class="w">$ java -Djdk.tracePinnedThreads=short … Pinning sync</span>
+VirtualThread[#20]/runnable@ForkJoinPool-1-worker-2 reason:MONITOR
+    labs.juc.virtual_threads_pinning.Pinning.lambda$main$0(Pinning.java:23) <b>&lt;== monitors:1</b>
+
+<span class="w">$ java -XX:StartFlightRecording=filename=pin.jfr … Pinning sync &amp;&amp; jfr summary pin.jfr</span>
+ jdk.VirtualThreadPinned                   <b>100</b>          1400
+<span class="w">$ jfr print --events jdk.VirtualThreadPinned --stack-depth 3 pin.jfr</span>
+jdk.VirtualThreadPinned { duration = 98.9 ms … java.lang.VirtualThread.parkOnCarrierThread … }</pre>
+  <ul class="callouts">
+    <li><b>1</b><span>每把锁只有一个线程用，<b>没有任何锁竞争</b>，慢全来自钉住：100 个 × 100 ms ÷ 2 个载体 = 5 秒。换成 ReentrantLock 后 100 个同时睡，约 0.1 秒。</span></li>
+    <li><b>2</b><span>两个工具都直接指到了代码行：trace 指出 <code>Pinning.java:23</code> 持有 1 个监视器；JFR 里 100 条事件、每条约 100 ms，栈顶是 <code>parkOnCarrierThread</code>（在载体线程上停着，而不是卸载）。</span></li>
+  </ul>
+  <div class="done-box"><b>到这里已经能交差了：</b>你能说清虚拟线程等的时候卸载、算的时候不加速；会用 trace 参数和 JFR 找钉住，会用 ReentrantLock 修；知道它不是池子，限并发要用 Semaphore。<br><b>已知还没处理的细节：</b>synchronized 钉住（<a href="#p-pin">⑥ 坑 1</a>）、把虚拟线程放进池子（<a href="#p-pool">⑥ 坑 2</a>）、压垮下游（<a href="#p-flood">⑥ 坑 3</a>）、ThreadLocal 大对象（<a href="#p-tl">⑥ 坑 4</a>）、长计算霸占载体（<a href="#p-cpu">⑥ 坑 5</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div>
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-pin"><b><em>坑 1</em>synchronized 里做 IO：钉住（JDK 21～23）<a class="root" href="#m-pin">← ④-3 钉住</a></b>
+      <dl><dt>现象</dt><dd>打开虚拟线程后压测，吞吐不升反降，严重时所有请求卡住：载体线程只有核数那么多，几个被钉住就没了。<span class="seen">⑤ 实验 2：5030 ms vs 125 ms</span></dd>
+      <dt>根源</dt><dd>持有监视器时 <code>Continuation.yield</code> 失败，虚拟线程在载体线程上停着；而 synchronized 不像 Object.wait 那样有补偿。</dd>
+      <dt>做法</dt><dd class="fix">上线前带 <code>-Djdk.tracePinnedThreads=short</code> 压一遍，或者看 JFR 的 <code>jdk.VirtualThreadPinned</code>；锁里有 IO 的换 ReentrantLock；第三方库升到不用 synchronized 的版本，或者直接升 JDK 24+。</dd></dl></div>
+    <div class="pit" id="p-pool"><b><em>坑 2</em>把虚拟线程放进固定大小的池子<a class="root" href="#m-map">← ④-5 线程池那一行</a></b>
+      <dl><dt>现象</dt><dd>用 <code>newFixedThreadPool(200, Thread.ofVirtual().factory())</code>，结果和 200 个平台线程一样慢。</dd>
+      <dt>根源</dt><dd>池子的意义是复用昂贵的线程、顺便限数量；虚拟线程不贵，池子只剩下“限数量”这一个作用，把并发又卡回了 200。</dd>
+      <dt>做法</dt><dd class="fix">每个任务一个：<code>newVirtualThreadPerTaskExecutor()</code>；要限的是某个下游的并发，就在调用那个下游的地方加 Semaphore。</dd></dl></div>
+    <div class="pit" id="p-flood"><b><em>坑 3</em>线程不再限并发，下游被压垮<a class="root" href="#m-when">← ④-4 限并发要自己做</a></b>
+      <dl><dt>现象</dt><dd>开了虚拟线程后，数据库连接池等待超时、短信网关被限流。以前 200 个 Tomcat 线程顺带限住了并发，现在没了。</dd>
+      <dt>根源</dt><dd>请求进来就有线程，瓶颈从线程挪到了连接池和下游（<a href="../network/io-models.html#pit-pin">网络 IO 页坑 7</a>、自测 5）。</dd>
+      <dt>做法</dt><dd class="fix">连接池大小按数据库能承受的算，不跟着线程数涨；每个下游一个 Semaphore 做舱壁；入口加限流（J12）。</dd></dl></div>
+    <div class="pit" id="p-tl"><b><em>坑 4</em>ThreadLocal 里放缓存<a class="root" href="threadlocal-leak.html#d-pass">← ThreadLocal 页第三圈</a></b>
+      <dl><dt>现象</dt><dd>开虚拟线程后堆占用暴涨：以前 200 个线程各一份 SimpleDateFormat、缓冲区，现在十万个虚拟线程各一份。</dd>
+      <dt>根源</dt><dd>每个虚拟线程都有自己的 ThreadLocalMap，“每线程一份”的复用在“每请求一个线程”下就失效了。</dd>
+      <dt>做法</dt><dd class="fix">换成线程安全的对象（DateTimeFormatter）或真正的对象池；用 <code>-Djdk.traceVirtualThreadLocals=true</code> 找出在虚拟线程里 set ThreadLocal 的代码。</dd></dl></div>
+    <div class="pit" id="p-cpu"><b><em>坑 5</em>长计算放进虚拟线程<a class="root" href="#m-mount">← ④-1 没有时间片</a></b>
+      <dl><dt>现象</dt><dd>一个导出报表的请求在算，同时间其他请求的响应时间整体上涨。</dd>
+      <dt>根源</dt><dd>调度器只在阻塞时换人，一直算的虚拟线程不让出载体线程；载体线程只有核数那么多。</dd>
+      <dt>做法</dt><dd class="fix">计算型任务交给单独的、按核数配的平台线程池，虚拟线程提交过去再等结果（等的时候会卸载）。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>开之前先查钉住</b><p>带 trace 参数或 JFR 压测一遍，清掉锁里有 IO 的 synchronized。</p><p class="guard">坑 1。</p></div>
+    <div class="rl"><b>不池化，限并发用 Semaphore</b><p>每个下游一个信号量，许可数按下游能承受的算。</p><p class="guard">坑 2、坑 3。</p></div>
+    <div class="rl"><b>计算和等待分开</b><p>等 IO 的用虚拟线程，算的交给平台线程池。</p><p class="guard">坑 5。</p></div>
+    <div class="rl"><b>ThreadLocal 只放请求上下文</b><p>小的、请求级的值；缓存另想办法。</p><p class="guard">坑 4。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：版本、Spring、排查</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="pd"><h4>JDK 21 → 24 → 25</h4>
+      <p><b>21</b>：虚拟线程正式（JEP 444）；StructuredTaskScope 预览（JEP 453）、ScopedValue 预览（JEP 446）。<b>24</b>：JEP 491，synchronized 不再钉住，<code>jdk.tracePinnedThreads</code> 随之去掉，JFR 事件保留（只剩 native 帧等情况）。<b>25</b>：ScopedValue 正式（JEP 506），StructuredTaskScope 还在预览。8 和 17 没有虚拟线程。生产上用 JDK 21 的，钉住这一节一定要过一遍。</p></div>
+    <div class="dp" data-role="g2"><h4>Spring Boot 打开开关以后</h4>
+      <p><code>spring.threads.virtual.enabled=true</code>（Boot 3.2+，要求 JDK 21）：Tomcat 处理请求改用虚拟线程执行器，Acceptor、Poller 不变（<a href="../network/io-models.html">网络 IO 页</a>）；自动配置的 <code>@Async</code> 执行器换成每任务一个虚拟线程的 SimpleAsyncTaskExecutor，<code>spring.task.execution.pool.*</code> 就不再起作用了（按 Spring Boot 文档）。所以“线程池下一圈”算出来的那些参数，开了以后要换成 Semaphore 和连接池上限。</p></div>
+    <div class="dp" data-role="bk"><h4>线上怎么看虚拟线程</h4>
+      <p><code>jstack</code> 只列平台线程，看不到卸载着的虚拟线程。JDK 21 用 <code>jcmd &lt;pid&gt; Thread.dump_to_file -format=json dump.json</code>，按线程容器（比如某个 ExecutorService）分组列出所有虚拟线程和它们的栈。JFR 里还有 <code>jdk.VirtualThreadStart / End</code>（默认关）和 <code>jdk.VirtualThreadSubmitFailed</code>。</p></div>
+    <div class="dp" data-role="cg"><h4>面试官会怎么问</h4>
+      <div class="faq">
+        <details><summary>虚拟线程和平台线程有什么区别？为什么便宜？</summary><p>平台线程一对一绑操作系统线程；虚拟线程由 JVM 调度，挂在少数载体线程上跑，阻塞时把栈存到堆上、让出载体线程。创建和切换都不进内核，栈按需增长，所以能开几十万个（④-1）。</p></details>
+        <details><summary>什么是 pinning？怎么发现、怎么解决？</summary><p>虚拟线程阻塞时卸不下来、占着载体线程。JDK 21 主要是持有 synchronized 锁时阻塞、或栈上有 native 帧。用 -Djdk.tracePinnedThreads 或 JFR 的 jdk.VirtualThreadPinned 找；换 ReentrantLock、把阻塞挪出锁，或升级到 JDK 24（④-3）。</p></details>
+        <details><summary>虚拟线程适合什么场景？CPU 密集适合吗？</summary><p>适合高并发、大部分时间在等 IO 的服务；CPU 密集不适合，算力只有核数，而且没有时间片，长计算会霸占载体线程（④-4、坑 5）。</p></details>
+        <details><summary>用了虚拟线程，还要线程池吗？</summary><p>虚拟线程不要池化；“限并发”改用 Semaphore；计算型任务仍然用按核数配的平台线程池（坑 2）。</p></details>
+      </div></div>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span></div>
+  <ul class="next">
+    <li>Continuation 源码：yield 时栈帧怎么拷进 StackChunk、挂载时怎么懒拷回来</li>
+    <li>StructuredTaskScope + ScopedValue：把全景第 10 站的三条通知改写成结构化并发，一个失败其余真正取消</li>
+    <li>在 JDK 24/25 上重跑 ⑤ 实验 2，看 synchronized 版是不是也变成 100 ms 左右（JEP 491）</li>
+    <li>HikariCP、MySQL 驱动在虚拟线程下的表现：哪些版本还有 synchronized 钉住</li>
+    <li>交易靶场整体切到虚拟线程后压一遍：瓶颈挪到了哪里（J12 限流、J13 监控）</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div>
+    <h2><span class="sn">↺</span>回到⑤：改造你的案例</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="pd"><h4>1. 给 Throughput 加一个“虚拟线程放进池子”</h4><p>加第三种：<code>Executors.newFixedThreadPool(200, Thread.ofVirtual().factory())</code>。先猜它是 5 秒还是 0.25 秒，再跑。</p><p class="uses">用到：坑 2</p></div>
+    <div class="exc" data-role="bk"><h4>2. 用 Semaphore 限住下游</h4><p>在 io 模式的任务里加 <code>Semaphore(50)</code>，模拟“短信网关最多 50 并发”。预测 1 万个任务要多久（提示：利特尔法则），再跑。</p><p class="uses">用到：④-4、坑 3</p></div>
+    <div class="exc" data-role="of"><h4>3. 让 Object.wait 来对照</h4><p>把 Pinning 的 sleep 换成 <code>lock.wait(100)</code>（仍在 synchronized 里），看总耗时和 sync 版差多少，再用 JFR 看载体线程数有没有变多。</p><p class="uses">用到：④-1 第 2 条（补偿）</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>虚拟线程在阻塞时把栈存到堆上、让出载体线程，所以对“等”有用、对“算”没用；JDK 21 上在 synchronized 里阻塞会钉住载体线程；它不是池子，限并发要用 Semaphore。</p></details>
+    <details><summary>2. 用 200 线程的池子跑 1 万个 IO 任务，疼在哪？</summary><p>等的线程也占着名额，只能 200 个一批，5 秒；CPU 几乎闲着（②、⑤）。</p></details>
+    <details><summary>3. ⑤ 实验 2 的 sync 版慢在哪？根源是 ④ 的哪一条？</summary><p>④-1 和 ④-3：持有监视器时 yield 失败，虚拟线程钉在载体线程上睡；2 个载体线程一次只能睡 2 个，100 个要 50 轮 × 100 ms = 5 秒。没有任何锁竞争。</p></details>
+    <details><summary>4. 预测：实验 2 的 sync 版，把载体线程数从 2 调到 10（parallelism=10），大约多久？换成 JDK 24 呢？</summary><p>JDK 21：一次能钉住 10 个，100 ÷ 10 × 100 ms ≈ 1 秒。JDK 24：synchronized 不再钉住，和 lock 版一样，约 100 ms 出头（④-3、JEP 491）。</p></details>
+    <details><summary>5. 预测：Tomcat 开了虚拟线程，HikariCP 还是 10 个连接，每个请求查库 100 ms，来了每秒 200 个请求，会怎样？</summary><p>需要 200 × 0.1 = 20 个连接同时在用，只有 10 个；一半请求的虚拟线程排在 Hikari 上等（卸载着，不占载体），响应时间越来越长，最后连接获取超时。瓶颈从 Tomcat 线程挪到了连接池（坑 3）。</p></details>
+    <details><summary>6. 放回全景：第 2 站换成虚拟线程，第 6 站用的是 synchronized 扣库存，里面查了一次数据库。高峰时会怎样？换成第 8 站的数据库条件更新呢？</summary><p>JDK 21 上，每个进了 synchronized 的虚拟线程查库时都钉住载体线程，载体线程只有核数那么多，加上本来就在排队抢这把锁，整个服务几乎串行，所有请求变慢。换成数据库条件更新：JVM 里没有锁，查库时虚拟线程正常卸载，并发控制交给数据库的行锁（全景第 6、8 站）。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准（下一圈）。实验在本机 2 核 ARM，JDK 21.0.12，<code>--release 21</code> 编译：<code>Throughput io</code> 跑两次；<code>Throughput cpu</code> 两种先后顺序各跑两次（第一版按墙钟时间计算的写法有误，已换成固定计算量重跑）；<code>Pinning</code> 两种模式各一次、带 trace 一次、带 JFR 一次。标“实测”的都来自这些运行；“全景第 2 站 941 个线程、超卖 109 件”来自全景页的实测。实验台的调度模型在 node 里和实验 2 对照过。</p>
+  <p>按源码（本机 JDK 21）：<code>VirtualThread</code> 的状态（PINNED、TIMED_PINNED）、<code>yieldContinuation</code>、默认调度器的 parallelism / maxPoolSize / minRunnable 和 <code>jdk.tracePinnedThreads</code>；<code>Continuation.Pinned</code>（MONITOR、NATIVE、CRITICAL_SECTION）。按文档：JEP 444（补偿、没有时间片、JFR 事件）、JEP 446、JEP 453、JEP 491、JEP 506；Spring Boot 文档里的 <code>spring.threads.virtual.enabled</code>。</p>
+  <p>相关：<a href="../network/io-models.html">网络 IO 模型（上一圈）</a> · <a href="completablefuture-orchestration.html">CompletableFuture 与异步编排</a> · <a href="threadpool-tuning.html">线程池下一圈</a> · <a href="threadlocal-leak.html">ThreadLocal 与内存泄漏</a> · <a href="../java/pano-j02-order-in-threadpool.html">全景：一个下单请求在线程池里</a> · <a href="../java/roadmap.html#j02">Java 地图 J02</a></p>
+</footer>
+
+</main>
+<script>
+/*SIM-START*/
+// 载体线程调度模拟：M 个虚拟线程，每个都是“算 c1 → 等 IO d → 算 c2”，K 个载体线程（ForkJoinPool 的工作线程）。
+// mode "vt"：IO 时卸载（unmount），载体线程去跑别人；mode "pin"：IO 写在 synchronized 里，JDK 21 卸不下来，载体线程陪着等。
+// 就绪队列先进先出（按就绪时间、编号），和 ForkJoinPool 的实际窃取顺序不同，只看量级。
+function vtSim(p) {
+  const M = p.tasks, K = p.carriers, c1 = p.c1, d = p.io, c2 = p.c2, pin = p.mode === "pin";
+  const ready = [];                                        // {id, at, seg}
+  for (let i = 0; i < M; i++) ready.push({ id: i, at: 0, seg: 0 });
+  const free = Array.from({ length: K }, (_, k) => ({ k, at: 0 }));
+  const bars = [];                                         // {k, id, from, to, kind: cpu|pin}
+  const finish = new Array(M).fill(0);
+  let guard = 0;
+  while (ready.length && guard++ < 100000) {
+    ready.sort((a, b) => a.at - b.at || a.id - b.id);
+    free.sort((a, b) => a.at - b.at || a.k - b.k);
+    const job = ready.shift(), car = free[0];
+    let t = Math.max(job.at, car.at);
+    if (job.seg === 0) {
+      bars.push({ k: car.k, id: job.id, from: t, to: t + c1, kind: "cpu" }); t += c1;
+      if (pin) {
+        bars.push({ k: car.k, id: job.id, from: t, to: t + d, kind: "pin" }); t += d;
+        bars.push({ k: car.k, id: job.id, from: t, to: t + c2, kind: "cpu" }); t += c2;
+        finish[job.id] = t;
+      } else {
+        ready.push({ id: job.id, at: t + d, seg: 1 });
+      }
+    } else {
+      bars.push({ k: car.k, id: job.id, from: t, to: t + c2, kind: "cpu" }); t += c2;
+      finish[job.id] = t;
+    }
+    car.at = t;
+  }
+  const total = Math.max(...finish);
+  const busy = bars.filter(b => b.kind === "cpu").reduce((s, b) => s + b.to - b.from, 0);
+  return { total, bars, cpuUtil: busy / (K * total), pinnedMs: bars.filter(b => b.kind === "pin").reduce((s, b) => s + b.to - b.from, 0) };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = s => document.querySelector(s);
+  if (!$("#vtl")) return;
+  const st = { mode: "pin" };
+  let guessed = null, revealed = false;
+  const ids = { tasks: "i-tasks", car: "i-car", io: "i-io", cpu: "i-cpu" };
+  function params() {
+    const v = {};
+    Object.entries(ids).forEach(([k, id]) => { v[k] = +$("#" + id).value; $("#o-" + k).textContent = v[k]; });
+    return { tasks: v.tasks, carriers: v.car, io: v.io, c1: v.cpu, c2: v.cpu, mode: st.mode };
+  }
+  function render() {
+    $("#v-mode").querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === st.mode)));
+    const p = params(), r = vtSim(p);
+    const g = $("#v-gantt"); g.textContent = "";
+    for (let k = 0; k < p.carriers; k++) {
+      const row = document.createElement("div"); row.className = "g-row";
+      const lab = document.createElement("span"); lab.className = "g-lab"; lab.textContent = "worker-" + (k + 1);
+      const track = document.createElement("div"); track.className = "g-track";
+      r.bars.filter(b => b.k === k).forEach(b => {
+        const s = document.createElement("i");
+        s.className = "g-bar " + b.kind;
+        s.style.left = (b.from / r.total * 100) + "%";
+        s.style.width = Math.max(0.4, (b.to - b.from) / r.total * 100) + "%";
+        s.title = "VT#" + (b.id + 1) + " " + (b.kind === "pin" ? "钉住" : "计算") + " " + b.from + "–" + b.to + " ms";
+        if ((b.to - b.from) / r.total > 0.05) s.textContent = b.id + 1;
+        track.append(s);
+      });
+      row.append(lab, track); g.append(row);
+    }
+    const axis = document.createElement("div"); axis.className = "g-axis";
+    axis.innerHTML = "<span>0</span><span></span>"; axis.lastChild.textContent = r.total + " ms";
+    g.append(axis);
+    const other = vtSim(Object.assign({}, p, { mode: st.mode === "pin" ? "vt" : "pin" }));
+    const out = $("#v-out"); out.textContent = "";
+    [["全部做完", r.total + " ms"], ["载体线程忙着计算的比例", Math.round(r.cpuUtil * 100) + "%"], [st.mode === "pin" ? "如果能卸载" : "如果被钉住", other.total + " ms"]].forEach(([a, b], i) => {
+      const d = document.createElement("div"); d.className = "tile" + (i === 0 && st.mode === "pin" ? " warn" : "");
+      d.innerHTML = "<small></small><b></b>"; d.querySelector("small").textContent = a; d.querySelector("b").textContent = b; out.append(d);
+    });
+    const lower = Math.ceil(p.tasks * (p.c1 + p.c2) / p.carriers);
+    $("#v-verdict").textContent = st.mode === "pin"
+      ? "钉住时每个虚拟线程从头到尾占着一个载体线程，等于只有 " + p.carriers + " 个线程的池子：约 " + p.tasks + " ÷ " + p.carriers + " 轮 × " + (p.c1 + p.io + p.c2) + " ms。"
+      : "卸载时载体线程只在计算时被占用，等的那段让给别人：总耗时接近“一次等待 + 计算总量 ÷ 载体数”（计算下限约 " + lower + " ms）。";
+    $("#v-verdict").className = "calc-verdict" + (st.mode === "pin" ? " bad" : "");
+  }
+  $("#v-mode").querySelectorAll("button").forEach(b => b.addEventListener("click", () => { st.mode = b.dataset.v; render(); }));
+  Object.values(ids).forEach(id => $("#" + id).addEventListener("input", render));
+  $("#v-opts").querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+    if (revealed) return;
+    revealed = true; guessed = b.dataset.g;
+    ["i-tasks", "i-car", "i-io", "i-cpu"].forEach((id, i) => { $("#" + id).value = [8, 2, 100, 10][i]; });
+    st.mode = "pin"; render();
+    const pin = vtSim({ tasks: 8, carriers: 2, io: 100, c1: 10, c2: 10, mode: "pin" }).total;
+    const vt = vtSim({ tasks: 8, carriers: 2, io: 100, c1: 10, c2: 10, mode: "vt" }).total;
+    $("#v-opts").querySelectorAll("button").forEach(x => x.className = x.dataset.g === "480" ? "right" : (x === b ? "wrong" : ""));
+    const res = $("#v-res"); res.hidden = false;
+    res.textContent = (guessed === "480" ? "猜对了。" : "没猜对。") + "钉住时是 " + pin + " ms：每个虚拟线程占着载体线程 120 ms，2 个载体线程要排 4 轮。下面已经切到这个场景；点“卸载”看看，只要 " + vt + " ms。";
+  }));
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

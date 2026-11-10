@@ -110,6 +110,7 @@
 | 10 | [线程池下一圈：怎么配、拒绝策略、动态调参与监控](https://archeu.github.io/study-notes/juc/threadpool-tuning.html) | 线程池的下一圈：用利特尔法则和 CPU 占比算线程数、按可接受排队时间定队列、四种拒绝策略把代价给了谁（实测 100 条通知三种策略丢 86 条、CallerRuns 让提交方慢 40 倍）、运行中先调最大再调核心（实测 2→16 积压 1 秒消完）、监控五个数、优雅关闭三步，参数计算器 |
 | 11 | [ThreadLocal 与内存泄漏](https://archeu.github.io/study-notes/juc/threadlocal-leak.html) | 值存在线程的 ThreadLocalMap、key 弱 value 强的引用链、串号和三种泄漏、顺手清理与为什么不用引用队列、InheritableThreadLocal / TTL / ScopedValue，ThreadLocalMap 实验台 |
 | 12 | [CompletableFuture 与异步编排](https://archeu.github.io/study-notes/juc/completablefuture-orchestration.html) | result 加 Completion 栈的结构、回调在哪个线程跑、thenCompose / thenCombine / allOf 与异常、默认池和超时不取消的坑、ThreadLocal 怎么带，回调线程先猜再看实验台 |
+| 13 | [虚拟线程下一圈：什么时候用、pinning 的坑](https://archeu.github.io/study-notes/juc/virtual-threads-pinning.html) | 挂载卸载和载体线程、钉住的三种原因、trace 参数和 JFR 找钉住、ReentrantLock 修法与 JEP 491、什么时候不该用、和 J02 前八个知识点对照，载体线程甘特图实验台 |
 
 ## 网络
 
