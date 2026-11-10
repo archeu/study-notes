@@ -1,0 +1,1449 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>GC 日志与调优</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a hands-on skill (① 什么时候用得上 ② 常见笨办法 ③ 工具和路线 ④ 背后的机制 ⑤ 跟着做一遍 ⑥ 刻意练习 ↺), J03 panorama stop 8. Roles: g2 brown = the goal (pause / GC share / heap budget); pd blue = GC log and the numbers computed from it; of amber = a parameter change; bk teal = G1; cg purple = Parallel; bad red = pitfalls, Full GC, leak; done green = right way; other gray = the old way. Interaction (one): GC log check-up lab in ⑥ (pick a real log excerpt or paste your own, guess the verdict, then compute GC share, pauses and heap-after-GC trend). Static SVG: pause-and-queue timeline, tuning loop, annotated log line, goal triangle, Parallel vs G1 heap split, leak chart. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>JVM</span><span aria-hidden="true">/</span><span class="tb-here">GC 日志与调优：先定目标，再动参数</span></div></nav>
+
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path style="fill:var(--good)" d="M0 0L10 5L0 10z"/></marker>
+  <pattern id="ticks" width="7" height="18" patternUnits="userSpaceOnUse"><line x1="2" y1="2" x2="2" y2="16" style="stroke:var(--pd);stroke-width:1.4"/></pattern>
+</defs></svg>
+
+<header class="hero">
+  <p class="kicker">-Xlog:gc* · Pause Young / Mixed / Full · 226M-&gt;206M(256M) · GC 时间占比 · 最长停顿 · 回收后占用 · GCTimeRatio · MaxGCPauseMillis · NewRatio · -Xmn · 预热 · 泄漏 · 堆转储</p>
+  <h1>GC 日志与调优：先写下目标，再从日志里找证据，最后才动一个参数</h1>
+  <p class="lead">GC 调优要在三个目标之间取舍：<b>停顿短</b>、<b>吞吐高</b>（GC 占的时间少）、<b>内存省</b>，三个最多同时照顾两个。所以第一步是写下要哪两个、阈值是多少。第二步看 GC 日志。日志里每次停顿一行，从中算出三样数：GC 时间占比、最长停顿、回收后的堆占用。有了这三样数，就分得清问题出在参数上还是代码上。在交易靶场的大促流量下实测：G1 用默认参数就达标；换成“吞吐量收集器” Parallel，GC 时间占比是 <b>98.4%</b>；代码有泄漏时，把堆加一倍，OOM 只是从第 21 秒推迟到第 54 秒。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>什么时候用得上</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>常见笨办法</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>工具和路线</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>背后的机制</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>跟着做一遍</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>刻意练习</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j03-object-new-to-gc.html#s-8">一个对象从 new 到被回收 · 第 8 站</a>（也用到第 5～7、9 站）</span><span>地图：<a href="../java/roadmap.html#j03">J03 · GC 日志与调优：先定目标，再动参数</a></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>什么时候用得上：接口慢了，先要判断 GC 是不是凶手</h2>
+    <p class="lead">全景第 8 站讲的是：老年代被一批回收不掉的订单占满，G1 只好做 Full GC。这一站要解决的是接下来的判断。告警说“Full GC 频繁”或者“下单接口 p99 变高”时，先要回答 GC 到底是不是原因；如果是，该改参数还是改代码。全景里那两个数字就是线索：<code>154M-&gt;2M</code> 说明回收得很干净，<code>255M-&gt;255M</code> 说明根本回收不动。</p>
+  </div>
+  <div class="facts">
+    <div class="fact" data-role="g2"><h4>7.9 ms</h4><p>大促流量，G1 默认参数，压测 30 秒里最长的一次停顿 <span class="tag-real">实测</span></p></div>
+    <div class="fact" data-role="bad"><h4>98.4%</h4><p>同样的流量和堆，换成 Parallel：时间几乎全花在 Full GC 上 <span class="tag-real">实测</span></p></div>
+    <div class="fact" data-role="of"><h4>21 → 54 秒</h4><p>代码有泄漏，堆从 256 MB 加到 512 MB，OOM 只是推迟了 <span class="tag-real">实测</span></p></div>
+    <div class="fact" data-role="pd"><h4>≈ 8%</h4><p>G1 默认允许 GC 占用的时间比例（<code>GCTimeRatio=12</code>，1/13）；Parallel 默认是 1% <span class="tag-real">本机核对</span></p></div>
+  </div>
+  <div class="scene"><b>场景</b><span>交易靶场，大促。下单接口每秒 4000 单，每个请求解析报文、组装响应，产生约 48 KB 很快就没用的临时对象；“最近订单”缓存里常驻 160 万个订单，GC 日志显示活对象约 <b>206 MB</b>。容器内存 512 MB，堆给 256 MB。下面这张图是把收集器换成 Parallel 之后实际发生的事：GC 每次只停 0.2 秒，请求的延迟中位数却到了 3.3 秒。</span></div>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="停顿怎么变成延迟：请求每 0.25 毫秒到一个；业务线程每干约 10 毫秒的活，就被一次约 204 毫秒的 Full GC 停住；停顿期间到达的约 816 个请求只能排队，队伍越排越长。">
+  <text class="t-b" x="20" y="44">请求按计划到达</text><text class="t-xs" x="20" y="60">每秒 4000 个</text>
+  <rect x="160" y="30" width="770" height="18" fill="url(#ticks)"/>
+  <text class="t-b" x="20" y="106">业务线程</text><text class="t-xs" x="20" y="122">只有一个，处理下单</text>
+  <rect x="160" y="92" width="18" height="28" rx="4" style="fill:var(--good-tint);stroke:var(--good);stroke-width:1.5"/>
+  <rect x="180" y="92" width="388" height="28" rx="4" style="fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.5"/>
+  <text class="t-bad" x="374" y="111" text-anchor="middle">Pause Full · 204 ms，所有业务线程停住</text>
+  <rect x="570" y="92" width="18" height="28" rx="4" style="fill:var(--good-tint);stroke:var(--good);stroke-width:1.5"/>
+  <rect x="590" y="92" width="340" height="28" rx="4" style="fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.5"/>
+  <text class="t-bad" x="760" y="111" text-anchor="middle">下一次 Pause Full</text>
+  <text class="t-xs" x="169" y="140" text-anchor="middle">干活</text><text class="t-xs" x="579" y="140" text-anchor="middle">~10 ms</text>
+  <text class="t-b" x="20" y="186">排队的请求</text><text class="t-xs" x="20" y="202">还没处理完的</text>
+  <path d="M160 214 L180 214 L568 166 L588 168 L930 126 L930 214 Z" style="fill:var(--of-tint);stroke:var(--of);stroke-width:1.5"/>
+  <text class="t-s" x="430" y="204">一次停顿里又到了 4000 × 0.204 ≈ 816 个</text>
+  <text class="t-s" x="700" y="204">10 ms 只够处理几十个，队伍越来越长</text>
+  <text class="t-xs" x="20" y="240">实测（Parallel，堆 256 MB）：36.7 秒里 172 次 Full GC 共停 36.1 秒。最长一次停顿只有 309 ms，请求延迟却是 p50 3.3 秒、最长 6.6 秒：停顿之后还要排队。</text>
+</svg>
+  </div>
+  <p class="tip">所以看 GC 有两个层次：一次停多久（日志直接写着），以及停顿占了多少时间（要自己加起来算）。后者一旦接近 100%，系统就处理不过来了，单次停顿再短也没用。</p>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>常见笨办法：先改参数，再看结果</h2>
+    <p class="lead">这几种做法看起来都在“调优”，共同的问题是没有先写下目标，也没有拿日志证明问题在哪。</p>
+  </div>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>常见做法</h4>
+      <ul class="pains">
+        <li>从网上抄一套“生产级参数”：<code>-Xmn</code>、<code>SurvivorRatio</code>、<code>MaxTenuringThreshold</code>，再加几个 CMS 时代的开关</li>
+        <li>接口一慢就加堆，256 MB 改 512 MB，再不行改 1 GB</li>
+        <li>听说“Parallel 吞吐量高”“ZGC 停顿短”，就换收集器碰运气</li>
+        <li>只看监控上的“平均 GC 停顿”，或者用 <code>jstat</code> 看一眼当前的数</li>
+        <li>一次改五个参数，跑一会儿“感觉快了”就上线</li>
+      </ul>
+    </div>
+    <div class="way" data-role="bad">
+      <h4>结果（本页实测）</h4>
+      <ul class="pains">
+        <li>G1 写死 <code>-Xmn128m</code> 以后，最长停顿从 7.9 ms 变成 15.6 ms，日志里多了一种 “Preventive Collection”，G1 只好提前做 GC</li>
+        <li>泄漏时把堆加一倍，OOM 从第 21 秒推迟到第 54 秒，每次 Full GC 还更长了（117 → 140 ms）</li>
+        <li>换 Parallel：GC 时间占比 98.4%，处理速度从每秒 4000 单掉到 3279 单</li>
+        <li>Parallel 加到 768 MB 时，停顿中位数 2.8 ms，看着很好，最长一次却是 37.9 ms，请求 p99.9 是 19 ms</li>
+        <li>五个参数一起改，变好了也说不清是哪个起的作用，变坏了也不知道该撤哪个</li>
+      </ul>
+    </div>
+  </div>
+  <p class="tip">缺的是这几样：<b>一个可以判对错的目标</b>，<b>一份同样流量下的基线日志</b>，<b>从日志里算出来的几个数</b>，以及<b>一次只改一处</b>。有了它们，调优就是一个能验证的实验，而不是凭感觉。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>工具和路线：GC 日志是主证据，其余的工具补充它</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>工具</th><th>看到什么</th><th>什么时候用</th><th>缺点</th></tr></thead>
+      <tbody>
+        <tr class="hl"><td><b>GC 日志</b> <code>-Xlog:gc*</code></td><td>每次 GC 的类型、原因、回收前后的占用、停顿时长，各个阶段的耗时</td><td>一直开着，生产也开。本页的主角</td><td>要自己汇总（下面的 <code>GcLogStats</code> 或日志分析工具）</td></tr>
+        <tr><td><code>jstat -gcutil &lt;pid&gt; 1000</code></td><td>每秒打印各区占用的百分比、GC 次数和累计时间</td><td>现场先看一眼：老年代是不是一直在涨</td><td>只有累计值，看不到单次停顿</td></tr>
+        <tr><td><code>jcmd &lt;pid&gt; GC.heap_info</code> / <code>VM.flags</code></td><td>堆现在怎么分的；JVM 最终用了哪些参数</td><td>确认“我以为的参数”是不是真的生效了</td><td>只是一个时刻的快照</td></tr>
+        <tr><td>JFR（<code>jdk.GarbageCollection</code>、<code>jdk.ObjectAllocationSample</code>）</td><td>停顿，再加上“谁在分配”和调用栈</td><td>要找出哪段代码在大量分配</td><td>要录一段再分析，详见下一圈</td></tr>
+        <tr><td>Micrometer <code>jvm.gc.pause</code></td><td>停顿的次数、最大值，可以画进 Grafana 并配告警</td><td>长期盯趋势，配告警</td><td>按分钟聚合，单次细节还得回日志看</td></tr>
+        <tr><td>GCViewer、GCeasy 这类日志分析工具</td><td>把日志画成图，并给出建议</td><td>日志很长，想一眼看全貌</td><td>工具给的建议也要回到目标上判断</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">本页选 GC 日志，配一个 80 行的统计程序：日志的格式简单，每次停顿都有记录，开着的开销很小，出了事故之后也还在。不管用哪个工具，都按下面这五步走。</p>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 220" role="img" aria-label="调优五步：一写下目标；二开日志，拿到基线；三算出三样数；四判断是参数问题还是代码问题；五只改一处，同样的流量再跑一次。没达标回到第二步；达标就停手；回收不掉就去改代码，用堆转储排查。">
+  <g data-role="g2"><rect x="20" y="70" width="168" height="66" rx="12" style="fill:var(--rt);stroke:var(--rc);stroke-width:2"/><text class="t-b" x="104" y="96" text-anchor="middle">① 写下目标</text><text class="t-xs" x="104" y="116" text-anchor="middle">停顿、占比、内存各一个数</text></g>
+  <g data-role="pd"><rect x="210" y="70" width="168" height="66" rx="12" style="fill:var(--rt);stroke:var(--rc);stroke-width:2"/><text class="t-b" x="294" y="96" text-anchor="middle">② 开日志，拿基线</text><text class="t-xs" x="294" y="116" text-anchor="middle">同样的流量，跳过预热</text></g>
+  <g data-role="pd"><rect x="400" y="70" width="168" height="66" rx="12" style="fill:var(--rt);stroke:var(--rc);stroke-width:2"/><text class="t-b" x="484" y="96" text-anchor="middle">③ 算三样数</text><text class="t-xs" x="484" y="116" text-anchor="middle">占比、最长停顿、回收后占用</text></g>
+  <g data-role="bad"><rect x="590" y="70" width="168" height="66" rx="12" style="fill:var(--rt);stroke:var(--rc);stroke-width:2"/><text class="t-b" x="674" y="96" text-anchor="middle">④ 判断是谁的问题</text><text class="t-xs" x="674" y="116" text-anchor="middle">参数，还是代码</text></g>
+  <g data-role="of"><rect x="780" y="70" width="168" height="66" rx="12" style="fill:var(--rt);stroke:var(--rc);stroke-width:2"/><text class="t-b" x="864" y="96" text-anchor="middle">⑤ 只改一处，再跑</text><text class="t-xs" x="864" y="116" text-anchor="middle">和基线比，没变好就撤回</text></g>
+  <line x1="190" y1="103" x2="206" y2="103" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah-ink)"/>
+  <line x1="380" y1="103" x2="396" y2="103" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah-ink)"/>
+  <line x1="570" y1="103" x2="586" y2="103" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah-ink)"/>
+  <line x1="760" y1="103" x2="776" y2="103" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah-ink)"/>
+  <path d="M864 138 L864 176 L294 176 L294 142" fill="none" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah-ink)"/>
+  <text class="t-s" x="579" y="196" text-anchor="middle">没达标：带着新结果回到 ②，一圈只改一处</text>
+  <path d="M484 68 L484 36" fill="none" stroke="var(--good)" stroke-width="1.6" marker-end="url(#ah-good)"/>
+  <text class="t-s" x="476" y="30" text-anchor="end" style="fill:var(--good)">达标：停手，别再动参数</text>
+  <path d="M700 68 L770 38" fill="none" stroke="var(--bad)" stroke-width="1.6" marker-end="url(#ah-bad)"/>
+  <text class="t-bad" x="948" y="30" text-anchor="end">回收不掉：改代码，用堆转储排查（第 9 站）</text>
+</svg>
+  </div>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>背后的机制：日志里的数为什么能说明问题，收集器为什么各有各的目标</h2>
+  </div>
+  <div class="scene" style="max-width:none"><b>先知道这些</b><span>Young GC 只回收新生代，<b>Mixed GC</b> 在 Young GC 的基础上再顺带回收几块老年代 region；<b>Full GC</b> 是兜底，停下所有业务线程，把整个堆整理一遍。G1 的 region、并发标记、为什么会退化成 Full GC，见 <a href="g1-zgc.html">G1 与 ZGC</a>；对象怎么从 Eden 熬到老年代，见全景第 5～7 站。这一页只关心这些过程在日志里留下了什么。</span></div>
+
+  <h3 id="m-line"><span class="sn">1</span>一行日志怎么读</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 196" role="img" aria-label="一行 G1 GC 日志逐段拆开：运行时间、级别标签、GC 编号、停顿类型、原因、回收前后的堆占用、堆容量、停顿时长">
+<rect class="b-card" x="8" y="74" width="944" height="34" rx="8"/>
+<text x="20" y="96" style="font-family:var(--font-mono);font-size:13px" xml:space="preserve">
+<tspan fill="var(--pd)" font-weight="600">[7.871s]</tspan>
+<tspan fill="var(--muted)" font-weight="600">[info][gc]</tspan>
+<tspan fill="var(--muted)"> </tspan>
+<tspan fill="var(--pd)" font-weight="600">GC(100)</tspan>
+<tspan fill="var(--muted)"> </tspan>
+<tspan fill="var(--bk)" font-weight="600">Pause Young (Normal)</tspan>
+<tspan fill="var(--muted)"> </tspan>
+<tspan fill="var(--bk)" font-weight="600">(G1 Evacuation Pause)</tspan>
+<tspan fill="var(--muted)"> </tspan>
+<tspan fill="var(--g2)" font-weight="600">226M-&gt;206M</tspan>
+<tspan fill="var(--g2)" font-weight="600">(256M)</tspan>
+<tspan fill="var(--muted)"> </tspan>
+<tspan fill="var(--bad)" font-weight="600">1.897ms</tspan>
+</text>
+<line x1="51" y1="108" x2="51" y2="136" stroke="var(--pd)" stroke-width="1.5"/>
+<text class="t-s" x="51" y="152" text-anchor="middle">启动后第几秒</text>
+<line x1="121" y1="74" x2="121" y2="46" stroke="var(--line-strong)" stroke-width="1.5"/>
+<text class="t-s" x="121" y="38" text-anchor="middle">级别、标签</text>
+<line x1="196" y1="108" x2="196" y2="136" stroke="var(--pd)" stroke-width="1.5"/>
+<text class="t-s" x="196" y="152" text-anchor="middle">第几次 GC</text>
+<line x1="309" y1="74" x2="309" y2="46" stroke="var(--bk)" stroke-width="1.5"/>
+<text class="t-s" x="309" y="38" text-anchor="middle">停顿类型：普通的 Young GC</text>
+<line x1="476" y1="108" x2="476" y2="136" stroke="var(--bk)" stroke-width="1.5"/>
+<text class="t-s" x="476" y="152" text-anchor="middle">原因：Eden 用完了</text>
+<line x1="605" y1="74" x2="605" y2="46" stroke="var(--g2)" stroke-width="1.5"/>
+<text class="t-s" x="605" y="38" text-anchor="middle">回收前 → 回收后的堆占用</text>
+<line x1="667" y1="108" x2="667" y2="136" stroke="var(--g2)" stroke-width="1.5"/>
+<text class="t-s" x="667" y="152" text-anchor="middle">堆当前容量</text>
+<line x1="726" y1="74" x2="726" y2="46" stroke="var(--bad)" stroke-width="1.5"/>
+<text class="t-s" x="726" y="38" text-anchor="middle">这次停了多久</text>
+<text class="t-xs" x="20" y="186">本机实测 OrderService 大促那一跑的第 100 次 GC（-Xlog:gc*，堆 256 MB）。装饰默认是 [uptime][level][tags]，加 time 还会多出墙上时间。</text>
+</svg>
+  </div>
+  <div class="two">
+    <div>
+      <p>开 <code>-Xlog:gc</code> 时，每次停顿只记一行，就是上图这行。开 <code>-Xlog:gc*</code> 时，同一个 <code>GC(100)</code> 还会多出十来行细节，其中最有用的是各区的 region 数：</p>
+<pre class="console"><span class="w">GC(100) Eden regions: 20-&gt;0(20)</span>        <span class="cm"># Eden 用了 20 块，全部清空；下一轮还给 20 块</span>
+<span class="w">GC(100) Survivor regions: 1-&gt;1(3)</span>
+<span class="w">GC(100) Old regions: 188-&gt;188</span>        <span class="cm"># 老年代 188 块，这次 Young GC 不碰它</span>
+<span class="w">GC(100) Humongous regions: 18-&gt;18</span>   <span class="cm"># 缓存那张大哈希表的数组</span>
+<span class="w">GC(100)   Evacuate Collection Set: 1.53ms</span>  <span class="cm"># 复制活对象，停顿的大头</span></pre>
+    </div>
+    <div class="tbl-wrap" style="align-self:start">
+      <table class="t" style="min-width:0">
+        <thead><tr><th>G1 日志里的停顿</th><th>是什么</th></tr></thead>
+        <tbody>
+          <tr><td><code>Pause Young (Normal)</code></td><td>普通的 Young GC</td></tr>
+          <tr><td><code>(Concurrent Start)</code></td><td>顺带启动一轮并发标记</td></tr>
+          <tr><td><code>Pause Remark</code> / <code>Cleanup</code></td><td>并发标记中间两次很短的停顿</td></tr>
+          <tr><td><code>(Prepare Mixed)</code> / <code>(Mixed)</code></td><td>开始回收老年代 region</td></tr>
+          <tr><td><code>Pause Full</code></td><td>整堆整理，出现就要查原因</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h3 id="m-three"><span class="sn">2</span>三样数：分别对应三个目标</h3>
+  <div class="trio">
+    <div class="ess" data-role="pd"><h4>GC 时间占比 → 吞吐</h4><p><span class="fx">Σ 停顿时长 ÷ 统计时长</span></p><p>业务线程被停住的时间比例。接近 100% 时系统处理不过来，请求越积越多（① 的图）。</p></div>
+    <div class="ess" data-role="pd"><h4>最长停顿、p99 → 延迟</h4><p><span class="fx">把停顿时长排序取尾部</span></p><p>一次停顿期间到达的请求都要等它结束，所以要看尾部，平均值会把偶尔的长停顿抹平。</p></div>
+    <div class="ess" data-role="pd"><h4>回收后的占用 → 内存</h4><p><span class="fx">箭头右边的数：226M-&gt;<b>206M</b></span></p><p>回收完还剩多少，约等于活对象有多少。它决定堆至少要多大；它要是一直涨，就是泄漏。</p></div>
+  </div>
+  <p>这三样数为什么能下结论，靠的是复制式回收的两条规律。它们能从 <a href="g1-zgc.html">G1 页</a>讲的“复制活对象”直接推出来：</p>
+  <div class="two">
+    <div class="formula" id="m-pause"><div class="f">一次停多久 ≈ 要复制的<em>活对象</em>有多少</div><p>和堆有多大、垃圾有多少关系不大。大促那一跑每秒分配 196 MB，几乎全是请求结束就没用的临时对象，所以每次 Young GC 只要 1～2 ms。预热时缓存正在装进 160 万个订单，新对象几乎全是活的，一次 Young GC 就要 27～135 ms。</p></div>
+    <div class="formula" id="m-freq"><div class="f">多久 GC 一次 ≈ 分配速率 ÷ <em>新生代大小</em></div><p>196 MB/s ÷ Eden 20 MB ≈ 每秒 10 次，日志里 30 秒正好 300 多次 Young GC。新生代越小，GC 越频繁；新生代越大，对象在里面待得越久、越容易死掉，晋升到老年代的就越少。</p></div>
+  </div>
+  <p class="tip">据此可以分出两类问题。回收后的占用低、但 GC 很频繁或停顿长，是<b>参数问题</b>，可以靠堆大小、新生代大小或收集器解决。回收后的占用接近上限、而且一直在涨，是<b>代码问题</b>：东西还被引用着，怎么调参数都回收不掉。</p>
+
+  <h3 id="m-design"><span class="sn">3</span>为什么这样设计：三个目标不能同时最好，收集器只能各选一个优先</h3>
+  <div class="two">
+    <div class="fig-box">
+<svg class="sv" viewBox="0 0 420 300" role="img" aria-label="三角形的三个角：停顿短、吞吐高、内存省。堆给大可以兼顾停顿和吞吐，代价是内存；堆小又要停顿短，GC 只能更频繁，吞吐下降；堆小又要吞吐高，一次停顿就会很长。">
+  <polygon points="210,40 40,250 380,250" style="fill:var(--g2-tint);stroke:var(--g2);stroke-width:2"/>
+  <circle cx="210" cy="40" r="7" class="f-g2"/><circle cx="40" cy="250" r="7" class="f-g2"/><circle cx="380" cy="250" r="7" class="f-g2"/>
+  <text class="t-b" x="210" y="24" text-anchor="middle">停顿短（最长停顿）</text>
+  <text class="t-b" x="40" y="278" text-anchor="start">吞吐高（GC 占比小）</text>
+  <text class="t-b" x="380" y="278" text-anchor="end">内存省（堆小）</text>
+  <text class="t-xs" x="110" y="138" text-anchor="middle" transform="rotate(-51 110 138)">堆给大：两头都好，花内存</text>
+  <text class="t-xs" x="310" y="138" text-anchor="middle" transform="rotate(51 310 138)">GC 更勤、并发多干：花 CPU</text>
+  <text class="t-xs" x="210" y="244" text-anchor="middle">一次攒很多再收：停顿长</text>
+  <text class="t-s" x="210" y="170" text-anchor="middle">挑两个，</text>
+  <text class="t-s" x="210" y="188" text-anchor="middle">第三个就是代价</text>
+</svg>
+    </div>
+    <div>
+      <p>每个收集器出厂时已经选好了优先照顾哪个目标，默认参数就是这个选择：</p>
+      <ul class="pains">
+        <li class="ok"><b>Parallel</b>：吞吐优先。<code>GCTimeRatio=99</code>，目标是 GC 只占 1/(1+99) = 1% 的时间；不设停顿目标，一次停多久都可以。</li>
+        <li class="ok"><b>G1</b>：停顿优先，兼顾吞吐。<code>MaxGCPauseMillis=200</code>，<code>GCTimeRatio=12</code>（约 8%，Oracle 文档原话 “about 8%”）。</li>
+        <li class="ok"><b>ZGC</b>：停顿压到 1 ms 以下，代价是更多的 CPU 和内存，见 <a href="g1-zgc.html#p-stall">G1 与 ZGC 坑 1</a>。</li>
+      </ul>
+      <p style="margin-top:10px">所以“调优”的第一步是确认收集器的优先目标和你的目标一致，然后在它的框架里给它足够的空间。这一点一错，后面怎么调参数都没用。</p>
+    </div>
+  </div>
+
+  <p style="margin-top:14px"><b>G1 为什么只要一个停顿目标：</b>它不把新生代的大小写死，每次 GC 之后，按“上次复制了多少活对象、花了多久”预测下一次，再决定 Eden 给几块 region。被放弃的做法是 CMS、Parallel 那一代的思路：新生代和老年代按比例切死，大小由人用 <code>-Xmn</code>、<code>NewRatio</code>、<code>SurvivorRatio</code> 来定。流量一变，原来调好的比例就不对了。同样是 256 MB 的堆、206 MB 的活对象，两种做法实测的分法：</p>
+  <div class="fig-box wide" id="m-split">
+<svg class="sv" viewBox="0 0 960 230" role="img" aria-label="同样 256 MB 的堆。Parallel：老年代固定 171 MB，新生代 75 MB；活对象 201 MB 比老年代大 30 MB，放不下，每次 GC 都变成 Full GC。G1：没有固定边界，老年代 188 块加大对象 18 块，Eden 被压到 20 块，剩下的空着备用，每次 Young GC 只要 1～2 毫秒。">
+  <text class="t-b" x="20" y="44" style="fill:var(--cg)">Parallel</text><text class="t-xs" x="20" y="60">边界固定（老年代 = 2/3）</text>
+  <rect x="170" y="28" width="508" height="34" rx="6" style="fill:var(--cg-tint);stroke:var(--cg);stroke-width:1.5"/>
+  <text class="t-s" x="424" y="50" text-anchor="middle">老年代 171 MB（日志：ParOldGen 175104K，一直不变）</text>
+  <rect x="680" y="28" width="222" height="34" rx="6" style="fill:var(--neutral-tint);stroke:var(--line-strong);stroke-width:1.5"/>
+  <text class="t-s" x="791" y="50" text-anchor="middle">新生代 75 MB</text>
+  <rect x="170" y="70" width="508" height="12" rx="3" style="fill:var(--g2)"/>
+  <rect x="680" y="70" width="89" height="12" rx="3" style="fill:var(--bad)"/>
+  <text class="t-xs" x="170" y="98">活对象 201 MB ↑ 比老年代大 30 MB：晋升放不下，每次 GC 都是 Full GC</text>
+  <text class="t-bad" x="775" y="80">放不下的 30 MB</text>
+
+  <text class="t-b" x="20" y="150" style="fill:var(--bk)">G1</text><text class="t-xs" x="20" y="166">1 MB 一块，按需分配</text>
+  <rect x="170" y="134" width="558" height="34" rx="6" style="fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.5"/>
+  <text class="t-s" x="449" y="156" text-anchor="middle">老年代 188 块</text>
+  <rect x="730" y="134" width="53" height="34" rx="6" style="fill:var(--cg-tint);stroke:var(--cg);stroke-width:1.5"/>
+  <text class="t-xs" x="756" y="155" text-anchor="middle">大对象 18</text>
+  <rect x="785" y="134" width="59" height="34" rx="6" style="fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.5"/>
+  <text class="t-xs" x="814" y="155" text-anchor="middle">Eden 20</text>
+  <rect x="846" y="134" width="84" height="34" rx="6" style="fill:var(--card);stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:4 3"/>
+  <text class="t-xs" x="888" y="155" text-anchor="middle">空着 ~27</text>
+  <text class="t-xs" x="170" y="190">G1 自己把 Eden 压到 20 块：每秒约 10 次 Young GC，每次 1～2 ms，换来的是活对象放得下</text>
+  <text class="t-xs" x="20" y="218">实测：JDK 17，堆 256 MB，大促流量。Parallel 的数取自 -Xlog:gc+heap；G1 的数取自第 100 次 GC。JDK 15 起去掉了 UseAdaptiveGCBoundary，Parallel 的两代边界不再移动（JDK-8228991）。</text>
+</svg>
+  </div>
+  <p class="tip">这里 Parallel 输掉，不是因为它“慢”，而是它的固定比例和这个场景的活对象对不上。⑤ 里把堆加到 768 MB，老年代变成 512 MB，Parallel 的 GC 时间占比反而是全场最低的 0.7%。但那样就超出了 256 MB 的内存预算。所以哪个收集器更好，要看目标是什么。</p>
+
+  <div class="codebox">
+    <div class="code-bar"><span class="n">参数</span><b>最少要会的几行</b></div>
+<pre><code><span class="cm"># 1. 日志（JDK 9+）：%p = pid，%t = 启动时间；默认就会轮转（5 个文件 × 20 MB），这里改大一点</span>
+-Xlog:gc*:file=gc-%p-%t.log:time,uptime,level,tags:filecount=10,filesize=50m
+
+<span class="cm"># 2. 目标（先只动这三个）</span>
+-Xms256m -Xmx256m            <span class="cm"># 内存预算；两者相等，堆不用伸缩</span>
+-XX:MaxGCPauseMillis=200     <span class="cm"># G1 的停顿目标，默认 200</span>
+-XX:GCTimeRatio=12           <span class="cm"># GC 时间占比目标 = 1/(1+N)；G1 默认 12，Parallel 默认 99</span>
+
+<span class="cm"># 3. 现场看一眼</span>
+jstat -gcutil &lt;pid&gt; 1000     <span class="cm"># O 列（老年代 %）是不是只涨不跌</span>
+jcmd &lt;pid&gt; VM.flags          <span class="cm"># JVM 实际用的参数</span>
+jcmd &lt;pid&gt; GC.heap_info</code></pre>
+  </div>
+  <p class="tip">JDK 8 的写法（<code>-XX:+PrintGCDetails -Xloggc:</code> 等）、<code>-Xmn</code> 为什么别写、停顿目标设多小合适，都放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>跟着做一遍：交易靶场大促，按五步走一圈</h2>
+    <p class="lead">两个类，JDK 8 写法，不需要依赖。<code>OrderService</code> 把下单接口压成一个进程，请求按固定速率到达，延迟从“计划到达的时刻”算起，所以 GC 期间排队的请求都会被算慢。<code>GcLogStats</code> 读 GC 日志，算出 ④-2 的三样数，并给出结论。</p>
+  </div>
+
+  <h3><span class="sn">1</span>写下目标</h3>
+  <div class="goals">
+    <div class="goal" data-role="g2"><h4>停顿</h4><span class="big">≤ 50 ms</span><p>下单接口的 SLA 是 p99.9 &lt; 100 ms，GC 最多占一半</p></div>
+    <div class="goal" data-role="g2"><h4>GC 时间占比</h4><span class="big">≤ 5%</span><p>大促时 CPU 要留给业务</p></div>
+    <div class="goal" data-role="g2"><h4>内存</h4><span class="big">堆 ≤ 256 MB</span><p>容器 512 MB，另一半给元空间、线程栈、直接内存（全景第 10 站）</p></div>
+  </div>
+
+  <h3><span class="sn">2</span>代码和命令</h3>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">1</span><b>OrderService.java（节选）</b><a href="https://github.com/archeu/study-labs/tree/main/java/jvm/jvm-gc-log-tuning" style="margin-left:auto">完整代码 →</a></div>
+<pre><code><span class="cm">// 最近订单缓存：LRU，满了踢最老的</span>
+static final Map&lt;Long, Order&gt; RECENT = new LinkedHashMap&lt;&gt;(…, true) {
+  protected boolean removeEldestEntry(Map.Entry&lt;Long, Order&gt; e) {
+    return size() &gt; CACHE; }                <span class="cm">// -DcacheK=1600</span>
+};
+static long handle(long id, ThreadLocalRandom r) {
+  String body = "{\"userId\":" + … + "}";  <span class="cm">// 解析报文：临时对象</span>
+  …
+  RECENT.put(id, new Order(…));            <span class="cm">// 订单：活得久</span>
+  byte[] resp = new byte[TEMP_KB * 1024];  <span class="cm">// 响应：48 KB 临时对象</span>
+  if (LEAK) LEAKED.add(new byte[4096]);    <span class="cm">// -Dleak=true：只放不删</span>
+  …
+}
+<span class="cm">// main：先把缓存装满，空闲 1 秒，再按 -Drate 匀速发请求</span>
+long plan = start + n * interval;          <span class="cm">// 计划到达时刻</span>
+if (plan &gt; now) LockSupport.parkNanos(plan - now);
+handle(n, r);
+lat[n] = System.nanoTime() - plan;         <span class="cm">// 排队也算进延迟</span></code></pre>
+    </div>
+    <div class="codebox">
+      <div class="code-bar"><span class="n">2</span><b>编译、运行</b><span style="margin-left:auto" class="tip">2 核 ARM · JDK 17.0.20</span></div>
+<pre><code>cd study-labs/java
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64 \
+  mvn -q -pl jvm/jvm-gc-log-tuning compile
+cd jvm/jvm-gc-log-tuning
+J=/usr/lib/jvm/java-17-openjdk-arm64/bin/java
+M=labs.jvm.jvm_gc_log_tuning
+
+<span class="cm"># 基线：G1 默认，大促流量</span>
+$J -XX:+UseG1GC -Xms256m -Xmx256m \
+   -Xlog:gc*:file=g1.log \
+   -Drate=4000 -DcacheK=1600 \
+   -cp target/classes $M.OrderService
+
+<span class="cm"># 统计：目标 50 ms、5%，从压测开始的那一秒算</span>
+$J -cp target/classes $M.GcLogStats g1.log 50 5 1.4</code></pre>
+    </div>
+  </div>
+
+  <h3><span class="sn">3</span>基线：G1 默认参数</h3>
+<pre class="console"><span class="w">$ java -XX:+UseG1GC -Xms256m -Xmx256m … OrderService</span>
+缓存预热 1600000 个订单，用了 311 ms；堆上限 256 MB
+压测从 JVM 启动后第 1.4 秒开始（GcLogStats 的第 4 个参数填它，跳过预热）
+处理 120000 个请求，用了 30.0 秒（计划 30 秒），实际 4000 个/秒
+延迟：p50 0.06 ms，p99 1.54 ms，p99.9 3.35 ms，最长 8.3 ms
+<span class="w">$ java … GcLogStats g1.log 50 5 1.4</span>
+统计 1.4～31.5 秒，停顿 417 次，合计 589 ms
+  Pause Young (Concurrent Start)     54 次
+  Pause Young (Normal)               225 次
+  Pause Remark                       54 次
+  Pause Cleanup                      54 次
+  Pause Young (Prepare Mixed)        15 次
+  Pause Young (Mixed)                15 次
+<b>GC 时间占比 2.0%（目标 ≤ 5%）</b>
+<b>停顿：p50 1.6 ms，p99 3.5 ms，最长 7.9 ms（目标 ≤ 50 ms）</b>
+分配速率约 196 MB/s
+<b>GC 后堆占用：最低 206 MB，前一半平均 210 MB，后一半平均 210 MB，最后 207 MB，堆上限 256 MB</b>
+结论：达标：别动参数</pre>
+  <p>三样数都达标，回收后的占用也平稳，按五步法的规则<b>到这里就该停手</b>。日志里还有一个值得记下的信号：30 秒内做了 54 轮并发标记，平均半秒多一轮。原因是活对象占了堆的 80%，余量只有 50 MB，G1 一直在忙着回收老年代，这部分开销占的是 CPU，不算在停顿里。活对象再涨一点，就该加堆或给缓存瘦身了。</p>
+
+  <h3><span class="sn">4</span>有人“优化”了一下：换成吞吐量收集器 Parallel</h3>
+<pre class="console"><span class="w">$ java -XX:+UseParallelGC -Xms256m -Xmx256m … OrderService</span>
+处理 120000 个请求，用了 36.6 秒（计划 30 秒），实际 3279 个/秒
+<span class="r">延迟：p50 3300.05 ms，p99 6516.55 ms，p99.9 6619.65 ms，最长 6649.0 ms</span>
+<span class="w">$ java … GcLogStats parallel.log 50 5 1.7</span>
+统计 1.7～38.4 秒，停顿 172 次，合计 36086 ms
+  Pause Full                         172 次
+<span class="r">GC 时间占比 98.4%（目标 ≤ 5%）</span>
+<span class="r">停顿：p50 204.4 ms，p99 301.0 ms，最长 308.6 ms（目标 ≤ 50 ms）</span>
+GC 后堆占用：最低 201 MB，前一半平均 201 MB，后一半平均 201 MB，最后 201 MB，堆上限 245 MB
+结论：有 Full GC，但回收后降下来了：堆相对活对象太小，或晋升太快，先看堆是不是活对象的 3 倍以上</pre>
+  <p>判断：回收后稳定在 201 MB，没有上涨，所以不是泄漏，而是<b>参数问题</b>。原因在 ④-3 那张图里：Parallel 的老年代固定是 171 MB，比活对象还小。处理办法只能二选一：换回 G1，或者给 Parallel 加内存。两种都跑了一遍：</p>
+
+  <h3><span class="sn">5</span>只改一处，和基线比</h3>
+  <div class="tbl-wrap">
+    <table class="t runs">
+      <thead><tr><th>配置（大促流量，各跑 30 秒）</th><th class="num">最长停顿</th><th class="num">停顿 p99</th><th class="num">GC 占比</th><th class="num">Full GC</th><th class="num">请求 p99.9</th><th>对照目标</th></tr></thead>
+      <tbody>
+        <tr class="goodrow"><td>G1 默认 · 256 MB（基线）</td><td class="num">7.9 ms</td><td class="num">3.5 ms</td><td class="num">2.0%</td><td class="num">0</td><td class="num">3.35 ms</td><td>三项都达标</td></tr>
+        <tr class="badrow"><td>Parallel · 256 MB</td><td class="num">308.6 ms</td><td class="num">301.0 ms</td><td class="num">98.4%</td><td class="num">172</td><td class="num">6620 ms</td><td>停顿、占比都超</td></tr>
+        <tr><td>Parallel · 768 MB</td><td class="num">37.9 ms</td><td class="num">37.9 ms</td><td class="num">0.7%</td><td class="num">0</td><td class="num">19.08 ms</td><td>停顿、占比达标，<b>内存超预算 3 倍</b></td></tr>
+        <tr><td>G1 · 256 MB · <code>MaxGCPauseMillis=5</code></td><td class="num">5.5 ms</td><td class="num">4.1 ms</td><td class="num">2.0%</td><td class="num">0</td><td class="num">3.77 ms</td><td>达标，和基线差不多</td></tr>
+        <tr><td>G1 · 256 MB · <code>-Xmn128m</code></td><td class="num">15.6 ms</td><td class="num">8.0 ms</td><td class="num">1.4%</td><td class="num">0</td><td class="num">5.14 ms</td><td>达标，但最长停顿翻倍</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip"><span class="tag-real">实测</span> 本机 2 核 ARM，JDK 17.0.20.1，每行各跑一次。“停顿”只统计压测期间，预热时的停顿已经跳过。在这个场景里，满足全部三个目标的只有 G1。如果预算允许 768 MB，而且更看重吞吐，Parallel 就是更好的选择。所以哪个更好，取决于第 1 步写下的目标。</p>
+
+  <h3 id="leak"><span class="sn">6</span>再来一次：这回是代码有泄漏</h3>
+  <p>日常流量（每秒 2000 单，缓存 90 万个订单），打开 <code>-Dleak=true</code>：每个请求往一个只放不删的 <code>static</code> 列表里塞 4 KB。分别用 256 MB 和 512 MB 的堆跑。</p>
+  <div class="fig-box wide chartwrap" id="leak-box">
+<svg class="sv" id="leak-chart" viewBox="0 0 960 290" role="img" aria-label="泄漏实验：每秒最后一次 GC 之后的堆占用。堆 256 MB 那条线在第 16 秒顶到 253 MB，之后每秒十几次 Full GC，第 21.4 秒 OOM；堆 512 MB 那条线一样往上爬，第 48 秒顶到 509 MB，第 54.0 秒 OOM。">
+<line x1="56" x2="930" y1="250.0" y2="250.0" stroke="var(--line)" stroke-width="1"/>
+<text class="t-xs" x="48" y="254.0" text-anchor="end">0</text>
+<line x1="56" x2="930" y1="208.2" y2="208.2" stroke="var(--line)" stroke-width="1"/>
+<text class="t-xs" x="48" y="212.2" text-anchor="end">100</text>
+<line x1="56" x2="930" y1="166.4" y2="166.4" stroke="var(--line)" stroke-width="1"/>
+<text class="t-xs" x="48" y="170.4" text-anchor="end">200</text>
+<line x1="56" x2="930" y1="124.5" y2="124.5" stroke="var(--line)" stroke-width="1"/>
+<text class="t-xs" x="48" y="128.5" text-anchor="end">300</text>
+<line x1="56" x2="930" y1="82.7" y2="82.7" stroke="var(--line)" stroke-width="1"/>
+<text class="t-xs" x="48" y="86.7" text-anchor="end">400</text>
+<line x1="56" x2="930" y1="40.9" y2="40.9" stroke="var(--line)" stroke-width="1"/>
+<text class="t-xs" x="48" y="44.9" text-anchor="end">500</text>
+<text class="t-xs" x="56.0" y="268" text-anchor="middle">0</text>
+<text class="t-xs" x="201.7" y="268" text-anchor="middle">10</text>
+<text class="t-xs" x="347.3" y="268" text-anchor="middle">20</text>
+<text class="t-xs" x="493.0" y="268" text-anchor="middle">30</text>
+<text class="t-xs" x="638.7" y="268" text-anchor="middle">40</text>
+<text class="t-xs" x="784.3" y="268" text-anchor="middle">50</text>
+<text class="t-xs" x="930.0" y="268" text-anchor="middle">60</text>
+<text class="t-xs" x="930" y="284" text-anchor="end">压测开始后的秒数</text>
+<text class="t-xs" x="56" y="14">GC 后的堆占用（MB）</text>
+<line x1="56" x2="930" y1="142.9" y2="142.9" stroke="var(--pd)" stroke-width="1.5" stroke-dasharray="5 5"/>
+<text class="t-xs" x="930" y="136.9" text-anchor="end">堆上限 256 MB</text>
+<line x1="56" x2="930" y1="35.9" y2="35.9" stroke="var(--of)" stroke-width="1.5" stroke-dasharray="5 5"/>
+<text class="t-xs" x="930" y="29.9" text-anchor="end">堆上限 512 MB</text>
+<polyline points="56.0,188.1 70.6,184.3 85.1,180.6 99.7,186.4 114.3,184.3 128.8,181.0 143.4,177.7 158.0,173.5 172.5,169.7 187.1,166.8 201.7,163.0 216.2,159.7 230.8,156.7 245.4,153.4 259.9,150.1 274.5,145.9 289.1,144.2 303.6,144.2 318.2,143.8 332.8,144.2 347.3,143.8" fill="none" stroke="var(--pd)" stroke-width="2.2" stroke-linejoin="round"/>
+<circle class="pt" cx="56.0" cy="188.1" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 0 秒：GC 后 148 MB"/>
+<circle class="pt" cx="70.6" cy="184.3" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 1 秒：GC 后 157 MB"/>
+<circle class="pt" cx="85.1" cy="180.6" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 2 秒：GC 后 166 MB"/>
+<circle class="pt" cx="99.7" cy="186.4" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 3 秒：GC 后 152 MB"/>
+<circle class="pt" cx="114.3" cy="184.3" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 4 秒：GC 后 157 MB"/>
+<circle class="pt" cx="128.8" cy="181.0" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 5 秒：GC 后 165 MB"/>
+<circle class="pt" cx="143.4" cy="177.7" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 6 秒：GC 后 173 MB"/>
+<circle class="pt" cx="158.0" cy="173.5" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 7 秒：GC 后 183 MB"/>
+<circle class="pt" cx="172.5" cy="169.7" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 8 秒：GC 后 192 MB"/>
+<circle class="pt" cx="187.1" cy="166.8" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 9 秒：GC 后 199 MB"/>
+<circle class="pt" cx="201.7" cy="163.0" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 10 秒：GC 后 208 MB"/>
+<circle class="pt" cx="216.2" cy="159.7" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 11 秒：GC 后 216 MB"/>
+<circle class="pt" cx="230.8" cy="156.7" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 12 秒：GC 后 223 MB"/>
+<circle class="pt" cx="245.4" cy="153.4" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 13 秒：GC 后 231 MB"/>
+<circle class="pt" cx="259.9" cy="150.1" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 14 秒：GC 后 239 MB"/>
+<circle class="pt" cx="274.5" cy="145.9" r="2.5" fill="var(--pd)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 15 秒：GC 后 249 MB"/>
+<circle class="pt" cx="289.1" cy="144.2" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 16 秒：GC 后 253 MB，这一秒 Full GC 2 次"/>
+<circle class="pt" cx="303.6" cy="144.2" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 17 秒：GC 后 253 MB，这一秒 Full GC 12 次"/>
+<circle class="pt" cx="318.2" cy="143.8" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 18 秒：GC 后 254 MB，这一秒 Full GC 14 次"/>
+<circle class="pt" cx="332.8" cy="144.2" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 19 秒：GC 后 253 MB，这一秒 Full GC 12 次"/>
+<circle class="pt" cx="347.3" cy="143.8" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 256 MB · 第 20 秒：GC 后 254 MB，这一秒 Full GC 12 次"/>
+<text x="367.7" y="148.8" text-anchor="middle" style="font-size:15px;font-weight:700;fill:var(--bad)">✕</text>
+<text class="t-bad" x="361.7" y="169.8" text-anchor="end">OOM · 第 21.4 秒</text>
+<polyline points="56.0,198.6 70.6,194.4 99.7,188.9 128.8,181.8 158.0,174.3 187.1,167.2 216.2,160.1 245.4,153.4 274.5,147.1 303.6,130.8 318.2,136.3 347.3,120.8 361.9,126.6 391.0,111.6 405.6,117.4 420.2,103.2 434.7,110.3 449.3,98.2 463.9,103.2 478.4,89.8 493.0,97.4 507.6,84.4 522.1,89.8 536.7,87.3 551.3,83.1 565.8,79.8 580.4,76.5 595.0,73.5 609.5,70.2 624.1,64.7 638.7,63.5 653.2,60.6 667.8,57.2 682.4,51.4 696.9,50.5 711.5,47.2 726.1,42.6 740.6,38.4 755.2,40.1 769.8,37.1 784.3,36.7 798.9,37.1 813.5,36.7 828.0,37.1" fill="none" stroke="var(--of)" stroke-width="2.2" stroke-linejoin="round"/>
+<circle class="pt" cx="56.0" cy="198.6" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 0 秒：GC 后 123 MB"/>
+<circle class="pt" cx="70.6" cy="194.4" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 1 秒：GC 后 133 MB"/>
+<circle class="pt" cx="99.7" cy="188.9" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 3 秒：GC 后 146 MB"/>
+<circle class="pt" cx="128.8" cy="181.8" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 5 秒：GC 后 163 MB"/>
+<circle class="pt" cx="158.0" cy="174.3" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 7 秒：GC 后 181 MB"/>
+<circle class="pt" cx="187.1" cy="167.2" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 9 秒：GC 后 198 MB"/>
+<circle class="pt" cx="216.2" cy="160.1" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 11 秒：GC 后 215 MB"/>
+<circle class="pt" cx="245.4" cy="153.4" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 13 秒：GC 后 231 MB"/>
+<circle class="pt" cx="274.5" cy="147.1" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 15 秒：GC 后 246 MB"/>
+<circle class="pt" cx="303.6" cy="130.8" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 17 秒：GC 后 285 MB"/>
+<circle class="pt" cx="318.2" cy="136.3" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 18 秒：GC 后 272 MB"/>
+<circle class="pt" cx="347.3" cy="120.8" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 20 秒：GC 后 309 MB"/>
+<circle class="pt" cx="361.9" cy="126.6" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 21 秒：GC 后 295 MB"/>
+<circle class="pt" cx="391.0" cy="111.6" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 23 秒：GC 后 331 MB"/>
+<circle class="pt" cx="405.6" cy="117.4" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 24 秒：GC 后 317 MB"/>
+<circle class="pt" cx="420.2" cy="103.2" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 25 秒：GC 后 351 MB"/>
+<circle class="pt" cx="434.7" cy="110.3" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 26 秒：GC 后 334 MB"/>
+<circle class="pt" cx="449.3" cy="98.2" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 27 秒：GC 后 363 MB"/>
+<circle class="pt" cx="463.9" cy="103.2" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 28 秒：GC 后 351 MB"/>
+<circle class="pt" cx="478.4" cy="89.8" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 29 秒：GC 后 383 MB"/>
+<circle class="pt" cx="493.0" cy="97.4" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 30 秒：GC 后 365 MB"/>
+<circle class="pt" cx="507.6" cy="84.4" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 31 秒：GC 后 396 MB"/>
+<circle class="pt" cx="522.1" cy="89.8" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 32 秒：GC 后 383 MB"/>
+<circle class="pt" cx="536.7" cy="87.3" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 33 秒：GC 后 389 MB"/>
+<circle class="pt" cx="551.3" cy="83.1" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 34 秒：GC 后 399 MB"/>
+<circle class="pt" cx="565.8" cy="79.8" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 35 秒：GC 后 407 MB"/>
+<circle class="pt" cx="580.4" cy="76.5" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 36 秒：GC 后 415 MB"/>
+<circle class="pt" cx="595.0" cy="73.5" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 37 秒：GC 后 422 MB"/>
+<circle class="pt" cx="609.5" cy="70.2" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 38 秒：GC 后 430 MB"/>
+<circle class="pt" cx="624.1" cy="64.7" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 39 秒：GC 后 443 MB"/>
+<circle class="pt" cx="638.7" cy="63.5" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 40 秒：GC 后 446 MB"/>
+<circle class="pt" cx="653.2" cy="60.6" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 41 秒：GC 后 453 MB"/>
+<circle class="pt" cx="667.8" cy="57.2" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 42 秒：GC 后 461 MB"/>
+<circle class="pt" cx="682.4" cy="51.4" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 43 秒：GC 后 475 MB"/>
+<circle class="pt" cx="696.9" cy="50.5" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 44 秒：GC 后 477 MB"/>
+<circle class="pt" cx="711.5" cy="47.2" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 45 秒：GC 后 485 MB"/>
+<circle class="pt" cx="726.1" cy="42.6" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 46 秒：GC 后 496 MB"/>
+<circle class="pt" cx="740.6" cy="38.4" r="2.5" fill="var(--of)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 47 秒：GC 后 506 MB"/>
+<circle class="pt" cx="755.2" cy="40.1" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 48 秒：GC 后 502 MB，这一秒 Full GC 3 次"/>
+<circle class="pt" cx="769.8" cy="37.1" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 49 秒：GC 后 509 MB，这一秒 Full GC 7 次"/>
+<circle class="pt" cx="784.3" cy="36.7" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 50 秒：GC 后 510 MB，这一秒 Full GC 13 次"/>
+<circle class="pt" cx="798.9" cy="37.1" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 51 秒：GC 后 509 MB，这一秒 Full GC 11 次"/>
+<circle class="pt" cx="813.5" cy="36.7" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 52 秒：GC 后 510 MB，这一秒 Full GC 12 次"/>
+<circle class="pt" cx="828.0" cy="37.1" r="4" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5" data-tip="堆 512 MB · 第 53 秒：GC 后 509 MB，这一秒 Full GC 11 次"/>
+<text x="842.6" y="42.1" text-anchor="middle" style="font-size:15px;font-weight:700;fill:var(--bad)">✕</text>
+<text class="t-bad" x="836.6" y="63.1" text-anchor="end">OOM · 第 54.0 秒</text>
+<line x1="318.2" y1="149.8" x2="434.7" y2="196" stroke="var(--bad)" stroke-width="1.2"/><text class="t-s" x="440.7" y="200">第 16 秒起，每秒十几次 Full GC（红点），</text><text class="t-s" x="440.7" y="216">回收完还是 253M：堆翻倍只是把同一件事推迟了 33 秒</text>
+</svg>
+    <div class="chart-tip" id="leak-tip" hidden></div>
+  </div>
+  <div class="legend"><span data-role="pd"><i></i>堆 256 MB</span><span data-role="of"><i></i>堆 512 MB</span><span><i style="background:var(--bad);width:9px;height:9px;border-radius:50%"></i>这一秒有 Full GC</span><span class="tip">每秒取最后一次 GC 之后的占用；鼠标移到点上看数</span></div>
+  <div class="tbl-wrap" style="margin-top:10px">
+    <table class="t runs">
+      <thead><tr><th>堆</th><th class="num">第一次 Full GC</th><th class="num">OOM</th><th class="num">Full GC 次数</th><th class="num">最长停顿</th><th class="num">GC 占比</th><th>GcLogStats 的结论</th></tr></thead>
+      <tbody>
+        <tr class="badrow"><td>256 MB</td><td class="num">第 16.2 秒</td><td class="num">第 21.4 秒</td><td class="num">58</td><td class="num">117 ms</td><td class="num">22.6%</td><td>Full GC 之后堆还是满的：回收不掉，是代码问题</td></tr>
+        <tr class="badrow"><td>512 MB</td><td class="num">第 48.1 秒</td><td class="num">第 54.0 秒</td><td class="num">59</td><td class="num">140 ms</td><td class="num">10.0%</td><td>同上</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>两条线的形状一模一样，只是 512 MB 那条更晚碰到上限。日志里对应的就是全景第 8 站说的那种行：<code>Pause Full (G1 Compaction Pause) 253M-&gt;243M(256M) 82.802ms</code>，整理完一遍几乎没变。这时候该做的是第 9 站的事：堆转储、直方图，找出是谁一直攥着这些对象。</p>
+
+  <div class="scene" style="max-width:none;border-color:var(--good)"><b style="color:var(--good)">到这里已经能交差了</b><span>写下三个目标，开着 <code>-Xlog:gc*</code> 拿一份基线日志，用 <code>GcLogStats</code> 或任何日志工具算出占比、最长停顿、回收后占用，就能回答“GC 是不是原因、该改参数还是改代码”。还没处理的细节：<a href="#p-avg">只看平均值</a>、<a href="#p-warm">预热停顿混进统计</a>、<a href="#p-jdk8">JDK 8 的日志参数在 17 上让 JVM 起不来</a>、<a href="#p-xmn">给 G1 写死新生代</a>，都在第⑥步。</span></div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>刻意练习：先认坑，再练读日志</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-heap"><b><em>坑 1</em>泄漏的时候加堆<a class="root" href="#m-three">← ④-2 回收后占用</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>Full GC 频繁，把堆从 256 MB 加到 512 MB，好了半分钟，又开始 Full GC，最后还是 OOM，而且每次 Full GC 更长（117 → 140 ms）。</dd>
+      <dt>根源</dt><dd>回收后的占用 ≈ 活对象。活对象一直在涨，堆多大都会被填满；堆越大，整理一次要搬的越多。</dd>
+      <dd class="fix">先看 Full GC 那几行箭头右边的数：接近上限（<code>253M-&gt;243M(256M)</code>）就别动参数，直接 <code>jcmd &lt;pid&gt; GC.class_histogram</code> 或堆转储（第 9 站）。</dd></dl>
+    </div>
+    <div class="pit" id="p-coll"><b><em>坑 2</em>把“换收集器”当调优<a class="root" href="#m-design">← ④-3 收集器的目标</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>听说 Parallel 吞吐高，换上之后 GC 时间占比 98.4%，接口延迟到了秒级。</dd>
+      <dt>根源</dt><dd>Parallel 的目标是吞吐，不管停顿；JDK 15 起两代边界固定，老年代 = 堆的 2/3，活对象放不下就只能一直 Full GC。</dd>
+      <dd class="fix">换收集器之前，先确认它优先照顾的目标和你的一致，再按 ④-2 估一下活对象在它的分法下放不放得下。</dd></dl>
+    </div>
+    <div class="pit" id="p-avg"><b><em>坑 3</em>只看平均停顿<a class="root" href="#m-three">← ④-2 看尾部</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>监控上平均 GC 停顿 2.8 ms，看着很好，请求 p99.9 却是 19 ms（Parallel · 768 MB 那一跑，最长 37.9 ms）。</dd>
+      <dt>根源</dt><dd>每秒十几次 1～3 ms 的 Young GC 把平均值压得很低，偶尔一次长停顿被平均掉了；可停顿期间到达的请求都在等那一次。</dd>
+      <dd class="fix">盯三样：最长停顿（或 p99）、GC 时间占比、Full GC 次数。告警用最大值，不用平均值。</dd></dl>
+    </div>
+    <div class="pit" id="p-xmn"><b><em>坑 4</em>给 G1 写死新生代<a class="root" href="#m-design">← ④-3 G1 靠调 Eden 达标</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>加了 <code>-Xmn128m</code>，最长停顿从 7.9 ms 变成 15.6 ms，日志里出现 <code>(G1 Preventive Collection)</code>。</dd>
+      <dt>根源</dt><dd>G1 是靠每次重新决定 Eden 的大小来满足停顿目标的。Oracle 文档原话：用 <code>-Xmn</code>、<code>NewRatio</code> 固定新生代大小，“实际上就关掉了停顿时间控制”。</dd>
+      <dd class="fix">G1 只留 <code>-Xms/-Xmx</code> 和 <code>MaxGCPauseMillis</code>；从别的收集器迁移过来时，先删掉所有 GC 参数。参见 <a href="g1-zgc.html#p-xmn">G1 与 ZGC 坑 2</a>。</dd></dl>
+    </div>
+    <div class="pit" id="p-warm"><b><em>坑 5</em>把启动预热的停顿算进统计<a class="root" href="#m-pause">← ④-2 停顿 ≈ 活对象</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd><code>-Xmn128m</code> 那一跑，整份日志里最长的停顿是 135 ms，可压测期间最长只有 15.6 ms：那 135 ms 发生在启动时装缓存的阶段。</dd>
+      <dt>根源</dt><dd>装缓存时新对象几乎全是活的，Young GC 要复制一大批；正式跑起来以后，新对象大多是请求结束就没用的。</dd>
+      <dd class="fix">基线和对比都从同一个时刻开始统计（<code>GcLogStats</code> 的第 4 个参数）；生产上，启动阶段的停顿另外看，用预热或分批加载来解决。</dd></dl>
+    </div>
+    <div class="pit" id="p-jdk8"><b><em>坑 6</em>JDK 8 的日志参数带到 17，JVM 起不来<a class="root" href="#v-diff">历史原因</a><span class="seen">本机核对</span></b>
+      <dl><dt>现象</dt><dd>升级到 17 以后启动失败：<code>Unrecognized VM option 'PrintGCDateStamps'</code>，或者 <code>'UseGCLogFileRotation'</code>。</dd>
+      <dt>根源</dt><dd>JDK 9 起 GC 日志并入统一日志 <code>-Xlog</code>。<code>-XX:+PrintGCDetails</code>、<code>-Xloggc</code> 只会警告，并自动换成 <code>-Xlog:gc*</code> / <code>-Xlog:gc:file</code>；时间戳和轮转相关的参数直接不认了。</dd>
+      <dd class="fix">换成 ④ 里的那一行 <code>-Xlog:gc*:file=gc-%p-%t.log:…</code>。默认就会轮转，重启时同名的旧文件会先存成 <code>.0</code>；文件名带上 <code>%p</code>，几个实例就不会互相覆盖。</dd></dl>
+    </div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>目标写进文档，带上数字</b><p>“最长停顿 ≤ 50 ms、GC 占比 ≤ 5%、堆 ≤ 256 MB”，和接口的 SLA、容器规格对得上。</p><p class="guard">防：调到最后，说不清算不算调好了。</p></div>
+    <div class="rl"><b>GC 日志一直开着，带 pid 和轮转</b><p>开销很小；文件名带 <code>%p</code>，按需调大 <code>filecount</code>、<code>filesize</code>。</p><p class="guard">防：出了事故才发现没有证据（坑 6）。</p></div>
+    <div class="rl"><b>一次只改一处，用同样的流量对比</b><p>改之前的日志留着当基线；没变好就撤回。参数的改动也走代码评审，写清目的。</p><p class="guard">防：几个参数互相影响，最后谁也说不清。</p></div>
+    <div class="rl"><b>告警看最大值和占比，不看平均值</b><p>Micrometer 的 <code>jvm.gc.pause</code> 取 max；再加一条“回收后的老年代占用持续上涨”。</p><p class="guard">防：坑 3，以及泄漏发现得太晚。</p></div>
+    <div class="rl"><b>-Xms 和 -Xmx 设成一样</b><p>按文档，G1 和 Parallel 在 GC 时间超过 <code>GCTimeRatio</code> 时会先扩堆；两个值相等，堆就不会忽大忽小。</p><p class="guard">防：内存曲线锯齿状，容器的内存余量算不准。</p></div>
+    <div class="rl"><b>堆按活对象估，留足余量</b><p>先从回收后的占用估出活对象有多少，堆给到它的好几倍。⑤ 里 256 MB 的堆装 206 MB 活对象能达标，但 G1 一直在做并发标记。</p><p class="guard">防：活对象一涨就退化成 Full GC。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>更深一层</h3></div>
+  <div class="two">
+    <div class="way" data-role="pd"><h4>停顿和延迟不是一回事</h4>
+      <p>同一个 Parallel 跑法里，GC 最长只停了 309 ms，请求延迟的中位数却是 3.3 秒。原因是 GC 占了 98% 的时间，请求处理不过来，越积越多。如果用“发一个、等它回来、再发下一个”的方式压测，停顿期间本来该到的请求根本没发出来，量出来的延迟会好看得多，这个现象叫 <b>coordinated omission</b>。<code>OrderService</code> 从计划到达的时刻开始算延迟，就是为了避开它。</p></div>
+    <div class="way" data-role="bk"><h4>停顿达标了，CPU 还在被 GC 占用</h4>
+      <p>基线 30 秒里做了 54 轮并发标记。这部分工作和业务线程并行，不算在停顿里，但要占 CPU：本机 2 核，G1 默认用 1 个并发 GC 线程（<code>ConcGCThreads=1</code>，<code>PrintFlagsFinal</code> 核对）。所以除了停顿，还要看 CPU 使用率；用 <code>-Xlog:gc+cpu</code> 能看到每次 GC 的 User / Sys / Real 时间。</p></div>
+    <div class="way" data-role="cg"><h4>Preventive Collection 是什么</h4>
+      <p><code>-Xmn128m</code> 那一跑里出现的 <code>(G1 Preventive Collection)</code>，是 JDK 17 新加的（JDK-8257774）：G1 估计剩下的空 region 不够复制活对象用了，就提前做一次 Young GC，免得复制到一半失败。JDK 21 又把它删掉了（JDK-8297639）。所以同一份参数在 17 和 21 上，日志会不一样。</p></div>
+    <div class="way" data-role="g2"><h4>活对象到底多大，以哪次为准</h4>
+      <p>Young GC 后的占用里还包括老年代中已经死了、但还没轮到回收的对象，所以会偏高。比较准的是 Mixed GC 或 Full GC 之后的数，以及并发标记结束时的统计。⑤ 的基线一直在 206～210 MB 之间，和缓存估算的大小（160 万 × 约 130 字节）对得上。</p></div>
+  </div>
+
+  <h3 id="v-diff" style="margin-top:12px">版本差异</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>JDK</th><th>变化</th><th>对你意味着什么</th></tr></thead>
+      <tbody>
+        <tr><td>8</td><td>日志参数：<code>-XX:+PrintGCDetails -XX:+PrintGCDateStamps -Xloggc:gc.log -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=10 -XX:GCLogFileSize=50m</code>；默认收集器是 Parallel</td><td>8 上的日志格式和本页不同，箭头前后的数字含义一样</td></tr>
+        <tr><td>9</td><td>统一日志 <code>-Xlog</code>（JEP 158），GC 日志并入（JEP 271）；G1 成为默认收集器</td><td>从这一版开始用本页的写法</td></tr>
+        <tr><td>15</td><td>去掉 Parallel 的 <code>UseAdaptiveGCBoundary</code>（JDK-8228991）</td><td>Parallel 的两代边界固定（④-3）</td></tr>
+        <tr><td>17</td><td><code>PrintGCDetails</code>、<code>-Xloggc</code> 只警告，自动换成 <code>-Xlog</code>；<code>PrintGCDateStamps</code>、轮转参数不认，JVM 起不来；新增 Preventive Collection</td><td>坑 6；升级前先搜一遍启动脚本</td></tr>
+        <tr><td>21</td><td>删除 Preventive Collection（JDK-8297639）</td><td>同样的参数，日志里少了一类停顿</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="lab" style="margin-top:12px">GC 日志体检台<small style="font-family:var(--font-body);font-size:14px;color:var(--muted);margin-left:8px">先猜，再体检</small></h3>
+  <div class="lab diag" id="lab-box">
+    <div class="presets" id="lab-presets" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <button type="button" data-k="b"><b>大促 · G1 默认</b><span>压测第 10～13 秒，40 行</span></button>
+      <button type="button" data-k="c"><b>大促 · Parallel</b><span>压测第 10～16 秒，28 行</span></button>
+      <button type="button" data-k="g"><b>泄漏 · G1 256 MB</b><span>第 17～19 秒，80 行</span></button>
+    </div>
+    <div class="guess" data-role="pd" id="lab-guess">
+      <p id="lab-q">先选一段日志。</p>
+      <div class="opts" id="lab-opts"></div>
+      <p class="res" id="lab-ans" hidden></p>
+    </div>
+    <label for="lab-log" class="tip">GC 日志（本机实测原文，只留了 <code>[gc]</code> 那一行；也可以把你自己的 <code>-Xlog:gc</code> 日志粘进来）</label>
+    <textarea id="lab-log" spellcheck="false"></textarea>
+    <div class="tg-row">
+      <label for="lab-t1">最长停顿目标 <input type="number" id="lab-t1" value="50" min="1" step="1"> ms</label>
+      <label for="lab-t2">GC 时间占比目标 <input type="number" id="lab-t2" value="5" min="0.1" step="0.5"> %</label>
+    </div>
+    <div class="run-row"><button class="btn primary" type="button" id="lab-run">体检</button><span class="tip" id="lab-tip">选好日志并猜一下，再点“体检”。体检之后改目标或者改日志，结果会马上重算。</span></div>
+    <div class="mtx" id="lab-mtx"></div>
+    <div class="lab-res" data-role="pd" id="lab-res">还没体检。</div>
+  </div>
+  <p class="tip">算法和 <code>GcLogStats.java</code> 基本一样，已在 node 里用三段样本核对过：统计时长从第一次停顿开始算到最后一行（日志的时间戳记在停顿结束的时刻）；分配量是“这次回收前”减去“上次回收后”的累加；结论按“Full GC 后仍占堆 90% 以上的次数是否过半 → 回收后占用是否一路上涨 → 有没有 Full GC → 是否超出目标”的顺序判断。</p>
+
+  <h3 style="margin-top:12px">刻意练习：由易到难</h3>
+  <div class="rules-list">
+    <div class="rl"><b>1. 读一行</b><p>从自己项目的 GC 日志里挑一行 Young GC，说出类型、原因、回收前后的占用、停了多久。</p><p class="guard">做对了：和 ④-1 那张图逐段对得上。</p></div>
+    <div class="rl"><b>2. 估活对象</b><p>找最近几次 Mixed GC 或 Full GC 后的占用，估出活对象有多少，再用 <code>jcmd &lt;pid&gt; GC.heap_info</code> 核对。</p><p class="guard">做对了：估出来的数和 heap_info 里老年代已用的部分相差不大。</p></div>
+    <div class="rl"><b>3. 先猜再跑</b><p>Parallel 跑大促流量，堆至少要多大才不会一直 Full GC？先按“老年代 = 2/3 堆，要装下 201 MB 还得有余量”算，再改 <code>-Xmx</code> 去验证。</p><p class="guard">做对了：日志里的 Full GC 从每次都是变成没有，算出来的界线和实测相差不远。</p></div>
+    <div class="rl"><b>4. 找泄漏</b><p>用 <code>-Dleak=true</code> 跑，在 OOM 之前执行 <code>jcmd &lt;pid&gt; GC.class_histogram | head</code>。</p><p class="guard">做对了：排第一的是 <code>[B</code>（byte[]），个数和“已处理的请求数”差不多。</p></div>
+    <div class="rl"><b>5. 换一个目标</b><p>把停顿目标改成 ≤ 2 ms，先试 G1 的 <code>MaxGCPauseMillis=2</code>，再在 JDK 21 上试分代 ZGC，比较最长停顿和 CPU。</p><p class="guard">做对了：能说清楚为了这个更严的停顿目标，付出了多少 CPU 或内存（④-3 的三角）。</p></div>
+  </div>
+
+  <h3 style="margin-top:12px">下一圈</h3>
+  <ul class="next">
+    <li>JFR 录一段：用 <code>jdk.ObjectAllocationSample</code> 找到每秒分配 196 MB 的是哪几行代码，减少分配，而不是去调 GC</li>
+    <li>G1 的停顿预测模型：<code>G1Policy</code> 怎么根据前几次的复制速度决定下一轮 Eden 用几块</li>
+    <li>安全点日志 <code>-Xlog:safepoint</code>：停顿里有多少是在等所有线程到齐</li>
+    <li>容器里的 JVM（地图上 J03 的第 8 个知识点）：<code>MaxRAMPercentage</code> 和堆外内存怎么一起算</li>
+    <li>JVM 故障排查（第 9 站）：堆转储、MAT 里的 GC Root 路径，把 ⑤ 第 6 步的泄漏查到具体的那一行</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改造你的案例</h2>
+  </div>
+  <div class="trio">
+    <div class="ess" data-role="of"><h4>1. 把泄漏修掉，证明是代码问题</h4><p>按坑 1，把 <code>LEAKED</code> 换成有上限的 LRU，同样用 256 MB 再跑一次 <code>-Dleak=true</code>，用 <code>GcLogStats</code> 检查：回收后的占用应该平稳，结论应该变回“达标”。</p></div>
+    <div class="ess" data-role="pd"><h4>2. 把日志参数配成生产级</h4><p>按坑 6 和第二圈，给启动命令换上 <code>-Xlog:gc*:file=gc-%p-%t.log:time,uptime,level,tags:filecount=10,filesize=50m</code>，连续启动两次，看旧文件变成了什么名字。</p></div>
+    <div class="ess" data-role="g2"><h4>3. 缓存涨到 200 万</h4><p>按第二圈最后一条，<code>-DcacheK=2000</code>，堆仍是 256 MB，先猜三样数会怎么变，再跑。然后在“加堆”和“缓存瘦身”（<a href="jvm-object-new-layout.html">上一页的 OrderLite</a>）之间选一个，说出理由。</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>先写下停顿、吞吐、内存三个目标里要哪两个、阈值多少；再从 GC 日志算出占比、最长停顿、回收后占用，判断是参数问题还是代码问题；最后一次只改一处，用同样的流量对比。</p></details>
+    <details><summary>2. 常见的“先改参数”的做法，疼在哪？</summary><p>没有目标，就判断不了调得好不好；没有基线和日志里的数，就分不清问题在参数还是代码。⑤ 里两个反例：换 Parallel 后 GC 占比 98.4%；泄漏时加堆，OOM 只是推迟了 33 秒。</p></details>
+    <details><summary>3. 泄漏时加堆没用，根源是哪条原理？</summary><p>④-2：回收后的占用 ≈ 活对象。泄漏就是活对象一直在涨，堆再大也会被填满；而 Full GC 的停顿和要整理的活对象成正比，堆越大，停得越久（实测 117 → 140 ms）。</p></details>
+    <details><summary>4. 预测：大促流量从每秒 4000 单翻到 8000 单，缓存大小不变，G1 的 Young GC 次数和每次停顿会怎么变？</summary><p>次数大约翻倍：分配速率翻倍，Eden 大小差不多，按 ④-2 的“频率 ≈ 分配速率 ÷ 新生代大小”。每次停顿基本不变：多出来的都是请求结束就死的临时对象，要复制的活对象没变多。GC 时间占比会跟着翻倍，从 2% 到 4% 左右，离 5% 的目标近了。（这是推算，没跑。）</p></details>
+    <details><summary>5. 预测：同一个大促场景，把 <code>-Xmx</code> 从 256 MB 改成 2 GB、收集器用 G1，三样数会怎么变？算不算调优成功？</summary><p>余量从 50 MB 变成 1.8 GB，并发标记和 Mixed GC 会少很多，Young GC 次数会下降，Eden 可以给得更大；停顿依然很短，因为活对象没变。可是内存目标是 ≤ 256 MB，超了 8 倍。按第 1 步写下的目标，这不算成功：三角里拿内存换来了吞吐。</p></details>
+    <details><summary>6. 放回全景：第 8 站的前后各发生了什么？读不懂 GC 日志，整条链路会怎样？</summary><p>前面是第 7 站：老年代占用超过阈值，G1 启动并发标记，再用 Mixed GC 回收垃圾最多的那些 region。后面是第 9 站：回收不掉，就 OOM，然后用堆转储和直方图排查。读不懂日志，就会把第 8 站当成“参数没调好”：加堆或换收集器，结果只是把第 9 站的 OOM 往后推（实测从第 21 秒推到第 54 秒）。在那之前，每秒十几次 Full GC 会把下单接口的 p99 拖到秒级，Tomcat 线程池被占满，上游开始超时重试，问题从一个服务扩散出去。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机 2 核 ARM，JDK 17.0.20.1，G1 和 Parallel；页面上的数来自这几次 <code>OrderService</code> 运行：大促流量下 G1 默认、Parallel 256 MB、Parallel 768 MB、G1 <code>MaxGCPauseMillis=5</code>、G1 <code>-Xmn128m</code> 各一次，泄漏实验 256 MB 和 512 MB 各一次。预热期的停顿（27 ms、135 ms）取自同一批日志里压测开始之前的部分。没有在 JDK 8、21 上跑，版本差异是按文档和提交记录写的。标“实测”的数字都来自这几次运行，“推算”的没跑。</p>
+  <p>按文档和源码：Oracle JDK 17 GC Tuning Guide（G1 的 <code>GCTimeRatio=12</code>，“about 8%”；“Avoid limiting the young generation size … -Xmn”；Parallel 的 <code>GCTimeRatio</code> 默认 99，新生代最多占堆的 1/3）；java 命令手册的统一日志一节（<code>%p</code>、<code>%t</code>，默认 5 个文件 × 20 MB 轮转）；<code>logFileOutput.cpp</code>（启动时存档已有的日志文件）；JDK-8228991、JDK-8257774、JDK-8297639；本机 <code>-XX:+PrintFlagsFinal</code> 核对了各项默认值，JDK 8 日志参数在 17 上的行为也在本机试过。</p>
+  <p>相关：<a href="../java/pano-j03-object-new-to-gc.html">全景：一个对象从 new 到被回收</a> · <a href="g1-zgc.html">G1 与 ZGC</a> · <a href="jvm-object-new-layout.html">new 一个对象的全过程</a> · <a href="jvm-memory-structure.html">JVM 内存结构</a> · <a href="../java/roadmap.html#j03">Java 地图 J03</a></p>
+</footer>
+
+</main>
+
+<script>
+const SAMPLES = {"b": "[10.092s][info][gc] GC(126) Pause Young (Concurrent Start) (G1 Evacuation Pause) 226M->207M(256M) 1.181ms\n[10.194s][info][gc] GC(128) Pause Young (Normal) (G1 Evacuation Pause) 226M->207M(256M) 1.888ms\n[10.296s][info][gc] GC(129) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.530ms\n[10.374s][info][gc] GC(127) Pause Remark 222M->222M(256M) 0.877ms\n[10.399s][info][gc] GC(130) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.824ms\n[10.475s][info][gc] GC(127) Pause Cleanup 222M->222M(256M) 0.102ms\n[10.501s][info][gc] GC(131) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.900ms\n[10.604s][info][gc] GC(132) Pause Young (Concurrent Start) (G1 Evacuation Pause) 227M->207M(256M) 2.134ms\n[10.706s][info][gc] GC(134) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.802ms\n[10.808s][info][gc] GC(135) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.424ms\n[10.887s][info][gc] GC(133) Pause Remark 223M->223M(256M) 0.622ms\n[10.909s][info][gc] GC(136) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.005ms\n[10.988s][info][gc] GC(133) Pause Cleanup 223M->223M(256M) 0.090ms\n[11.012s][info][gc] GC(137) Pause Young (Prepare Mixed) (G1 Evacuation Pause) 227M->207M(256M) 1.647ms\n[11.067s][info][gc] GC(138) Pause Young (Mixed) (G1 Evacuation Pause) 218M->206M(256M) 1.806ms\n[11.173s][info][gc] GC(139) Pause Young (Concurrent Start) (G1 Evacuation Pause) 227M->206M(256M) 1.189ms\n[11.281s][info][gc] GC(141) Pause Young (Normal) (G1 Evacuation Pause) 227M->206M(256M) 1.930ms\n[11.388s][info][gc] GC(142) Pause Young (Normal) (G1 Evacuation Pause) 227M->206M(256M) 1.909ms\n[11.451s][info][gc] GC(140) Pause Remark 219M->219M(256M) 0.583ms\n[11.495s][info][gc] GC(143) Pause Young (Normal) (G1 Evacuation Pause) 227M->206M(256M) 1.830ms\n[11.553s][info][gc] GC(140) Pause Cleanup 218M->218M(256M) 0.084ms\n[11.597s][info][gc] GC(144) Pause Young (Normal) (G1 Evacuation Pause) 226M->206M(256M) 1.870ms\n[11.699s][info][gc] GC(145) Pause Young (Concurrent Start) (G1 Evacuation Pause) 226M->206M(256M) 1.187ms\n[11.802s][info][gc] GC(147) Pause Young (Normal) (G1 Evacuation Pause) 226M->206M(256M) 1.833ms\n[11.904s][info][gc] GC(148) Pause Young (Normal) (G1 Evacuation Pause) 226M->206M(256M) 1.883ms\n[11.977s][info][gc] GC(146) Pause Remark 221M->221M(256M) 0.455ms\n[12.007s][info][gc] GC(149) Pause Young (Normal) (G1 Evacuation Pause) 226M->206M(256M) 1.831ms\n[12.078s][info][gc] GC(146) Pause Cleanup 221M->221M(256M) 0.082ms\n[12.109s][info][gc] GC(150) Pause Young (Normal) (G1 Evacuation Pause) 226M->206M(256M) 1.836ms\n[12.212s][info][gc] GC(151) Pause Young (Concurrent Start) (G1 Evacuation Pause) 226M->207M(256M) 2.249ms\n[12.312s][info][gc] GC(153) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.540ms\n[12.415s][info][gc] GC(154) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.858ms\n[12.491s][info][gc] GC(152) Pause Remark 222M->222M(256M) 2.339ms\n[12.515s][info][gc] GC(155) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.936ms\n[12.594s][info][gc] GC(152) Pause Cleanup 222M->222M(256M) 1.059ms\n[12.618s][info][gc] GC(156) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.803ms\n[12.719s][info][gc] GC(157) Pause Young (Concurrent Start) (G1 Evacuation Pause) 227M->207M(256M) 2.152ms\n[12.821s][info][gc] GC(159) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.427ms\n[12.922s][info][gc] GC(160) Pause Young (Normal) (G1 Evacuation Pause) 227M->207M(256M) 1.648ms\n[12.996s][info][gc] GC(158) Pause Remark 222M->221M(256M) 0.482ms", "c": "[10.147s][info][gc] GC(41) Pause Full (Ergonomics) 234M->201M(245M) 218.010ms\n[10.365s][info][gc] GC(42) Pause Full (Ergonomics) 234M->201M(245M) 216.236ms\n[10.572s][info][gc] GC(43) Pause Full (Ergonomics) 234M->201M(245M) 204.829ms\n[10.776s][info][gc] GC(44) Pause Full (Ergonomics) 234M->201M(245M) 202.034ms\n[10.994s][info][gc] GC(45) Pause Full (Ergonomics) 234M->201M(245M) 215.967ms\n[11.198s][info][gc] GC(46) Pause Full (Ergonomics) 234M->201M(245M) 202.540ms\n[11.403s][info][gc] GC(47) Pause Full (Ergonomics) 234M->201M(245M) 203.600ms\n[11.613s][info][gc] GC(48) Pause Full (Ergonomics) 234M->201M(245M) 207.714ms\n[11.816s][info][gc] GC(49) Pause Full (Ergonomics) 234M->201M(245M) 201.584ms\n[12.019s][info][gc] GC(50) Pause Full (Ergonomics) 234M->201M(245M) 201.713ms\n[12.237s][info][gc] GC(51) Pause Full (Ergonomics) 234M->201M(245M) 216.225ms\n[12.444s][info][gc] GC(52) Pause Full (Ergonomics) 234M->201M(245M) 204.675ms\n[12.653s][info][gc] GC(53) Pause Full (Ergonomics) 234M->201M(245M) 207.484ms\n[12.857s][info][gc] GC(54) Pause Full (Ergonomics) 234M->201M(245M) 201.987ms\n[13.061s][info][gc] GC(55) Pause Full (Ergonomics) 234M->201M(245M) 202.200ms\n[13.264s][info][gc] GC(56) Pause Full (Ergonomics) 234M->201M(245M) 200.845ms\n[13.489s][info][gc] GC(57) Pause Full (Ergonomics) 234M->201M(245M) 223.565ms\n[13.696s][info][gc] GC(58) Pause Full (Ergonomics) 234M->201M(245M) 205.080ms\n[13.899s][info][gc] GC(59) Pause Full (Ergonomics) 234M->201M(245M) 201.612ms\n[14.103s][info][gc] GC(60) Pause Full (Ergonomics) 234M->201M(245M) 202.221ms\n[14.406s][info][gc] GC(61) Pause Full (Ergonomics) 234M->201M(245M) 301.003ms\n[14.613s][info][gc] GC(62) Pause Full (Ergonomics) 234M->201M(245M) 205.457ms\n[14.815s][info][gc] GC(63) Pause Full (Ergonomics) 234M->201M(245M) 200.217ms\n[15.032s][info][gc] GC(64) Pause Full (Ergonomics) 234M->201M(245M) 215.674ms\n[15.245s][info][gc] GC(65) Pause Full (Ergonomics) 234M->201M(245M) 210.986ms\n[15.454s][info][gc] GC(66) Pause Full (Ergonomics) 234M->201M(245M) 206.862ms\n[15.659s][info][gc] GC(67) Pause Full (Ergonomics) 234M->201M(245M) 203.854ms\n[15.862s][info][gc] GC(68) Pause Full (Ergonomics) 234M->201M(245M) 201.562ms", "g": "[17.039s][info][gc] GC(117) Pause Young (Concurrent Start) (G1 Preventive Collection) 251M->246M(256M) 1.473ms\n[17.094s][info][gc] GC(119) Pause Young (Normal) (G1 Preventive Collection) 252M->246M(256M) 1.140ms\n[17.139s][info][gc] GC(120) Pause Young (Normal) (G1 Preventive Collection) 251M->247M(256M) 1.334ms\n[17.187s][info][gc] GC(121) Pause Young (Normal) (G1 Preventive Collection) 252M->247M(256M) 1.007ms\n[17.203s][info][gc] GC(118) Pause Remark 249M->249M(256M) 0.480ms\n[17.225s][info][gc] GC(122) Pause Young (Normal) (G1 Preventive Collection) 251M->248M(256M) 1.066ms\n[17.262s][info][gc] GC(123) Pause Young (Normal) (G1 Preventive Collection) 252M->249M(256M) 1.113ms\n[17.278s][info][gc] GC(118) Pause Cleanup 250M->250M(256M) 0.076ms\n[17.290s][info][gc] GC(124) Pause Young (Prepare Mixed) (G1 Preventive Collection) 251M->249M(256M) 1.092ms\n[17.318s][info][gc] GC(125) Pause Young (Mixed) (G1 Preventive Collection) 252M->249M(256M) 1.040ms\n[17.347s][info][gc] GC(126) Pause Young (Concurrent Start) (G1 Preventive Collection) 252M->249M(256M) 1.170ms\n[17.365s][info][gc] GC(128) Pause Young (Normal) (G1 Preventive Collection) 251M->249M(256M) 0.568ms\n[17.394s][info][gc] GC(129) Pause Young (Normal) (G1 Preventive Collection) 252M->249M(256M) 1.055ms\n[17.412s][info][gc] GC(130) Pause Young (Normal) (G1 Preventive Collection) 251M->251M(256M) 0.964ms\n[17.421s][info][gc] GC(131) Pause Young (Normal) (G1 Preventive Collection) 252M->252M(256M) 0.830ms\n[17.430s][info][gc] GC(132) Pause Young (Normal) (G1 Evacuation Pause) 253M->253M(256M) 0.707ms\n[17.513s][info][gc] GC(133) Pause Full (G1 Compaction Pause) 253M->243M(256M) 82.802ms\n[17.515s][info][gc] GC(134) Pause Young (Normal) (G1 Preventive Collection) 252M->244M(256M) 0.452ms\n[17.583s][info][gc] GC(135) Pause Young (Concurrent Start) (G1 Preventive Collection) 251M->244M(256M) 1.192ms\n[17.640s][info][gc] GC(137) Pause Young (Normal) (G1 Preventive Collection) 250M->245M(256M) 1.161ms\n[17.697s][info][gc] GC(138) Pause Young (Normal) (G1 Preventive Collection) 251M->245M(256M) 1.070ms\n[17.735s][info][gc] GC(139) Pause Young (Normal) (G1 Preventive Collection) 249M->246M(256M) 1.087ms\n[17.747s][info][gc] GC(136) Pause Remark 247M->247M(256M) 0.458ms\n[17.773s][info][gc] GC(140) Pause Young (Normal) (G1 Preventive Collection) 250M->246M(256M) 1.099ms\n[17.807s][info][gc] GC(136) Pause Cleanup 250M->250M(256M) 0.081ms\n[17.810s][info][gc] GC(141) Pause Young (Normal) (G1 Preventive Collection) 250M->246M(256M) 0.987ms\n[17.849s][info][gc] GC(142) Pause Young (Concurrent Start) (G1 Preventive Collection) 250M->247M(256M) 1.161ms\n[17.877s][info][gc] GC(144) Pause Young (Normal) (G1 Preventive Collection) 250M->247M(256M) 1.065ms\n[17.904s][info][gc] GC(145) Pause Young (Normal) (G1 Preventive Collection) 250M->247M(256M) 0.996ms\n[17.932s][info][gc] GC(146) Pause Young (Normal) (G1 Preventive Collection) 250M->247M(256M) 0.987ms\n[17.971s][info][gc] GC(147) Pause Young (Normal) (G1 Preventive Collection) 251M->248M(256M) 1.137ms\n[17.999s][info][gc] GC(148) Pause Young (Normal) (G1 Preventive Collection) 251M->248M(256M) 0.988ms\n[18.014s][info][gc] GC(143) Pause Remark 250M->250M(256M) 0.472ms\n[18.019s][info][gc] GC(149) Pause Young (Normal) (G1 Preventive Collection) 250M->248M(256M) 1.025ms\n[18.047s][info][gc] GC(150) Pause Young (Normal) (G1 Preventive Collection) 251M->248M(256M) 0.968ms\n[18.066s][info][gc] GC(151) Pause Young (Normal) (G1 Preventive Collection) 250M->249M(256M) 0.988ms\n[18.074s][info][gc] GC(152) Pause Young (Normal) (G1 Preventive Collection) 250M->250M(256M) 0.886ms\n[18.077s][info][gc] GC(143) Pause Cleanup 251M->251M(256M) 0.073ms\n[18.084s][info][gc] GC(153) Pause Young (Normal) (G1 Evacuation Pause) 251M->251M(256M) 0.840ms\n[18.163s][info][gc] GC(154) Pause Full (G1 Compaction Pause) 251M->248M(256M) 78.563ms\n[18.164s][info][gc] GC(155) Pause Young (Concurrent Start) (G1 Preventive Collection) 253M->249M(256M) 0.872ms\n[18.171s][info][gc] GC(157) Pause Young (Normal) (G1 Preventive Collection) 253M->249M(256M) 0.824ms\n[18.207s][info][gc] GC(158) Pause Young (Normal) (G1 Preventive Collection) 253M->250M(256M) 0.993ms\n[18.226s][info][gc] GC(159) Pause Young (Normal) (G1 Preventive Collection) 252M->250M(256M) 0.912ms\n[18.245s][info][gc] GC(160) Pause Young (Normal) (G1 Preventive Collection) 252M->251M(256M) 0.902ms\n[18.255s][info][gc] GC(161) Pause Young (Normal) (G1 Preventive Collection) 252M->252M(256M) 0.889ms\n[18.264s][info][gc] GC(162) Pause Young (Normal) (G1 Evacuation Pause) 253M->253M(256M) 0.733ms\n[18.343s][info][gc] GC(163) Pause Full (G1 Compaction Pause) 253M->250M(256M) 78.693ms\n[18.344s][info][gc] GC(164) Pause Young (Normal) (G1 Preventive Collection) 252M->250M(256M) 0.415ms\n[18.344s][info][gc] GC(165) Pause Young (Concurrent Start) (G1 Preventive Collection) 251M->250M(256M) 0.775ms\n[18.345s][info][gc] GC(167) Pause Young (Normal) (G1 Preventive Collection) 251M->250M(256M) 0.441ms\n[18.346s][info][gc] GC(168) Pause Young (Normal) (G1 Preventive Collection) 251M->250M(256M) 0.455ms\n[18.346s][info][gc] GC(169) Pause Young (Normal) (G1 Preventive Collection) 251M->250M(256M) 0.427ms\n[18.347s][info][gc] GC(170) Pause Young (Normal) (G1 Preventive Collection) 251M->250M(256M) 0.400ms\n[18.347s][info][gc] GC(171) Pause Young (Normal) (G1 Preventive Collection) 251M->250M(256M) 0.414ms\n[18.350s][info][gc] GC(172) Pause Young (Normal) (G1 Preventive Collection) 251M->250M(256M) 0.372ms\n[18.359s][info][gc] GC(173) Pause Young (Normal) (G1 Preventive Collection) 251M->251M(256M) 0.425ms\n[18.368s][info][gc] GC(174) Pause Young (Normal) (G1 Preventive Collection) 252M->251M(256M) 0.397ms\n[18.378s][info][gc] GC(175) Pause Young (Normal) (G1 Preventive Collection) 252M->251M(256M) 0.408ms\n[18.387s][info][gc] GC(176) Pause Young (Normal) (G1 Preventive Collection) 252M->252M(256M) 0.406ms\n[18.397s][info][gc] GC(177) Pause Young (Normal) (G1 Evacuation Pause) 253M->253M(256M) 0.458ms\n[18.472s][info][gc] GC(178) Pause Full (G1 Compaction Pause) 253M->251M(256M) 74.687ms\n[18.472s][info][gc] GC(179) Pause Young (Normal) (G1 Preventive Collection) 252M->251M(256M) 0.398ms\n[18.473s][info][gc] GC(180) Pause Young (Concurrent Start) (G1 Evacuation Pause) 252M->252M(256M) 0.397ms\n[18.547s][info][gc] GC(182) Pause Full (G1 Compaction Pause) 252M->251M(256M) 74.626ms\n[18.548s][info][gc] GC(183) Pause Young (Normal) (G1 Preventive Collection) 252M->251M(256M) 0.428ms\n[18.548s][info][gc] GC(184) Pause Young (Concurrent Start) (G1 Evacuation Pause) 252M->252M(256M) 0.424ms\n[18.624s][info][gc] GC(186) Pause Full (G1 Compaction Pause) 252M->251M(256M) 75.117ms\n[18.624s][info][gc] GC(187) Pause Young (Normal) (G1 Preventive Collection) 252M->251M(256M) 0.413ms\n[18.625s][info][gc] GC(188) Pause Young (Concurrent Start) (G1 Evacuation Pause) 252M->252M(256M) 0.521ms\n[18.699s][info][gc] GC(190) Pause Full (G1 Compaction Pause) 252M->251M(256M) 74.142ms\n[18.699s][info][gc] GC(191) Pause Young (Normal) (G1 Preventive Collection) 252M->251M(256M) 0.389ms\n[18.700s][info][gc] GC(192) Pause Young (Concurrent Start) (G1 Evacuation Pause) 252M->252M(256M) 0.731ms\n[18.774s][info][gc] GC(194) Pause Full (G1 Compaction Pause) 252M->251M(256M) 73.633ms\n[18.774s][info][gc] GC(195) Pause Young (Normal) (G1 Preventive Collection) 252M->252M(256M) 0.414ms\n[18.775s][info][gc] GC(196) Pause Young (Concurrent Start) (G1 Evacuation Pause) 253M->253M(256M) 0.422ms\n[18.852s][info][gc] GC(198) Pause Full (G1 Compaction Pause) 253M->251M(256M) 77.190ms\n[18.853s][info][gc] GC(199) Pause Young (Normal) (G1 Evacuation Pause) 252M->252M(256M) 0.427ms\n[18.928s][info][gc] GC(200) Pause Full (G1 Compaction Pause) 252M->252M(256M) 74.862ms\n[18.928s][info][gc] GC(201) Pause Young (Concurrent Start) (G1 Evacuation Pause) 253M->253M(256M) 0.477ms"};
+/*SIM-START*/
+// GC 日志体检：和 study-labs 里的 GcLogStats.java 同一套算法。
+// 只认统一日志里带停顿时长的那一行：[12.3s]...[gc] GC(17) Pause Young (Normal) (G1 Evacuation Pause) 150M->20M(256M) 3.1ms
+var PAUSE_RE = /\[(\d+\.\d+)s\].*\[gc\s*\] GC\((\d+)\) (Pause \w+(?: \([^)]*\))*) (\d+)M->(\d+)M\((\d+)M\) (\d+\.\d+)ms/;
+var CAUSES = / \((G1 Evacuation Pause|G1 Humongous Allocation|Allocation Failure|Ergonomics|System\.gc\(\)|G1 Compaction Pause|Heap Inspection Initiated GC)\)/g;
+function parseLog(text) {
+  var out = [];
+  text.split(/\r?\n/).forEach(function (line) {
+    var m = PAUSE_RE.exec(line);
+    if (!m) return;
+    var kind = m[3].replace(CAUSES, '');
+    out.push({ t: +m[1], kind: kind, before: +m[4], after: +m[5], cap: +m[6], ms: +m[7], full: kind.indexOf('Pause Full') === 0 });
+  });
+  return out;
+}
+function pct(sorted, q) { return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))]; }
+function analyze(p, targetMs, targetPct) {
+  if (!p.length) return null;
+  var total = 0, max = 0, alloc = 0, kinds = {}, ms = [];
+  p.forEach(function (x, i) {
+    total += x.ms; max = Math.max(max, x.ms); ms.push(x.ms);
+    if (i > 0) alloc += Math.max(0, x.before - p[i - 1].after);
+    kinds[x.kind] = (kinds[x.kind] || 0) + 1;
+  });
+  ms.sort(function (a, b) { return a - b; });
+  var span = p[p.length - 1].t - p[0].t + p[0].ms / 1000;   // 时间戳记在停顿结束时，从第一次停顿开始的那一刻算起
+  var share = span > 0 ? total / 1000 / span * 100 : NaN;
+  var half = Math.floor(p.length / 2), a1 = 0, a2 = 0, minAfter = Infinity;
+  p.forEach(function (x, i) { minAfter = Math.min(minAfter, x.after); if (i < half) a1 += x.after; else a2 += x.after; });
+  a1 /= Math.max(1, half); a2 /= (p.length - half);
+  var cap = p[p.length - 1].cap, last = p[p.length - 1].after;
+  var full = 0, stillFull = 0;
+  p.forEach(function (x) { if (x.full) { full++; if (x.after > x.cap * 0.9) stillFull++; } });
+  var code, verdict;
+  if (full > 0 && stillFull * 2 >= full) { code = 'code'; verdict = 'Full GC 之后堆还是满的：回收不掉，是代码问题（泄漏，或者活对象本来就太多）。先做堆转储或直方图，别动 GC 参数。'; }
+  else if (a2 > a1 * 1.3 && a2 > cap * 0.5) { code = 'code'; verdict = 'GC 后的占用一路上涨：疑似泄漏。多看一段时间、取两次直方图对比，再下结论。'; }
+  else if (full > 0) { code = 'param'; verdict = '有 Full GC，但回收后降下来了：堆相对活对象太小，或者晋升太快。先看堆是不是活对象的好几倍，以及收集器的分代方式放不放得下活对象。'; }
+  else if (max > targetMs || share > targetPct) { code = 'param'; verdict = '没有 Full GC，但没达标：停顿超了，看每次要复制多少活对象；占比超了，考虑加大堆或新生代，或者减少分配。'; }
+  else { code = 'ok'; verdict = '达标：别动参数。'; }
+  return { n: p.length, span: span, total: total, share: share, max: max, p50: pct(ms, 0.5), p99: pct(ms, 0.99),
+    alloc: span > 0 ? alloc / span : NaN, minAfter: minAfter, a1: a1, a2: a2, last: last, cap: cap, full: full, stillFull: stillFull,
+    kinds: kinds, code: code, verdict: verdict, overMs: max > targetMs, overPct: share > targetPct };
+}
+/*SIM-END*/
+
+(function () {
+  // ---- leak chart tooltip ----
+  var box = document.getElementById('leak-box'), tip = document.getElementById('leak-tip');
+  if (box && tip) {
+    box.querySelectorAll('.pt').forEach(function (c) {
+      c.addEventListener('mouseenter', function () {
+        var r = box.getBoundingClientRect(), cr = c.getBoundingClientRect();
+        tip.textContent = c.getAttribute('data-tip');
+        tip.hidden = false;
+        var x = cr.left - r.left + box.scrollLeft, y = cr.top - r.top - 34;
+        tip.style.left = Math.max(4, Math.min(x - 80, box.scrollWidth - 250)) + 'px';
+        tip.style.top = Math.max(0, y) + 'px';
+        c.setAttribute('r', 6);
+      });
+      c.addEventListener('mouseleave', function () { tip.hidden = true; c.setAttribute('r', c.getAttribute('fill') === 'var(--bad)' ? 4 : 2.5); });
+    });
+  }
+
+  // ---- lab ----
+  var ANS = { b: 'ok', c: 'param', g: 'code' };
+  var OPTS = [['ok', '达标，别动参数'], ['param', '调参数：堆大小或收集器'], ['code', '改代码：先做堆转储']];
+  var WHY = {
+    b: '三样数都在目标以内，回收后的占用平稳在 200 MB 出头（④-2）。',
+    c: '每一行都是 Full GC，但回收后稳定在 201 MB、没有上涨，所以不是泄漏。Parallel 的老年代固定为 171 MB，装不下 201 MB 的活对象（④-3），是参数问题。',
+    g: 'Full GC 一次接一次，回收后还在 250 MB 上下，几乎回收不动：活对象一直在涨，加堆只会推迟 OOM（④-2、⑤ 第 6 步）。'
+  };
+  var $ = function (id) { return document.getElementById(id); };
+  var cur = null, guessed = null, ran = false;
+  var logEl = $('lab-log'), t1 = $('lab-t1'), t2 = $('lab-t2');
+
+  function pick(k) {
+    cur = k; guessed = null; ran = false;
+    document.querySelectorAll('#lab-presets button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.k === k ? 'true' : 'false'); });
+    logEl.value = SAMPLES[k];
+    $('lab-q').textContent = '这段日志说明：下一步该做什么？';
+    var o = $('lab-opts'); o.innerHTML = '';
+    OPTS.forEach(function (op) {
+      var b = document.createElement('button'); b.type = 'button'; b.textContent = op[1]; b.dataset.v = op[0];
+      b.addEventListener('click', function () {
+        guessed = op[0];
+        o.querySelectorAll('button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); x.classList.remove('right', 'wrong'); });
+        $('lab-ans').hidden = true;
+        $('lab-tip').textContent = '猜好了，点“体检”看答案。';
+      });
+      o.appendChild(b);
+    });
+    $('lab-ans').hidden = true;
+    $('lab-mtx').innerHTML = '';
+    $('lab-res').textContent = '还没体检。';
+    $('lab-tip').textContent = '先在上面三个选项里猜一个，再点“体检”。';
+  }
+  function fmt(v, d) { return isFinite(v) ? v.toFixed(d) : '—'; }
+  function run() {
+    ran = true;
+    var r = analyze(parseLog(logEl.value), +t1.value || 50, +t2.value || 5);
+    var mtx = $('lab-mtx'), res = $('lab-res');
+    if (!r) {
+      mtx.innerHTML = '';
+      res.textContent = '没找到停顿行。需要 -Xlog:gc 或 -Xlog:gc* 的输出，并保留默认的 [uptime] 装饰，形如：[7.871s][info][gc] GC(100) Pause Young (Normal) (G1 Evacuation Pause) 226M->206M(256M) 1.897ms';
+      return;
+    }
+    var cells = [
+      ['GC 时间占比', fmt(r.share, 1) + '%', r.overPct ? 'over' : 'okk'],
+      ['最长停顿', fmt(r.max, 1) + ' ms', r.overMs ? 'over' : 'okk'],
+      ['停顿 p50 / p99', fmt(r.p50, 1) + ' / ' + fmt(r.p99, 1), ''],
+      ['停顿次数 · Full GC', r.n + ' · ' + r.full, r.full ? 'over' : ''],
+      ['统计时长', fmt(r.span, 2) + ' 秒', ''],
+      ['分配速率', fmt(r.alloc, 0) + ' MB/s', ''],
+      ['GC 后占用：前半 → 后半', fmt(r.a1, 0) + ' → ' + fmt(r.a2, 0) + ' MB', r.a2 > r.cap * 0.9 ? 'over' : ''],
+      ['堆上限', fmt(r.cap, 0) + ' MB', '']
+    ];
+    mtx.innerHTML = cells.map(function (c) { return '<div class="' + c[2] + '"><span>' + c[0] + '</span><b>' + c[1] + '</b></div>'; }).join('');
+    var kinds = Object.keys(r.kinds).map(function (k) { return k + ' × ' + r.kinds[k]; }).join('；');
+    res.innerHTML = '<b>结论：</b>' + r.verdict + '<ul><li>停顿类型：' + kinds + '</li><li>Full GC 后仍占堆 90% 以上：' + r.stillFull + ' / ' + r.full + ' 次</li></ul>';
+    res.dataset.role = r.code === 'ok' ? 'done' : (r.code === 'code' ? 'bad' : 'of');
+    if (cur && guessed && logEl.value === SAMPLES[cur]) {
+      var right = guessed === ANS[cur];
+      $('lab-opts').querySelectorAll('button').forEach(function (x) {
+        if (x.dataset.v === ANS[cur]) x.classList.add('right');
+        else if (x.dataset.v === guessed) x.classList.add('wrong');
+      });
+      var a = $('lab-ans'); a.hidden = false;
+      a.textContent = (right ? '猜对了。' : '没猜对。') + WHY[cur];
+    }
+    $('lab-tip').textContent = '改目标或者改日志，结果会马上重算；也可以把自己的日志粘进来。';
+  }
+  document.querySelectorAll('#lab-presets button').forEach(function (b) { b.addEventListener('click', function () { pick(b.dataset.k); }); });
+  $('lab-run').addEventListener('click', run);
+  [t1, t2].forEach(function (el) { el.addEventListener('input', function () { if (ran) run(); }); });
+  logEl.addEventListener('input', function () { if (ran) run(); });
+  pick('c');
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

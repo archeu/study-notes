@@ -139,6 +139,7 @@
 | 01 | [JVM 内存结构](https://archeu.github.io/study-notes/jvm/jvm-memory-structure.html) | 一个 Java 进程的内存分成哪几块：线程私有的栈、共享的堆、堆外的元空间和直接内存，栈和堆怎么配合、对象头和对象大小、为什么分代，六种 OOM 怎么认、容器被杀的原因，实测撑爆四块内存（JDK 17），分代实验台 |
 | 02 | [G1 和 ZGC 怎么回收](https://archeu.github.io/study-notes/jvm/g1-zgc.html) | 回收的三件事谁要停下来做、G1 的 Region 和记忆集、并发标记与混合回收、停顿预测、ZGC 的染色指针、读屏障和并发搬迁、为什么一个停顿里搬一个边跑边搬、六个坑和版本差异，实测 Parallel、G1、ZGC 四组对比（JDK 17），G1 和 ZGC 实验台 |
 | 03 | [new 一个对象的全过程：分配、对象头与内存布局](https://archeu.github.io/study-notes/jvm/jvm-object-new-layout.html) | new 的五步、TLAB 快速 / 慢速路径、mark word 与类指针、字段重排与对齐、压缩指针为什么卡在 32 GB、JOL 与关 TLAB 实测，对象布局实验台 |
+| 04 | [GC 日志与调优：先定目标，再动参数](https://archeu.github.io/study-notes/jvm/jvm-gc-log-tuning.html) | 三个目标的取舍、一行日志怎么读、占比 / 最长停顿 / 回收后占用三样数、Parallel 固定分代 vs G1 自适应、交易靶场大促与泄漏实测、GC 日志体检台 |
 
 ## Java 基础
 
