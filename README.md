@@ -142,6 +142,7 @@
 | 04 | [GC 日志与调优：先定目标，再动参数](https://archeu.github.io/study-notes/jvm/jvm-gc-log-tuning.html) | 三个目标的取舍、一行日志怎么读、占比 / 最长停顿 / 回收后占用三样数、Parallel 固定分代 vs G1 自适应、交易靶场大促与泄漏实测、GC 日志体检台 |
 | 05 | [类加载与双亲委派：SPI 为什么要打破它](https://archeu.github.io/study-notes/jvm/jvm-classloading.html) | 类的一生、三层加载器与 loadClass 源码、类的身份、为什么先问上级、SPI 借 TCCL 反向加载与 Tomcat 子优先、元空间泄漏实测，委派走一遍实验台 |
 | 06 | [JIT、逃逸分析与常见的性能误区](https://archeu.github.io/study-notes/jvm/jvm-jit-escape.html) | 分层编译、内联和去虚化、逃逸分析与标量替换、去优化、热点 NPE 丢堆栈和预热等坑、六个性能误区，逃逸判定台 |
+| 07 | [JVM 故障排查：OOM、频繁 Full GC、CPU 飙高](https://archeu.github.io/study-notes/jvm/jvm-troubleshooting.html) | 常见误判、先留现场再分两条路线、OOM 抛给了谁、Full GC 后降不降、shallow 和 retained、nid 对到一行、交易靶场三个雷实测（MAT、Humongous、JFR 分配和方法采样）、启动参数模板，排查练习台 |
 
 ## Java 基础
 

@@ -1,0 +1,1561 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>JVM 故障排查：OOM、频繁 Full GC、CPU 飙高</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six steps for a troubleshooting topic (① 现象 ② 常见误判 ③ 排查路线 ④ 背后的机制 ⑤ 复现一次 ⑥ 根治和预防 ↺), J03 panorama stop 9. Roles: pd blue = memory route "who holds it" (leak, heap dump); of amber = memory route "who allocates" (big objects, frequent Full GC); cg purple = CPU route (threads, jstack, JFR); warn orange = off-heap / container; bk teal = evidence & tools; bad/good/other fixed. Interaction: evidence-to-route trainer in ⑥ (guess first, then reveal). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+body{overflow-x:clip}
+.lab-h{font-family:var(--font-display);font-weight:400;font-size:20px}
+#eb-res p{margin:0 0 4px}
+#eb-res .note-p{font-size:13px;color:var(--muted)}
+#eb pre{white-space:pre;overflow-x:auto}
+
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2;fill:none}
+.e-warn{stroke:var(--warn);stroke-width:2.5;fill:none}
+.misj{border-collapse:collapse}
+.ev-card{font-family:var(--font-mono);font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--console-bg);color:var(--console-fg);border-radius:12px;padding:10px 12px;margin:0}
+.tr-nav{display:flex;flex-wrap:wrap;gap:6px}
+.tr-nav button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:var(--font-mono)}
+.tr-nav button[aria-current="true"]{border-color:var(--ink);background:var(--ink);color:var(--paper)}
+.tr-nav button.ok{border-color:var(--good)}
+.tr-nav button.ng{border-color:var(--bad)}
+.tr-score{font-size:13.5px;color:var(--muted)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>JVM</span><span aria-hidden="true">/</span><span class="tb-here">JVM 故障排查：OOM、频繁 Full GC、CPU 飙高</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-good" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-pd" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-of" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-cg" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-mut" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+
+<header class="hero">
+  <p class="kicker">OutOfMemoryError · 频繁 Full GC · CPU 飙高 · 留现场 · HeapDumpOnOutOfMemoryError · GC.class_histogram · 堆转储 · MAT · GC Roots · 支配树 · retained size · Humongous · top -H · jstack · nid · JFR · ExecutionSample · ObjectAllocationSample · NMT · OOMKilled</p>
+  <h1>JVM 故障排查：三种现象，其实只有两个问题要回答：内存是“谁拉着、谁在猛分配”，CPU 是“哪个线程在跑哪一行”。证据要在出事之前就埋好</h1>
+  <p class="lead">OOM、频繁 Full GC、CPU 飙高看起来是三种病，查起来只有两条路。<b>内存路线</b>先看 Full GC 之后堆降不降：不降是有东西一直被拉着（泄漏），拿<b>堆转储</b>顺着引用链找到 GC Root；降了是分配太猛（大对象、一阵阵的峰），拿 GC 日志和 <b>JFR 分配采样</b>找到是谁在分配。<b>CPU 路线</b>先用 <code>top -H</code> 看吃 CPU 的是哪个线程：是 GC 线程就转回内存路线，是业务线程就用 <code>jstack</code> 或 JFR 对到那一行。交易靶场订单服务里埋了三个雷，本机实测：泄漏 16 秒后 OOM，进程还活着却一个请求都不回；大导出让 30 秒里发生 401 次 Full GC；一张一分钱的优惠券让一个核一直 100%。三个雷都在 5 分钟内定位到了具体的对象和代码行。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>现象</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>常见误判</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>排查路线</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>背后的机制</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>复现一次</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>根治和预防</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j03-object-new-to-gc.html#s-9">一个对象从 new 到被回收 · 第 9 站</a></span><span>地图：<a href="../java/roadmap.html#j03">J03 · JVM 故障排查：OOM、频繁 Full GC、CPU 飙高</a></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>现象：服务出了事，要在 5 分钟内说出“是谁”</h2>
+    <p class="lead">在全景第 9 站，订单 9527 被一个只放不删的缓存拉着，第 8 站的 GC 日志里 Full GC 一次比一次密，最后 Full GC 之后还是放不下新对象，JVM 抛出 <code>OutOfMemoryError</code>。这一步要解决的是：<b>5 分钟内定位到是哪个对象占了内存、被谁拉着</b>（地图上 J03 的过关题之二）。线上还有两种长得像、病根不同的情况：老年代反复被撑满但不 OOM，以及 CPU 被打满。下面是交易靶场订单服务里埋的三个雷，每个都在本机跑出了现象。</p>
+  </div>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="交易靶场订单服务的三个接口各埋了一个雷。/order 每下一单就往静态的 RECENT 表里放一份，从来不删，16 秒后 OutOfMemoryError，进程还活着、端口还在监听，但请求全部没有回音。/export 把 20 万行订单拼成一个将近 10 MB 的字符串，再复制几份写出去，4 个并发导出时 30 秒里发生 401 次 Full GC，累计停顿 20.8 秒，9 个请求失败。/coupon 把一分钱的优惠券按比例分给两件商品，每件分到 0 分，循环永远退不出去，一个 CPU 核一直 100%，别的请求照常返回。">
+  <rect class="b-card" x="16" y="16" width="190" height="268" rx="14"/>
+  <text class="t-h" x="111" y="46" text-anchor="middle">交易靶场订单服务</text>
+  <text class="t-monos" x="111" y="68" text-anchor="middle">TradeServer</text>
+  <text class="t-xs" x="111" y="88" text-anchor="middle">JDK 17 · G1</text>
+  <text class="t-xs" x="111" y="104" text-anchor="middle">8 个 http-exec 线程</text>
+  <text class="t-xs" x="111" y="250" text-anchor="middle">订单 9527 起步</text>
+  <text class="t-xs" x="111" y="266" text-anchor="middle">用户 1024 · 88 号键盘 × 2</text>
+
+  <rect class="b-pd" x="226" y="24" width="150" height="72" rx="10"/>
+  <text class="t-mono" x="301" y="52" text-anchor="middle">/order</text>
+  <text class="t-xs" x="301" y="72" text-anchor="middle">每秒约 7000 单</text>
+  <rect class="b-of" x="226" y="114" width="150" height="72" rx="10"/>
+  <text class="t-mono" x="301" y="142" text-anchor="middle">/export</text>
+  <text class="t-xs" x="301" y="162" text-anchor="middle">4 个并发导出</text>
+  <rect class="b-cg" x="226" y="204" width="150" height="72" rx="10"/>
+  <text class="t-mono" x="301" y="232" text-anchor="middle">/coupon?cents=1</text>
+  <text class="t-xs" x="301" y="252" text-anchor="middle">只来了 1 个请求</text>
+  <path class="e-mut" d="M206 60H222M206 150H222M206 240H222" marker-end="url(#ah-mut)"/>
+
+  <rect class="b-card" x="396" y="24" width="250" height="72" rx="10"/>
+  <text class="t-s" x="410" y="50">RECENT.put(9527, 订单)</text>
+  <text class="t-xs" x="410" y="70">“防重复提交记一下”，从来不删</text>
+  <text class="t-xs" x="410" y="86">每单带 1 KB 下单快照</text>
+  <rect class="b-card" x="396" y="114" width="250" height="72" rx="10"/>
+  <text class="t-s" x="410" y="140">20 万行拼成一个字符串</text>
+  <text class="t-xs" x="410" y="160">约 9.6 MB，再 toString、getBytes</text>
+  <text class="t-xs" x="410" y="176">每份都是“大对象”</text>
+  <rect class="b-card" x="396" y="204" width="250" height="72" rx="10"/>
+  <text class="t-s" x="410" y="230">1 分钱按比例分给 2 件商品</text>
+  <text class="t-xs" x="410" y="250">1 × 29900 / 59800 = 0，分不出去</text>
+  <text class="t-xs" x="410" y="266">while (remaining &gt; 0) 永远成立</text>
+  <path class="e-pd" d="M376 60H392" marker-end="url(#ah-pd)"/>
+  <path class="e-of" d="M376 150H392" marker-end="url(#ah-of)"/>
+  <path class="e-cg" d="M376 240H392" marker-end="url(#ah-cg)"/>
+
+  <rect class="b-bad" x="666" y="24" width="278" height="72" rx="10"/>
+  <text class="t-bad" x="680" y="48">第 16 秒 OutOfMemoryError</text>
+  <text class="t-xs" x="680" y="68">进程活着、端口在听，请求全部没回音</text>
+  <text class="t-xs" x="680" y="84">应用日志里连异常栈都没打出来</text>
+  <rect class="b-bad" x="666" y="114" width="278" height="72" rx="10"/>
+  <text class="t-bad" x="680" y="138">30 秒 401 次 Full GC</text>
+  <text class="t-xs" x="680" y="158">停顿累计 20.8 秒，最慢的请求 30.6 秒</text>
+  <text class="t-xs" x="680" y="174">9 个请求 OOM，进程没死</text>
+  <rect class="b-bad" x="666" y="204" width="278" height="72" rx="10"/>
+  <text class="t-bad" x="680" y="228">一个核一直 100%</text>
+  <text class="t-xs" x="680" y="248">那个请求永远不返回</text>
+  <text class="t-xs" x="680" y="264">别的请求照常 2 ms 返回</text>
+  <path class="e-bad" d="M646 60H662M646 150H662M646 240H662" marker-end="url(#ah-bad)"/>
+</svg>
+  </div>
+  <div class="facts">
+    <div class="fact" data-role="pd"><h4>谁拉着</h4><p>OOM 和“Full GC 之后堆不降”：要找到那个一直不放手的引用 <span class="tag-real">实测 128.7 MB 被 1 个 static 字段拉着</span></p></div>
+    <div class="fact" data-role="of"><h4>谁在猛分配</h4><p>Full GC 很密，但每次都能降下来：要找到一阵阵分配大块内存的代码 <span class="tag-real">实测 97% 的分配在导出接口</span></p></div>
+    <div class="fact" data-role="cg"><h4>哪个线程哪一行</h4><p>CPU 打满：要找到在跑的线程和它卡住的那一行 <span class="tag-real">实测 <code>Coupon.java:19</code></span></p></div>
+    <div class="fact" data-role="bk"><h4>5 分钟</h4><p>前提是证据已经在：GC 日志开着、OOM 时自动转储、出事时先拍线程转储再重启</p></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>常见误判：每一条都“看起来对”，因为它让症状暂时消失了</h2>
+    <p class="lead">排查最怕的不是不会用工具，而是一上来就下结论。下面六条在交易靶场里都能找到反例，最后一列是 ⑤ 里实测到的。</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>误判</th><th>为什么看起来对</th><th>错在哪</th></tr></thead>
+      <tbody>
+        <tr><th>先重启，恢复了再说</th><td>重启后服务马上正常</td><td>堆里是谁、线程在跑什么，全跟着进程没了。泄漏过几小时又会回来，到时还是两手空空。</td></tr>
+        <tr><th>OOM 了就把堆调大</th><td>OOM 确实来得晚了</td><td>泄漏是只进不出，多大的堆都会填满。GC 日志页实测：同样的泄漏，256 MB 第 21.4 秒 OOM，512 MB 第 54.0 秒 OOM。</td></tr>
+        <tr><th>照着 OOM 的异常栈去改那一行</th><td>异常栈指着一行具体代码</td><td>OOM 抛给“最后一个想要内存”的线程，它多半是受害者。⑤ 里泄漏的是 <code>/order</code>，最先拿到 OOM 的却是 <code>HTTP-Dispatcher</code>、<code>idle-timeout-task</code> 这些线程。</td></tr>
+        <tr><th>CPU 高，就是业务代码慢</th><td>业务一忙 CPU 就高</td><td>⑤ 大导出时，两个 <code>GC Thread</code> 各吃掉 72% 和 71% 的核，业务线程每个才 4%。这时该查的是内存。</td></tr>
+        <tr><th>拍一张线程转储就下结论</th><td>转储里确实有一堆 RUNNABLE</td><td>一张转储只是某一瞬间。隔几秒拍两三张，同一个线程一直停在同一行，才算抓到，⑤ 里看的就是 <code>cpu=</code> 涨了多少。</td></tr>
+        <tr><th>Pod 重启了，当成堆 OOM 去查</th><td>“内存不够”听起来是一回事</td><td>被内核杀掉的进程没有 <code>OutOfMemoryError</code>，也不会留堆转储。退出码 137 先查堆外和容器限额，见 <a href="jvm-memory-structure.html">JVM 内存结构</a>。</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">这六条错在同一个地方：<b>没拿到证据就动手</b>。所以排查路线的第 0 步一律是留现场；后面每一步都是“先看这一条证据，再决定往哪走”，不靠猜。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>排查路线：先留现场，再按证据分两条路走</h2>
+    <p class="lead">从现象出发，每个岔口只看一条证据。三种现象最后只落到四个终点：谁拉着、谁在猛分配、哪个线程哪一行、堆外。CPU 高的那一路有一个回头箭头：吃 CPU 的要是 GC 线程，就回到内存路线。</p>
+  </div>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 470" role="img" aria-label="排查路线图。第 0 步先留现场：隔几秒拍三次线程转储、保住 GC 日志、自动或手动的堆转储、容器事件。然后按现象分三列。左列：进程没了或 Pod 被重启、日志里没有异常，看退出码是不是 137、容器事件是不是 OOMKilled，是的话就不是堆的问题，查堆外，用 NMT。中列：OutOfMemoryError 或频繁 Full GC，看 GC 日志里 Full GC 之后堆降不降。不降，比如 125M 到 125M，是泄漏，用堆转储和 MAT 的支配树找谁拉着；降了，比如 228M 到 193M，是分配太猛或大对象，用 GC 日志里的 Humongous 和 JFR 分配采样找谁在分配。右列：CPU 飙高，用 top -H 看哪个线程吃 CPU。GC 线程就转回中列；C2 编译线程看 JIT 预热；业务线程用 jstack 隔几秒拍几次或 JFR 采样，对到那一行。">
+  <rect class="b-bk" x="180" y="12" width="600" height="58" rx="12"/>
+  <text class="t-h" x="480" y="36" text-anchor="middle">第 0 步：先留现场，别急着重启</text>
+  <text class="t-xs" x="480" y="56" text-anchor="middle">jstack 隔几秒拍 3 次 · 保住 GC 日志 · 堆转储（OOM 时自动的，或先摘流量再手动拍） · 容器事件和退出码</text>
+  <path class="e-ink" d="M300 70V96M480 70V96M800 70V96" marker-end="url(#ah-ink)"/>
+
+  <rect class="b-warn" x="16" y="100" width="290" height="58" rx="10"/>
+  <text class="t-b" x="161" y="124" text-anchor="middle">进程没了、Pod 被重启</text>
+  <text class="t-xs" x="161" y="144" text-anchor="middle">应用日志里没有任何异常</text>
+  <rect class="b-card" x="16" y="186" width="290" height="52" rx="10"/>
+  <text class="t-s" x="161" y="208" text-anchor="middle">退出码 137？容器事件 OOMKilled？</text>
+  <text class="t-xs" x="161" y="227" text-anchor="middle">内核按整个进程的内存杀的，不是 JVM</text>
+  <rect class="b-warn" x="16" y="270" width="290" height="80" rx="10"/>
+  <text class="t-warn" x="30" y="294">不是堆：查堆外</text>
+  <text class="t-xs" x="30" y="314">线程栈 · 直接内存 · 元空间 · 代码缓存</text>
+  <text class="t-xs" x="30" y="332">GC 自己的数据结构</text>
+  <rect class="b-card" x="16" y="382" width="290" height="70" rx="10"/>
+  <text class="t-mono" x="30" y="406">jcmd &lt;pid&gt; VM.native_memory</text>
+  <text class="t-xs" x="30" y="426">要先开 -XX:NativeMemoryTracking=summary</text>
+  <text class="t-xs" x="30" y="442">→ JVM 内存结构页 · 容器里的 JVM</text>
+  <path class="e-ink" d="M161 158V182M161 238V266M161 350V378" marker-end="url(#ah-ink)"/>
+
+  <rect class="b-pd" x="330" y="100" width="300" height="58" rx="10"/>
+  <text class="t-b" x="480" y="124" text-anchor="middle">OutOfMemoryError: Java heap space</text>
+  <text class="t-xs" x="480" y="144" text-anchor="middle">或者 Full GC 一次接一次</text>
+  <rect class="b-card" x="330" y="186" width="300" height="52" rx="10"/>
+  <text class="t-s" x="480" y="208" text-anchor="middle">GC 日志：Full GC 之后，堆降不降？</text>
+  <text class="t-xs" x="480" y="227" text-anchor="middle">Full GC 之后剩下的 ≈ 还活着的对象</text>
+  <rect class="b-pd" x="330" y="270" width="144" height="80" rx="10"/>
+  <text class="t-pd" x="344" y="294">不降 · 泄漏</text>
+  <text class="t-monos" x="344" y="314">125M-&gt;125M</text>
+  <text class="t-xs" x="344" y="332">有东西一直拉着</text>
+  <rect class="b-of" x="486" y="270" width="144" height="80" rx="10"/>
+  <text class="t-of" x="500" y="294">降 · 分配太猛</text>
+  <text class="t-monos" x="500" y="314">228M-&gt;193M</text>
+  <text class="t-xs" x="500" y="332">大对象 · 一阵阵的峰</text>
+  <rect class="b-pd" x="330" y="382" width="144" height="70" rx="10"/>
+  <text class="t-b" x="344" y="404">谁拉着</text>
+  <text class="t-xs" x="344" y="424">堆转储 + MAT</text>
+  <text class="t-xs" x="344" y="440">支配树、到 GC Root 的路</text>
+  <rect class="b-of" x="486" y="382" width="144" height="70" rx="10"/>
+  <text class="t-b" x="500" y="404">谁在猛分配</text>
+  <text class="t-xs" x="500" y="424">GC 日志里的 Humongous</text>
+  <text class="t-xs" x="500" y="440">JFR 分配采样</text>
+  <path class="e-ink" d="M480 158V182" marker-end="url(#ah-ink)"/>
+  <path class="e-pd" d="M430 238V266M402 350V378" marker-end="url(#ah-pd)"/>
+  <path class="e-of" d="M530 238V266M558 350V378" marker-end="url(#ah-of)"/>
+
+  <rect class="b-cg" x="654" y="100" width="290" height="58" rx="10"/>
+  <text class="t-b" x="799" y="124" text-anchor="middle">CPU 飙高、RT 变长</text>
+  <text class="t-xs" x="799" y="144" text-anchor="middle">top 里 java 进程 100% 以上</text>
+  <rect class="b-card" x="654" y="186" width="290" height="52" rx="10"/>
+  <text class="t-s" x="799" y="208" text-anchor="middle">top -H -p：哪个线程在吃 CPU？</text>
+  <text class="t-xs" x="799" y="227" text-anchor="middle">看线程名，Java 线程和内核线程一一对应</text>
+  <rect class="b-neu" x="654" y="270" width="92" height="80" rx="10"/>
+  <text class="t-b" x="700" y="294" text-anchor="middle">GC Thread</text>
+  <text class="t-xs" x="700" y="312" text-anchor="middle">G1 Conc</text>
+  <text class="t-xs" x="700" y="334" text-anchor="middle">← 回内存路线</text>
+  <rect class="b-neu" x="753" y="270" width="92" height="80" rx="10"/>
+  <text class="t-b" x="799" y="294" text-anchor="middle">C2 Compiler</text>
+  <text class="t-xs" x="799" y="312" text-anchor="middle">刚启动时多见</text>
+  <text class="t-xs" x="799" y="334" text-anchor="middle">→ JIT 预热</text>
+  <rect class="b-cg" x="852" y="270" width="92" height="80" rx="10"/>
+  <text class="t-b" x="898" y="294" text-anchor="middle">业务线程</text>
+  <text class="t-monos" x="898" y="312" text-anchor="middle">http-exec-5</text>
+  <text class="t-xs" x="898" y="334" text-anchor="middle">往下走</text>
+  <rect class="b-cg" x="754" y="382" width="190" height="70" rx="10"/>
+  <text class="t-b" x="768" y="404">哪个线程哪一行</text>
+  <text class="t-xs" x="768" y="424">jstack 隔 2 秒拍几次</text>
+  <text class="t-xs" x="768" y="440">或 JFR 方法采样</text>
+  <path class="e-ink" d="M799 158V182" marker-end="url(#ah-ink)"/>
+  <path class="e-cg" d="M700 238V266M799 238V266M898 238V266M898 350V378" marker-end="url(#ah-cg)"/>
+  <path class="e-ofd" d="M700 350V366H642V212H634" marker-end="url(#ah-of)"/>
+</svg>
+  </div>
+  <p class="tip">OOM 冒号后面要是别的字，路线换一条：<code>Metaspace</code> 是类加载器被拉着，查法和“谁拉着”一样，只是看的是类加载器（见<a href="jvm-classloading.html">类加载页</a>）；<code>Direct buffer memory</code> 和 <code>unable to create native thread</code> 走左列的堆外；<code>GC overhead limit exceeded</code> 只有 Parallel 收集器会报，按“谁拉着”查。完整的对照表在 <a href="jvm-memory-structure.html">JVM 内存结构</a>。</p>
+
+  <h3>手上的工具：越往下信息越多，代价也越大</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>工具</th><th>回答什么</th><th>代价</th><th>什么时候用</th></tr></thead>
+      <tbody>
+        <tr><th><code>jstat -gcutil &lt;pid&gt; 1s</code></th><td>各区占用百分比、GC 次数和累计时间</td><td>几乎为零</td><td>第一眼：Full GC 次数在不在涨</td></tr>
+        <tr><th>GC 日志 <code>-Xlog:gc*</code></th><td>每次 GC 的原因、前后占用、停顿</td><td>很小，一直开着</td><td>判断“降不降”，看有没有 Humongous（<a href="jvm-gc-log-tuning.html">GC 日志页</a>）</td></tr>
+        <tr><th><code>jcmd &lt;pid&gt; GC.class_histogram</code></th><td>每个类有多少个、占多少字节</td><td>先做一次 Full GC，停顿 ⑤ 实测 30.5 ms（128 MB 堆）</td><td>先看“是什么”最多</td></tr>
+        <tr><th>堆转储 + MAT</th><td>谁拉着谁、每个对象“连带”占多少</td><td>停住整个进程写文件，文件和已用堆一样大</td><td>回答“被谁拉着”</td></tr>
+        <tr><th><code>top -H -p &lt;pid&gt;</code></th><td>每个线程的 CPU</td><td>零</td><td>CPU 高时的第一眼</td></tr>
+        <tr><th><code>jstack</code> / <code>jcmd Thread.print</code></th><td>那一瞬间每个线程停在哪一行</td><td>短暂停顿；一张只是一瞬间</td><td>隔几秒拍几张，对比</td></tr>
+        <tr class="hl"><th>JFR</th><td>一段时间里的方法采样、分配采样、锁、GC 事件</td><td>官方文档说默认配置的开销通常不到 1%，可以一直开</td><td>“这一分钟里时间和内存花在哪”</td></tr>
+        <tr><th>NMT</th><td>堆外每一块各占多少</td><td>要启动时开，有少量开销</td><td>被 OOMKilled、进程内存比堆大很多</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">选择规则：<b>便宜的一直开</b>（GC 日志、JFR 连续录制、OOM 时自动转储），出事时<b>先拍一定拿得到的</b>（线程转储、jstat），<b>最贵的最后拍</b>（堆转储，先摘流量）。本页的两条路线就用这几样：内存用 GC 日志 + 直方图 + 堆转储 + JFR 分配采样，CPU 用 top -H + jstack + JFR 方法采样。async-profiler、Arthas 这类第三方工具能做得更顺手，列进“下一圈”。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>背后的机制：OOM 抛给了谁，Full GC 之后的数字为什么能分出泄漏，堆转储和线程转储怎么对到“谁”</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>可达性</b>：从 GC Roots（线程栈上的局部变量、类的 static 字段、JNI 引用等）顺着引用走得到的对象就是活的，GC 不收。见 <a href="g1-zgc.html">垃圾回收：分代、可达性、G1、ZGC</a>。</li>
+      <li><b>大对象</b>（Humongous）：G1 里超过半个 region 的对象直接在老年代占连续的几个 region。堆 128～256 MB 时 region 是 1 MB，门槛 512 KB。见 <a href="jvm-object-new-layout.html">new 一个对象的全过程</a>。</li>
+      <li>HotSpot 在 Linux 上一个 Java 线程对应一个内核线程，内核线程号在线程转储里叫 <code>nid</code>。见 <a href="../juc/thread-state-context-switch.html">线程、线程状态与上下文切换</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-oom">④-1 OOM 是一次分配失败：抛给碰巧在分配的那个线程，进程不退出</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="一次 new 的失败路径：先在线程自己的 TLAB 里分，不够就到 Eden 里要一块新的，还不够就做 Young GC，大对象直接去老年代要连续的 region，再不够就做 Full GC 整理整个堆，Full GC 之后还是放不下，就创建一个 OutOfMemoryError 抛给正在执行这次 new 的线程。这个线程是谁是碰巧的：在泄漏实验里，最先拿到 OOM 的是 HTTP-Dispatcher、idle-timeout-task 和八个 http-exec 线程，而不是泄漏的那行代码。JVM 不会因此退出，其他线程继续运行；但 HTTP-Dispatcher 线程死了，整个服务就只剩一个还在监听端口的空壳。在大导出实验里，9 个请求拿到 OOM 失败了，其他请求正常，服务自己恢复了。">
+  <rect class="b-card" x="16" y="28" width="118" height="60" rx="10"/>
+  <text class="t-mono" x="75" y="54" text-anchor="middle">new byte[1024]</text>
+  <text class="t-xs" x="75" y="74" text-anchor="middle">某个线程</text>
+  <rect class="b-neu" x="160" y="28" width="118" height="60" rx="10"/>
+  <text class="t-b" x="219" y="54" text-anchor="middle">TLAB / Eden</text>
+  <text class="t-xs" x="219" y="74" text-anchor="middle">平常到这就结束</text>
+  <rect class="b-neu" x="304" y="28" width="118" height="60" rx="10"/>
+  <text class="t-b" x="363" y="54" text-anchor="middle">Young GC</text>
+  <text class="t-xs" x="363" y="74" text-anchor="middle">腾出 Eden 再试</text>
+  <rect class="b-of" x="448" y="28" width="132" height="60" rx="10"/>
+  <text class="t-b" x="514" y="54" text-anchor="middle">Full GC</text>
+  <text class="t-xs" x="514" y="74" text-anchor="middle">整个堆标记、整理</text>
+  <rect class="b-bad" x="606" y="28" width="338" height="60" rx="10"/>
+  <text class="t-bad" x="620" y="52">还是放不下 → new OutOfMemoryError</text>
+  <text class="t-xs" x="620" y="74">抛给正在执行这次 new 的线程，和平常的异常一样往上走</text>
+  <path class="e-mut" d="M134 58H156M278 58H300M422 58H444M580 58H602" marker-end="url(#ah-mut)"/>
+  <text class="t-xs" x="289" y="20" text-anchor="middle">不够</text>
+  <text class="t-xs" x="433" y="20" text-anchor="middle">还不够</text>
+  <text class="t-xs" x="591" y="20" text-anchor="middle">仍不够</text>
+
+  <text class="t-h" x="16" y="130">拿到 OOM 的是谁，是碰巧的</text>
+  <rect class="b-pd" x="16" y="144" width="440" height="140" rx="12"/>
+  <text class="t-pd" x="30" y="168">雷 1 泄漏：不可恢复</text>
+  <text class="t-xs" x="30" y="190">泄漏的是 /order 的 RECENT.put，最先拿到 OOM 的却是：</text>
+  <text class="t-monos" x="30" y="210">HTTP-Dispatcher · idle-timeout-task · http-exec-1…8</text>
+  <text class="t-xs" x="30" y="232">HTTP-Dispatcher 是收连接的线程，它一死，进程还在、端口还在听，</text>
+  <text class="t-xs" x="30" y="250">请求却再也没人接：curl 等 3 秒没回音 <tspan class="t-bk">实测</tspan></text>
+  <text class="t-xs" x="30" y="270">连 printStackTrace 都要内存，所以应用日志里只有一行</text>
+  <rect class="b-of" x="476" y="144" width="468" height="140" rx="12"/>
+  <text class="t-of" x="490" y="168">雷 2 大导出：可以恢复</text>
+  <text class="t-xs" x="490" y="190">OOM 抛在 JDK 自带 HTTP 服务器的写缓冲区里：</text>
+  <text class="t-monos" x="490" y="210">ByteBuffer.allocate ← Request$WriteStream.write ← export:87</text>
+  <text class="t-xs" x="490" y="232">那个请求失败、它的大数组变成垃圾，下一次 GC 就收回来了</text>
+  <text class="t-xs" x="490" y="250">30 秒里 9 个请求 OOM，其余 327 个正常 <tspan class="t-bk">实测</tspan></text>
+  <text class="t-xs" x="490" y="270">JVM 分不清这两种情况，所以默认只抛异常，不替你退出</text>
+</svg>
+  </div>
+  <p class="tip">所以 OOM 的异常栈只说明“谁最后没要到内存”，不说明“内存被谁占了”。要回答后一个问题，得看堆里还活着什么，这是 ④-2 和 ④-3 的事。JVM 也提供了“一 OOM 就退出”的开关，让编排系统拉起新实例，见 <a href="#p-zombie">⑥ 坑 1</a>。</p>
+
+  <h3 id="m-after">④-2 Full GC 之后剩下的，就是还活着的：降不降，分出两条路</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 270" role="img" aria-label="左图是泄漏：横轴是 Full GC 的次序，竖线从 GC 前的占用画到 GC 后的占用。第一次 Full GC 从 124M 降到 117M，第二次 124M 到 120M，第三次 123M 到 121M，之后越来越短，最后变成 125M 到 125M，几乎是一个点，贴着 128M 的天花板，然后 OOM。右图是大导出：每次 Full GC 前 228M 左右，之后降到 144M 到 221M 之间，中位数 193M，不会贴着天花板；改成流式写出后，GC 后的占用稳定在 108M，也就是两百万条历史订单这些真正常驻的对象。">
+  <text class="t-h" x="20" y="24">雷 1 泄漏：一次比一次降得少</text>
+  <line class="e-axis" x1="40" y1="230" x2="440" y2="230"/>
+  <line class="e-axis" x1="40" y1="40" x2="40" y2="230"/>
+  <line class="e-badd" x1="40" y1="50" x2="440" y2="50"/>
+  <text class="t-xs" x="436" y="44" text-anchor="end">堆上限 128M</text>
+  <g class="e-pd">
+    <line x1="80" y1="58" x2="80" y2="114"/>
+    <line x1="130" y1="58" x2="130" y2="90"/>
+    <line x1="180" y1="66" x2="180" y2="82"/>
+    <line x1="230" y1="62" x2="230" y2="74"/>
+    <line x1="280" y1="60" x2="280" y2="68"/>
+    <line x1="330" y1="58" x2="330" y2="62"/>
+    <line x1="380" y1="58" x2="380" y2="60"/>
+  </g>
+  <circle class="f-pd" cx="80" cy="114" r="4"/><circle class="f-pd" cx="130" cy="90" r="4"/><circle class="f-pd" cx="180" cy="82" r="4"/>
+  <circle class="f-pd" cx="230" cy="74" r="4"/><circle class="f-pd" cx="280" cy="68" r="4"/><circle class="f-pd" cx="330" cy="62" r="4"/><circle class="f-pd" cx="380" cy="60" r="4"/>
+  <text class="t-monos" x="88" y="128">124M→117M</text>
+  <text class="t-monos" x="300" y="86">…125M→125M</text>
+  <text class="t-bad" x="404" y="78">OOM</text>
+  <text class="t-xs" x="40" y="250">6 秒里 131 次 Full GC（示意，首末两次的数字取自日志） <tspan class="t-bk">实测</tspan></text>
+
+  <text class="t-h" x="500" y="24">雷 2 大导出：每次都能降下来</text>
+  <line class="e-axis" x1="520" y1="230" x2="940" y2="230"/>
+  <line class="e-axis" x1="520" y1="40" x2="520" y2="230"/>
+  <line class="e-badd" x1="520" y1="50" x2="940" y2="50"/>
+  <text class="t-xs" x="936" y="44" text-anchor="end">堆上限 256M</text>
+  <g class="e-of">
+    <line x1="560" y1="70" x2="560" y2="96"/>
+    <line x1="605" y1="66" x2="605" y2="140"/>
+    <line x1="650" y1="72" x2="650" y2="102"/>
+    <line x1="695" y1="68" x2="695" y2="88"/>
+    <line x1="740" y1="70" x2="740" y2="120"/>
+    <line x1="785" y1="66" x2="785" y2="100"/>
+    <line x1="830" y1="72" x2="830" y2="110"/>
+  </g>
+  <circle class="f-of" cx="560" cy="96" r="4"/><circle class="f-of" cx="605" cy="140" r="4"/><circle class="f-of" cx="650" cy="102" r="4"/>
+  <circle class="f-of" cx="695" cy="88" r="4"/><circle class="f-of" cx="740" cy="120" r="4"/><circle class="f-of" cx="785" cy="100" r="4"/><circle class="f-of" cx="830" cy="110" r="4"/>
+  <line class="e-good" x1="520" y1="156" x2="940" y2="156" stroke-dasharray="6 4"/>
+  <text class="t-good" x="936" y="150" text-anchor="end">改成流式后：GC 后稳定在 108M</text>
+  <text class="t-monos" x="616" y="132">→144M</text>
+  <text class="t-xs" x="520" y="180">GC 后中位数 193M，最低 144M</text>
+  <text class="t-xs" x="520" y="198">比 108M 多出来的，是那一刻正在导出的几个请求手里的大数组</text>
+  <text class="t-xs" x="520" y="250">30 秒 401 次 Full GC，前中位数 228M → 后 193M <tspan class="t-bk">实测</tspan></text>
+</svg>
+  </div>
+  <p class="tip">Full GC 会把所有还走得到的对象都留下，别的都收掉，所以 GC 之后的那个数近似等于“此刻活着的总量”。泄漏时活着的总量只涨不跌，这个数一路逼近上限；分配太猛时活着的总量其实不大，只是短时间内要的太多，这个数会掉回去。第 8 站的 GC 日志页用的是同一条规则：<a href="jvm-gc-log-tuning.html">GC 后还是满的就是代码问题，不是参数问题</a>。</p>
+
+  <h3 id="m-dump">④-3 直方图只能说“什么最多”，堆转储才能说“被谁拉着”</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 290" role="img" aria-label="泄漏时堆里的引用链：GC Root 是 TradeServer 类的 static 字段 RECENT，它指向一个 HashMap，48 字节；HashMap 指向一个 26 万多格的 Node 数组，1 MB；数组里有 11 万多个 Node，每个 32 字节；每个 Node 指向一个 Long 键 24 字节和一个 Order 48 字节；每个 Order 指向一个 1 KB 的快照 byte 数组，占 1040 字节。类直方图只按类把每个对象自己的大小加起来，排第一的是 byte 数组 116.7 MB，看不出是谁的。堆转储算的是 retained size：把某个对象拿掉后能一起回收的总量，TradeServer 这个类连带拉着 128.7 MB，占 98.5%，MAT 直接把这条路径列成第一嫌疑。每一条记录连带 1144 字节，等于 32 加 24 加 48 加 1040。">
+  <rect class="b-bk" x="16" y="30" width="150" height="70" rx="10"/>
+  <text class="t-b" x="91" y="56" text-anchor="middle">GC Root</text>
+  <text class="t-monos" x="91" y="76" text-anchor="middle">TradeServer.RECENT</text>
+  <text class="t-xs" x="91" y="92" text-anchor="middle">static 字段</text>
+  <rect class="b-pd" x="196" y="30" width="120" height="70" rx="10"/>
+  <text class="t-b" x="256" y="58" text-anchor="middle">HashMap</text>
+  <text class="t-monos" x="256" y="80" text-anchor="middle">48 B</text>
+  <rect class="b-pd" x="346" y="30" width="150" height="70" rx="10"/>
+  <text class="t-b" x="421" y="58" text-anchor="middle">Node[262144]</text>
+  <text class="t-monos" x="421" y="80" text-anchor="middle">1 MB</text>
+  <rect class="b-pd" x="526" y="30" width="130" height="70" rx="10"/>
+  <text class="t-b" x="591" y="56" text-anchor="middle">Node × 111621</text>
+  <text class="t-monos" x="591" y="78" text-anchor="middle">32 B</text>
+  <rect class="b-card" x="686" y="14" width="110" height="44" rx="8"/>
+  <text class="t-s" x="741" y="34" text-anchor="middle">Long 键</text>
+  <text class="t-monos" x="741" y="50" text-anchor="middle">24 B</text>
+  <rect class="b-card" x="686" y="70" width="110" height="44" rx="8"/>
+  <text class="t-s" x="741" y="90" text-anchor="middle">Order</text>
+  <text class="t-monos" x="741" y="106" text-anchor="middle">48 B</text>
+  <rect class="b-of" x="826" y="70" width="118" height="44" rx="8"/>
+  <text class="t-s" x="885" y="90" text-anchor="middle">byte[1024] 快照</text>
+  <text class="t-monos" x="885" y="106" text-anchor="middle">1040 B</text>
+  <path class="e-ink" d="M166 65H192M316 65H342M496 65H522M656 56L682 40M656 74L682 90M796 92H822" marker-end="url(#ah-ink)"/>
+
+  <rect class="b-neu" x="16" y="140" width="440" height="136" rx="12"/>
+  <text class="t-b" x="30" y="164">类直方图：按类加总“自己多大”（shallow）</text>
+  <text class="t-monos" x="30" y="188">1: 125160 个   116720704 B  [B   ← byte[]</text>
+  <text class="t-monos" x="30" y="206">2: 111621 个     5357808 B  Order</text>
+  <text class="t-monos" x="30" y="224">3: 116182 个     3717824 B  HashMap$Node</text>
+  <text class="t-xs" x="30" y="248">排第一的是 byte[]，Java 里到处都是 byte[]，这一行说明不了是谁的</text>
+  <text class="t-xs" x="30" y="266">个数对得上（11 万多个 Order 和 Node）是线索，但不是结论</text>
+  <rect class="b-pd" x="476" y="140" width="468" height="136" rx="12"/>
+  <text class="t-pd" x="490" y="164">堆转储：按“拿掉它能一起收走多少”（retained）</text>
+  <text class="t-monos" x="490" y="188">class TradeServer        retained 128,745,544  98.50%</text>
+  <text class="t-monos" x="490" y="206"> └ HashMap (RECENT)      retained 128,743,064</text>
+  <text class="t-monos" x="490" y="224">    └ HashMap$Node[]     retained 128,743,016</text>
+  <text class="t-xs" x="490" y="248">每条记录连带 1144 B = 32 + 24 + 48 + 1040，和直方图对得上</text>
+  <text class="t-xs" x="490" y="266">MAT 的 Leak Suspects 报告把这条路列成第一嫌疑 <tspan class="t-bk">实测</tspan></text>
+</svg>
+  </div>
+  <p class="tip"><b>支配树</b>（dominator tree）是 retained size 的来源：从 GC Roots 到 B 的每一条路都必须经过 A，就说 A 支配 B，A 一旦不可达，B 必然跟着死。MAT 把整张对象图算成一棵支配树，树上每个节点的 retained size 就是它子树的总和，所以“哪个节点下面挂的最多”一眼就看得出来。直方图不做这件事，它便宜，但只能看叶子。</p>
+
+  <h3 id="m-cpu">④-4 CPU 对到一行：内核线程号 = 线程转储里的 nid</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="top -H 按线程列出 CPU，第一行是线程号 1989158，占 93.8%，名字是 http-ex 开头。把 1989158 换成十六进制是 0x1e5a26。jstack 里 nid=0x1e5a26 的线程是 http-exec-5，状态 RUNNABLE，cpu=5587ms，elapsed=5.64s，也就是 5.6 秒里几乎一直在跑，栈顶是 Coupon.split 第 19 行。两秒后再拍一次，cpu 涨到 7793ms，还停在同一行。另一条路是 JFR：每 10 毫秒采一次正在跑的线程的栈，10 秒采到 983 个样本，全部来自 http-exec-5，全部落在 Coupon.split 里。">
+  <rect class="b-card" x="16" y="20" width="250" height="96" rx="10"/>
+  <text class="t-b" x="30" y="44">top -H -p &lt;pid&gt;</text>
+  <text class="t-monos" x="30" y="66">PID      %CPU  COMMAND</text>
+  <text class="t-mono" x="30" y="84">1989158  93.8  http-ex+</text>
+  <text class="t-monos" x="30" y="102">1989088   0.0  GC Thre+</text>
+  <rect class="b-bk" x="296" y="40" width="130" height="56" rx="10"/>
+  <text class="t-mono" x="361" y="64" text-anchor="middle">printf %x</text>
+  <text class="t-mono" x="361" y="84" text-anchor="middle">0x1e5a26</text>
+  <rect class="b-cg" x="456" y="20" width="488" height="96" rx="10"/>
+  <text class="t-b" x="470" y="44">jstack &lt;pid&gt;，找 nid=0x1e5a26</text>
+  <text class="t-monos" x="470" y="66">"http-exec-5" … cpu=5587.93ms elapsed=5.64s … nid=0x1e5a26 runnable</text>
+  <text class="t-monos" x="470" y="84">   java.lang.Thread.State: RUNNABLE</text>
+  <text class="t-mono" x="470" y="102">   at …Coupon.split(Coupon.java:19)</text>
+  <path class="e-ink" d="M266 68H292M426 68H452" marker-end="url(#ah-ink)"/>
+
+  <rect class="b-cg" x="456" y="140" width="488" height="96" rx="10"/>
+  <text class="t-b" x="470" y="164">JFR：每 10 ms 采一次在跑的线程的栈</text>
+  <text class="t-monos" x="470" y="186">10 秒，jdk.ExecutionSample 983 个</text>
+  <text class="t-monos" x="470" y="204">983  sampledThread = "http-exec-5"</text>
+  <text class="t-mono" x="470" y="222">925 Coupon.split line 14 · 58 line 19</text>
+  <rect class="b-neu" x="16" y="140" width="410" height="96" rx="10"/>
+  <text class="t-b" x="30" y="164">隔 2 秒再拍一次</text>
+  <text class="t-monos" x="30" y="186">cpu=5587ms → 7793ms（2.2 秒涨了 2.2 秒）</text>
+  <text class="t-xs" x="30" y="206">还停在 Coupon.split：这才算抓到</text>
+  <text class="t-xs" x="30" y="224">只拍一次，可能正好拍到一个刚好路过的线程</text>
+</svg>
+  </div>
+  <p class="tip">两样工具的区别：jstack 要让所有 Java 线程停在<b>安全点</b>才能拍，拍到的是“停下来那一刻”的位置，一张只是一瞬间；JFR 在一段时间里按固定间隔采样，样本多了就是统计，能直接回答“这 10 秒 CPU 花在哪”。行号要看成“附近”：C2 编译后的循环只在部分位置记了行号，所以样本分到了第 14 行（<code>for</code>）和第 19 行（<code>while</code> 的回跳），都在同一个循环里（<a href="jvm-jit-escape.html">JIT 页</a>）。</p>
+
+  <h3 id="m-design">④-5 为什么这样设计：证据要在出事之前埋好</h3>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>出事之后再去抓<small>被放弃的做法</small></h4>
+      <ul class="pains">
+        <li>OOM 之后堆里全是活对象，<code>jcmd</code> 挂上去时 JVM 自己的挂接线程都要不到内存：⑤ 里先报了 <code>Exception in VM (AttachListener::init) : java.lang.OutOfMemoryError</code>，那次运气好，直方图最后还是拿到了。靠运气拿到的证据不能当流程</li>
+        <li>值班的人先重启，现场就没了；CPU 高的那个请求，等你登上机器可能已经超时退出</li>
+        <li>堆转储要停住整个进程写一个和堆一样大的文件，在正卡着的服务上再停一次，雪上加霜</li>
+      </ul>
+    </div>
+    <div class="way" data-role="bk">
+      <h4>提前埋好<small>本页的做法</small></h4>
+      <ul class="pains">
+        <li><code>-XX:+HeapDumpOnOutOfMemoryError</code>：OOM 的那一刻由 JVM 自己写转储，128 MB 堆写了 0.249 秒（⑤ 实测）</li>
+        <li>GC 日志、JFR 连续录制一直开着，开销小，出事后把最近一段倒出来就行</li>
+        <li>出事时先拍线程转储（便宜、一定拿得到），再决定要不要重启</li>
+      </ul>
+    </div>
+  </div>
+  <p class="tip"><b>决定胜负的约束</b>：现场转瞬即逝，而最有用的证据（堆转储）恰恰最贵、在出事时最难拿到。所以 JVM 把最贵的那次拍照做成“出事那一刻自动触发”，把能一直开的（GC 日志、JFR）做得足够便宜。OpenJDK 源码里还有一个细节：多个线程同时 OOM 时只转储第一次（<code>report_java_out_of_memory</code> 里用一个静态标志挡住），免得一次事故写出十几个几百 MB 的文件。</p>
+
+  <h3>最少的命令</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">命令</span><b>JDK 17</b><span class="tip" style="margin-left:auto">参数细节放到 ⑥</span></div>
+<pre><code><span class="cm"># 启动时就埋好</span>
+-Xlog:gc*:file=gc.log  -XX:+HeapDumpOnOutOfMemoryError  -XX:HeapDumpPath=/data/dump
+<span class="cm"># 内存路线</span>
+jstat -gcutil &lt;pid&gt; 1000                      <span class="cm"># Full GC 次数在不在涨</span>
+jcmd &lt;pid&gt; GC.class_histogram | head -15     <span class="cm"># 什么最多（会先做一次 Full GC）</span>
+jcmd &lt;pid&gt; GC.heap_dump /data/dump/x.hprof   <span class="cm"># 谁拉着，拿去 MAT</span>
+<span class="cm"># CPU 路线</span>
+top -H -p &lt;pid&gt;                              <span class="cm"># 哪个线程，记下线程号</span>
+printf '%x\n' &lt;线程号&gt;                        <span class="cm"># 换成 nid</span>
+jstack &lt;pid&gt; | grep -A 12 'nid=0x&lt;十六进制&gt;' <span class="cm"># 隔 2 秒拍几次</span>
+jcmd &lt;pid&gt; JFR.start duration=60s filename=/data/x.jfr   <span class="cm"># 或者录一分钟</span></code></pre>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>复现一次：在订单服务里排掉三个雷</h2>
+    <p class="lead">一个不依赖任何库的程序：<code>TradeServer</code> 用 JDK 自带的 HTTP 服务器起三个接口，<code>Load</code> 是压测客户端。按 JDK 8 的写法写（<code>--release 8</code> 编译），本机用 JDK 17 运行。<a href="https://github.com/archeu/study-labs/tree/main/java/jvm/jvm-troubleshooting">完整代码 →</a></p>
+  </div>
+<pre class="console"><span class="w">$ cd study-labs/java &amp;&amp; mvn -q -pl jvm/jvm-troubleshooting compile &amp;&amp; cd jvm/jvm-troubleshooting</span>
+<span class="w">$ CP=target/classes; M=labs.jvm.jvm_troubleshooting</span>
+<span class="w"># 每个雷开一个终端起服务，另一个终端压测；-Dsun.net.httpserver.nodelay=true 关掉 Nagle，不然每个请求白等 40 ms</span></pre>
+
+  <h3 id="r1">⑤-1 雷 1：泄漏到 OOM，用直方图和 MAT 找到 RECENT</h3>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">雷 1</span><b>TradeServer.order</b></div>
+<pre><code><span class="cm">// “防重复提交，记一下最近的订单”</span>
+static final Map&lt;Long, Order&gt; RECENT = new HashMap&lt;&gt;();
+
+Order o = new Order(id, user, sku, qty, 29900L * qty, true); <span class="cm">// 带 1 KB 快照</span>
+synchronized (RECENT) {
+    <span class="hl">RECENT.put(o.id, o);</span>           <span class="cm">// 只放不删</span>
+}</code></pre>
+    </div>
+<pre class="console"><span class="w">$ java -Xmx128m -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=. \
+    -Xlog:gc:file=leak.log -Dsun.net.httpserver.nodelay=true -DhistoryK=0 -cp $CP $M.TradeServer</span>
+<span class="w">$ java -cp $CP $M.Load "http://127.0.0.1:8090/order?user=1024&amp;sku=88&amp;qty=2" 8 30</span>
+t=  5s  ok=18014   t= 10s  ok=35385   t= 15s  ok=55972
+t= 20s  <b>ok=2249</b>    t= 25s  <b>ok=0</b>       t= 30s  <b>ok=0</b>
+<span class="w"># 服务端 stdout</span>
+java.lang.OutOfMemoryError: Java heap space
+Dumping heap to ./java_pid1985767.hprof ...
+Heap dump file created [140421815 bytes in <b>0.249 secs</b>]
+<span class="w"># 服务端 stderr：连异常栈都没打出来</span>
+Exception: java.lang.OutOfMemoryError thrown from the
+  UncaughtExceptionHandler in thread "<b>HTTP-Dispatcher</b>"</pre>
+  </div>
+  <div class="two">
+<pre class="console"><span class="w">$ grep 'Pause Full' leak.log | sed -n '1p;$p'</span>
+[16.243s] Pause Full (G1 Compaction Pause) 124M-&gt;117M(128M) 33.7ms
+[22.041s] Pause Full (G1 Compaction Pause) <b>125M-&gt;125M</b>(128M) 30.1ms
+<span class="w">$ grep -c 'Pause Full' leak.log</span>
+131
+<span class="w">$ curl -m 3 http://127.0.0.1:8090/order; ss -ltn | grep 8090</span>
+<b>(3 秒没回音)</b>
+LISTEN  0  512  [::ffff:127.0.0.1]:8090  *:*
+<span class="w">$ jcmd &lt;pid&gt; GC.class_histogram | head -6</span>
+   1:   125160   116720704  [B
+   2:   111621     5357808  labs…Order
+   3:   116182     3717824  java.util.HashMap$Node
+   4:   111877     2685048  java.lang.Long</pre>
+<pre class="console"><span class="w">$ ParseHeapDump.sh java_pid1985767.hprof org.eclipse.mat.api:suspects</span>
+<span class="w"># MAT 1.16.1 命令行，8 秒出报告；打开 *_Leak_Suspects.zip</span>
+Problem Suspect 1
+The class <b>labs…TradeServer</b> … occupies
+  128,745,544 (<b>98.50%</b>) bytes.
+The memory is accumulated in one instance of
+  java.util.HashMap$Node[] … 128,743,016 bytes.
+
+Shortest Paths To the Accumulation Point
+java.util.HashMap$Node[262144]   1,048,592  128,743,016
+\ table java.util.HashMap         48        128,743,064
+ \ <b>RECENT</b> class …TradeServer     16        128,745,544</pre>
+  </div>
+  <p class="tip">5 分钟里做了三件事：GC 日志看到“125M→125M”，判定是泄漏（④-2）；直方图看到 byte[] 和 11 万个 <code>Order</code>，知道“是什么”；堆转储交给 MAT，第一嫌疑直接指到 <code>TradeServer.RECENT</code>（④-3）。修法是给它上限和过期：防重复提交本来只需要记住几分钟，用带过期的缓存，或者干脆放进 Redis 设 TTL（<a href="#p-cache">⑥ 规范</a>）。</p>
+
+  <h3 id="r2">⑤-2 雷 2：大导出让 Full GC 停不下来，改成流式</h3>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">雷 2</span><b>TradeServer.export</b></div>
+<pre><code><span class="cm">// 改之前：整份 CSV 先攒在内存里</span>
+StringBuilder sb = new StringBuilder();     <span class="cm">// 一路翻倍扩容</span>
+for (Order o : today) o.appendCsv(sb);      <span class="cm">// 20 万行 ≈ 9.6 MB</span>
+byte[] body = <span class="hl">sb.toString().getBytes(UTF_8)</span>; <span class="cm">// 再复制两份</span>
+os.write(body);       <span class="cm">// JDK 的 HttpServer 里还要一块 2 倍大的缓冲</span>
+
+<span class="cm">// 改之后：64 KB 一块，边算边写</span>
+byte[] buf = new byte[64 * 1024];
+for (Order o : today) {
+    line.setLength(0); o.appendCsv(line);
+    if (n + line.length() &gt; buf.length) { os.write(buf, 0, n); n = 0; }
+    for (int i = 0; i &lt; line.length(); i++) buf[n++] = (byte) line.charAt(i);
+}</code></pre>
+    </div>
+<pre class="console"><span class="w">$ java -Xmx256m -Xlog:gc:file=big.log -Dsun.net.httpserver.nodelay=true \
+    -DhistoryK=2000 -cp $CP $M.TradeServer      <span class="cm"># 常驻 200 万条历史订单</span></span>
+<span class="w">$ java -cp $CP $M.Load "http://127.0.0.1:8090/export?rows=200000" 4 30</span>
+requests=336 ok=327 <b>err=9</b>  p50=265.2ms p99=925.8ms <b>max=30597.8ms</b>
+<span class="w">$ jstat -gcutil &lt;pid&gt;   (节选：FGC  FGCT)</span>
+                                 <b>401   20.795</b>
+<span class="w">$ grep -m3 'Humongous\|Pause Full' big.log</span>
+Pause Young (Concurrent Start) (<b>G1 Humongous Allocation</b>) 135M-&gt;132M
+Pause Young (Normal) (G1 Humongous Allocation) 236M-&gt;236M 0.5ms
+Pause Full (G1 Compaction Pause) <b>236M-&gt;153M</b>(256M) 87.5ms
+
+<span class="w"># 同一个服务，换成 /export?rows=200000&amp;stream=true</span>
+requests=<b>970</b> ok=970 err=0  p50=119.0ms p99=226.6ms max=1046.2ms
+FGC <b>0</b> · Young GC 12 次 · Humongous 0 次 · GC 累计 0.129 s</pre>
+  </div>
+  <div class="two">
+<pre class="console"><span class="w">$ top -H -b -n 2 -d 3 -p &lt;pid&gt;   (大导出时，第二屏)</span>
+    PID  %CPU  COMMAND
+1989791  <b>72.4</b>  GC Thre+
+1989773  <b>70.8</b>  GC Thre+
+1989775   8.0  G1 Conc+
+1989822   4.0  http-ex+
+1989825   4.0  http-ex+</pre>
+<pre class="console"><span class="w">$ jcmd &lt;pid&gt; JFR.dump name=1 filename=x.jfr   <span class="cm"># 启动时开了连续录制</span></span>
+<span class="w">$ jfr print --events jdk.ObjectAllocationSample x.jfr | 按调用点加总 weight</span>
+34.5%  byte[]  Order.appendCsv:25        <span class="cm"># StringBuilder 扩容</span>
+34.1%  byte[]  TradeServer.export:85     <span class="cm"># toString + getBytes</span>
+23.7%  byte[]  Order.appendCsv:22
+ 4.1%  byte[]  Order.appendCsv:23
+<span class="w"># 合计 97% 的分配在导出这条路上</span></pre>
+  </div>
+  <p class="tip">这一个雷把 ② 里两条误判都演了一遍：CPU 是满的，但吃 CPU 的是 GC 线程（转回内存路线）；Full GC 之后能降到 144～221M（④-2，不是泄漏）；OOM 抛在 JDK HTTP 服务器的写缓冲里，不在导出代码本身（④-1）。真正的证据是 GC 日志里成串的 <code>G1 Humongous Allocation</code> 和 JFR 的分配采样。按估算，一个导出请求同时拿着约 50 MB 的大数组（扩容后的 StringBuilder、String、byte[]、HTTP 缓冲），4 个并发就是 200 MB，再加 108 MB 常驻，256 MB 的堆装不下。</p>
+
+  <h3 id="r3">⑤-3 雷 3：一分钱的优惠券，用 top -H、jstack、JFR 找到那一行</h3>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">雷 3</span><b>Coupon.split</b><span class="tip" style="margin-left:auto">左边是文件里的行号</span></div>
+<pre><code>11  long remaining = couponCents;
+12  while (remaining &gt; 0) {
+13      long round = remaining;
+14      for (int i = 0; i &lt; prices.length; i++) {
+15          long part = <span class="hl">round * prices[i] / total</span>; <span class="cm">// 1 × 29900 / 59800 = 0</span>
+16          share[i] += part;
+17          remaining -= part;               <span class="cm">// 减了 0</span>
+18      }
+19  }
+
+<span class="cm">// 改法：前面的按比例取整，尾差全给最后一件，只走一轮</span>
+share[n - 1] = couponCents - given;</code></pre>
+    </div>
+<pre class="console"><span class="w">$ curl "http://127.0.0.1:8090/coupon?cents=1&amp;prices=29900,29900" &amp;   <span class="cm"># 不返回</span></span>
+<span class="w">$ top -H -b -n 1 -p &lt;pid&gt; | head -9</span>
+    PID  S  %CPU  COMMAND
+<b>1989158</b>  R  <b>93.8</b>  http-ex+
+1989085  S   0.0  java
+<span class="w">$ printf '%x\n' 1989158</span>
+1e5a26
+<span class="w">$ jstack &lt;pid&gt; | grep -A3 'nid=0x1e5a26 '</span>
+"http-exec-5" #19 … cpu=<b>5587.93ms</b> elapsed=5.64s … nid=0x1e5a26 runnable
+   java.lang.Thread.State: RUNNABLE
+	at …Coupon.<b>split(Coupon.java:19)</b>
+	at …TradeServer.coupon(TradeServer.java:113)
+<span class="w"># 2 秒后再拍：cpu=7793.52ms，还在 Coupon.java:19</span>
+<span class="w">$ curl -w '%{http_code} %{time_total}s' http://127.0.0.1:8090/order</span>
+200 0.002256s           <span class="cm"># 别的请求照常</span>
+<span class="w">$ jcmd &lt;pid&gt; JFR.start duration=10s settings=profile filename=cpu.jfr</span>
+<span class="w">$ jfr print --events jdk.ExecutionSample --stack-depth 1 cpu.jfr | …</span>
+925  Coupon.split(long, long[]) line: 14
+ 58  Coupon.split(long, long[]) line: 19
+983  sampledThread = "http-exec-5"</pre>
+  </div>
+  <p class="tip">两种工具指到同一个循环（④-4）。这个雷不会自己好：Java 线程没法从外面安全地杀掉，这个线程会一直占着一个核和线程池里的一个位置。按推算，再来 7 个一分钱的请求，8 个 <code>http-exec</code> 线程就全卡死，整个服务不再响应。上线前该有的是单元测试覆盖“1 分钱、0 元商品、一件商品”这些边界，以及循环的最大轮数（<a href="#p-loop">⑥ 规范</a>）。</p>
+
+  <div class="done-box">
+    <p><b>到这里已经能交差了。</b>三个雷各有一条证据链：泄漏是“GC 后不降 → 直方图 → MAT 指到 RECENT”，大对象是“GC 线程吃 CPU → GC 后能降 → Humongous → JFR 分配采样指到 export”，死循环是“top -H → nid → 两次 jstack 同一行 → JFR 确认”。写成排障记录，就是地图上 J03 给靶场的任务。</p>
+    <p>已知还没处理的细节：OOM 之后进程成了僵尸（<a href="#p-zombie">⑥ 坑 1</a>）；转储文件放在哪、会不会把盘写满（<a href="#p-disk">⑥ 坑 2</a>）；在线上大堆上拍转储会停多久（<a href="#p-stw">⑥ 坑 3</a>）；容器里被杀掉时这些都用不上（<a href="#p-killed">⑥ 坑 6</a>）。</p>
+  </div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>根治和预防：坑、启动参数、编码规范、更深一层</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-zombie"><b><em>坑 1</em>OOM 之后进程还在，健康检查也绿着，但一个请求都不处理<a class="root" href="#m-oom">← ④-1 OOM 只是一个异常</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>端口在监听，进程在，监控说实例存活；请求全部超时。⑤ 雷 1 里 <code>curl</code> 等 3 秒没回音。</dd>
+      <dt>根源</dt><dd>OOM 抛给了碰巧在分配的线程。收连接的 <code>HTTP-Dispatcher</code> 线程拿到它就死了，别的线程还活着，JVM 没有理由退出。</dd>
+      <dt>做法</dt><dd class="fix">加 <code>-XX:+ExitOnOutOfMemoryError</code>，第一次 OOM 就退出（退出码 3），让 K8s 拉新实例。它和 <code>HeapDumpOnOutOfMemoryError</code> 可以一起开，按源码的顺序先写转储再退出。存活探针要走一条真实的业务路径，不要只看端口。</dd></dl>
+    </div>
+    <div class="pit" id="p-disk"><b><em>坑 2</em>配了 OOM 自动转储，出事时却没有文件<a class="root" href="#m-design">← ④-5 只转储第一次</a><span class="seen">源码核对</span></b>
+      <dl><dt>现象</dt><dd>日志里有 <code>Dumping heap to …</code>，后面跟着失败；或者干脆找不到文件。</dd>
+      <dt>根源</dt><dd>转储文件和已用的堆差不多大（⑤ 128 MB 堆写出 140 MB），盘不够就写不完。路径是目录时文件名是 <code>java_pid&lt;pid&gt;.hprof</code>，容器里 pid 常常都是 1，上次的文件还在就写不出来（JDK 17 源码里这里不覆盖）。Pod 被重建，本地盘上的文件也跟着没了。</dd>
+      <dt>做法</dt><dd class="fix"><code>HeapDumpPath</code> 指到挂载的持久卷，按 Pod 名分目录，留出一个堆大小以上的空间；拷走以后删掉。</dd></dl>
+    </div>
+    <div class="pit" id="p-stw"><b><em>坑 3</em>在线上手动拍堆转储，服务卡住好几秒<a class="root" href="#m-design">← ④-5 最贵的证据</a><span class="seen">⑤ 实测 + 估算</span></b>
+      <dl><dt>现象</dt><dd>执行 <code>jcmd GC.heap_dump</code> 之后，这台实例所有请求一起超时，上游开始重试。</dd>
+      <dt>根源</dt><dd>转储期间整个进程停着。<code>GC.heap_dump</code> 默认只转储活对象，所以还要先做一次 Full GC。⑤ 里 128 MB 写了 0.249 秒，按同样的速度估算，16 GB 的堆是半分钟量级。直方图也会先做一次 Full GC（⑤ 实测 30.5 ms）。</dd>
+      <dt>做法</dt><dd class="fix">先把这台实例从负载均衡里摘掉再拍。要的是全部对象（包括已经不可达的）时加 <code>-all</code>，省掉那次 Full GC；盘紧张时加 <code>-gz=1</code> 压缩，代价是写得更慢。</dd></dl>
+    </div>
+    <div class="pit" id="p-histo"><b><em>坑 4</em>直方图第一行是 byte[]、String，看了等于没看<a class="root" href="#m-dump">← ④-3 shallow 和 retained</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>⑤ 雷 1 的直方图第一行是 <code>[B</code>，116.7 MB。全系统都在用 byte[]，不知道是谁的。</dd>
+      <dt>根源</dt><dd>直方图只按类加总每个对象“自己”的大小，不知道谁拉着谁。</dd>
+      <dt>做法</dt><dd class="fix">往下看第一个业务类（这里是 11 万个 <code>Order</code>），个数往往和容器的 <code>Node</code> 个数对得上；要结论就拍堆转储看支配树。隔几分钟拍两次直方图做差，涨得最多的那一类最可疑。</dd></dl>
+    </div>
+    <div class="pit" id="p-line"><b><em>坑 5</em>top 里线程名只剩一半，jstack 的行号和你想的差一两行<a class="root" href="#m-cpu">← ④-4 nid 和采样</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>top 显示 <code>http-ex+</code>；几个吃 CPU 的线程名字一样长，分不清。jstack 说第 19 行，JFR 多数样本在第 14 行。</dd>
+      <dt>根源</dt><dd>top 的列宽会截断名字，内核本身也只留线程名的前 15 个字符；C2 编译后的代码只在部分位置记了行号。</dd>
+      <dt>做法</dt><dd class="fix">用线程号换成 <code>nid</code> 去对，不要靠名字；线程池起名时把区分度放在前面（<code>export-3</code> 比 <code>http-nio-8080-exec-3</code> 好认）。行号当成“这一段”，回到源码里看整个循环。</dd></dl>
+    </div>
+    <div class="pit" id="p-killed"><b><em>坑 6</em>Pod 一直重启，没有 OOM、没有转储、日志干干净净<a class="root env" href="#s3">← ③ 左列：不是堆</a><span class="seen">按文档</span></b>
+      <dl><dt>现象</dt><dd>容器状态 <code>OOMKilled</code>，退出码 137；这一页的所有工具都没留下东西。</dd>
+      <dt>根源</dt><dd>内核按整个进程的内存（堆 + 线程栈 + 直接内存 + 元空间 + 代码缓存 + GC 自己的结构）杀进程，JVM 来不及做任何事。</dd>
+      <dt>做法</dt><dd class="fix">堆只给容器上限的 60%～75%；开 <code>-XX:NativeMemoryTracking=summary</code>，用 <code>jcmd VM.native_memory</code> 看堆外各占多少。详见 <a href="jvm-memory-structure.html">JVM 内存结构</a>，全景第 10 站。</dd></dl>
+    </div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">启动参数</span><b>JDK 17 / 21，每个服务都带上</b><span class="tip" style="margin-left:auto">JFR 这行本机 JDK 17 跑过</span></div>
+<pre><code>-Xlog:gc*:file=/data/log/gc-%p-%t.log:time,uptime,level,tags:filecount=10,filesize=50m
+-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/dump/${POD_NAME}/
+-XX:+ExitOnOutOfMemoryError                              <span class="cm"># 坑 1：别当僵尸</span>
+-XX:StartFlightRecording=disk=true,maxage=6h,maxsize=200m,dumponexit=true,filename=/data/jfr/app.jfr
+<span class="cm"># 需要查堆外时再加：-XX:NativeMemoryTracking=summary</span></code></pre>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>规范</th><th>防的是什么</th></tr></thead>
+      <tbody>
+        <tr><th>上面这组参数写进基础镜像，不靠每个服务自己记得</th><td>出事时才发现没有 GC 日志、没有转储，只能靠猜（④-5）</td></tr>
+        <tr><th>值班手册第一条：先拍 3 次线程转储、存 GC 日志和 JFR，再摘流量拍堆转储，最后才重启</th><td>“先重启再说”把现场弄没（② 误判 1）</td></tr>
+        <tr id="p-cache"><th>放进内存的集合一律有上限和过期：<code>static Map</code> 只能放有限的、启动时就确定的东西</th><td>雷 1：只放不删的缓存。要缓存就用带上限和过期的缓存库，或者放到 Redis 设 TTL</td></tr>
+        <tr><th>导出、报表、批量接口一律流式或分页，单个请求的内存和数据量无关</th><td>雷 2：一次请求几十 MB 的大对象，并发一高就 Full GC</td></tr>
+        <tr id="p-loop"><th>“直到分完为止”的循环必须有最大轮数；金额计算用单测覆盖 1 分钱、0 元、只有一件这些边界</th><td>雷 3：取整之后永远退不出去的循环</td></tr>
+        <tr><th>告警看“Full GC 之后老年代占用”的趋势，不只等 OOM</th><td>泄漏是几小时、几天慢慢涨上去的，趋势告警比 OOM 早得多（④-2）</td></tr>
+        <tr><th>排障记录固定写：现象、时间线、证据（命令和输出原文）、根因、修复、预防</th><td>下一次同类问题不用从头查；地图上 J03 的靶场任务交的就是这个</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="round"><span class="rb">练习台</span><h3>拿到一条证据，下一步往哪走</h3></div>
+  <div class="lab walker" id="tr" tabindex="0" data-role="bk">
+    <p class="lab-h">排查练习台：先猜，再看为什么</p>
+    <div class="tr-nav" id="tr-nav" role="group" aria-label="选择案例"></div>
+    <pre class="ev-card" id="tr-ev"></pre>
+    <div class="guess" data-role="bk">
+      <p id="tr-q">看到这条证据，下一步该做什么？</p>
+      <div class="opts" id="tr-opts"></div>
+    </div>
+    <div class="lab-res" data-role="bk" id="tr-res">先选一个答案。</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <button class="btn" id="tr-prev" type="button">← 上一个</button>
+      <button class="btn primary" id="tr-next" type="button">下一个 →</button>
+      <button class="btn" id="tr-reset" type="button">从头来</button>
+      <span class="tr-score" id="tr-score"></span>
+    </div>
+  </div>
+  <p class="tip">证据都是 ⑤ 里真跑出来的输出，或者按文档写的典型输出（案例里注明了）。左右方向键也能切换案例。</p>
+
+  <div class="round"><span class="rb">第三圈</span><h3>更深一层</h3></div>
+  <h3 id="d-safepoint">线程转储要等安全点，采样器不用：为什么 JFR 的“热点”更可信</h3>
+  <p class="tip">jstack 是一次安全点操作：所有 Java 线程跑到下一个安全点停下，VM 线程再逐个记下栈。所以它拍到的永远是“安全点附近”，长时间不进安全点的代码会让所有线程一起等。JFR 的方法采样按固定间隔挑几个正在跑 Java 代码的线程，暂停它、记下栈、放它走，不需要全体停下，⑤ 里 10 秒 983 个样本几乎没有影响其他请求。它仍然只采 Java 帧；要看 native 代码和内核里的时间，用 async-profiler 这类工具，列在下一圈。</p>
+  <h3 id="d-mat">堆转储要换个地方分析</h3>
+  <p class="tip">MAT 解析时要建索引，内存大约要和转储文件同一量级，所以别在出事的那台机器上开。⑤ 里用的是 MAT 的命令行：<code>ParseHeapDump.sh x.hprof org.eclipse.mat.api:suspects</code>，140 MB 的转储 8 秒出报告（MAT 1.16.1，要 JDK 17 以上运行），解析出的索引文件留在转储旁边，之后用图形界面打开就不用再解析。大转储给 MAT 调大 <code>MemoryAnalyzer.ini</code> 里的 <code>-Xmx</code>。</p>
+  <h3 id="d-ver">版本差异</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>能力</th><th>JDK 8</th><th>JDK 17</th><th>JDK 21</th></tr></thead>
+      <tbody>
+        <tr><th>GC 日志</th><td><code>-XX:+PrintGCDetails -Xloggc:</code></td><td colspan="2">统一日志 <code>-Xlog:gc*</code>（JDK 9 起）</td></tr>
+        <tr><th>JFR</th><td>8u262 起 OpenJDK 才有</td><td colspan="2">自带；<code>jfr</code> 命令行工具可以直接打印事件</td></tr>
+        <tr><th>分配采样 <code>jdk.ObjectAllocationSample</code></th><td>没有，只有 TLAB 内外分配事件</td><td colspan="2">有（JDK 16 起），带限流，可以一直开</td></tr>
+        <tr><th>线程转储里的 <code>cpu=</code> <code>elapsed=</code></th><td>没有，只能靠 top -H</td><td colspan="2">有（JDK 11 起），一次转储就能看出谁在吃 CPU</td></tr>
+        <tr><th><code>GC.heap_dump -gz</code></th><td>没有</td><td colspan="2">有（JDK 15 起）</td></tr>
+        <tr><th>虚拟线程</th><td colspan="2">没有</td><td><code>jstack</code> 看不到虚拟线程，用 <code>jcmd &lt;pid&gt; Thread.dump_to_file -format=json</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">本机只用 JDK 17 跑了这页的实验；JDK 8 和 21 这一列来自各版本的发行说明和 JEP，没有在本机复现。</p>
+
+  <h3>下一圈</h3>
+  <ul class="rules-list">
+    <li><b>async-profiler 和火焰图</b>：CPU、分配、锁都能画成火焰图，还能看到 native 和内核栈。</li>
+    <li><b>CPU 不高、服务却不响应</b>：死锁、线程池耗尽、全在等下游。线程转储里看 BLOCKED 和 WAITING，见 <a href="../juc/aqs-rwlock-jfr.html">读写锁与 JFR</a> 和 <a href="../juc/threadpool-tuning.html">线程池调优</a>。</li>
+    <li><b>堆外泄漏实战</b>：Netty 直接内存、glibc 的内存碎片，NMT 对不上 RSS 时怎么办。</li>
+    <li><b>Arthas 在线诊断</b>：不重启看方法入参、耗时、热更新一行日志。</li>
+    <li><b>自动化</b>：OOM 后自动上传转储、自动跑 MAT 报告、把排障记录变成告警规则。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：把三个雷修掉，再排一次</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>练习</th><th>用到</th><th>做对了会看到</th></tr></thead>
+      <tbody>
+        <tr><th>1. 把 <code>RECENT</code> 换成有上限的 LRU（<code>LinkedHashMap</code> 重写 <code>removeEldestEntry</code>，上限 1 万），用同样的压测跑 60 秒</th><td>第二圈 · 缓存有上限</td><td>没有 OOM；GC 日志里没有 Full GC，Young GC 之后的占用稳定</td></tr>
+        <tr><th>2. 给雷 1 加上 <code>-XX:+ExitOnOutOfMemoryError</code> 重跑</th><td>坑 1</td><td>进程退出，<code>echo $?</code> 是 3；转储文件照样在</td></tr>
+        <tr><th>3. 先猜：同时发 8 个一分钱的请求，<code>/order</code> 还能返回吗？再跑一次验证，然后给 <code>split</code> 加最大轮数</th><td>④-4 · 第二圈 · 循环要有出口</td><td>8 个线程全部卡住，<code>/order</code> 超时；修好后 <code>cents=1</code> 立即返回 <code>0 1</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>三种现象只有两个问题：内存先看 Full GC 之后降不降，不降找“谁拉着”（堆转储），降了找“谁在猛分配”（GC 日志 + JFR 分配采样）；CPU 先看是哪个线程，GC 线程就回内存路线，业务线程就对到那一行。证据要在出事之前埋好。</p></details>
+    <details><summary>2. “先重启”和“加大堆”这两个老办法，疼在哪？</summary><p>重启把现场弄没了，泄漏过一阵又回来，到时还是没有证据；加堆只是把泄漏的 OOM 往后推（GC 日志页实测 256 MB 第 21 秒、512 MB 第 54 秒），而且 Full GC 要处理的活对象更多，每次停得更久。</p></details>
+    <details><summary>3. 为什么不能照着 OOM 的异常栈去改那一行？是哪条原理？</summary><p>④-1：OOM 是一次分配失败，抛给的是碰巧在分配的那个线程。占内存的可能是另一个线程、很久以前放进去的对象。⑤ 雷 1 里拿到 OOM 的是 <code>HTTP-Dispatcher</code> 这类线程，雷 2 里是 JDK HTTP 服务器的写缓冲。</p></details>
+    <details><summary>4. 预测：雷 2 把堆从 256 MB 调到 1 GB，Full GC 会怎样？这算修好了吗？</summary><p>Full GC 会消失：常驻 108 MB，加上 4 个并发导出约 200 MB 的峰值，1 GB 装得下，大对象在 Young GC 里就被收掉了。从 ④-2 推出：GC 后能降，说明活对象不多，是峰值问题，这种问题加堆是对症的。本机跑过：1 GB 时 30 秒 0 次 Full GC，但 <code>G1 Humongous Allocation</code> 触发的 Young GC 有 514 次；吞吐 1603 个请求、p50 73.5 ms，甚至比 ⑤ 的流式写法（970 个、119 ms，逐字符拷贝更费 CPU）还快。它是合法的修法，代价是内存用量仍和导出行数、并发数成正比，导出量翻几倍又会回来；流式写法让每个请求只用 64 KB，和数据量无关。两个可以一起用。</p></details>
+    <details><summary>5. 预测：雷 3 换成 ZGC，或者把机器从 2 核加到 8 核，会好吗？</summary><p>不会。这是业务线程自己在空转，和 GC 无关（④-4：吃 CPU 的是 <code>http-exec-5</code>，不是 GC 线程）。加核只是让它占的那个核在总量里显得少一点，请求还是永远不返回，线程池里的位置也一直被占着。</p></details>
+    <details><summary>6. 放回全景：第 9 站前后各发生了什么？要是把第 10 站的 OOMKilled 当成第 9 站的堆 OOM 去查，会怎样？</summary><p>前面是第 8 站：GC 日志里 Full GC 越来越密、GC 之后的占用一路上涨，这是泄漏最早的信号；后面是第 10 站：容器只看整个进程的内存。把 OOMKilled 当堆 OOM 查，会去找转储（根本没有，内核直接杀的），找不到就把 <code>-Xmx</code> 调大，结果堆外更没有余量，被杀得更勤。正确的分岔在 ③ 左列：先看退出码 137 和容器事件，再用 NMT 看堆外。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机实测：2 核 ARM，JDK 17.0.20.1，G1。三个雷各跑一次：雷 1 用 <code>-Xmx128m</code>、8 并发压 <code>/order</code> 到 OOM，转储用 Eclipse MAT 1.16.1 命令行解析；雷 2 用 <code>-Xmx256m</code>、常驻 200 万条历史订单、4 并发导出 20 万行各 30 秒，大对象写法和流式写法各一次，另跑了一次 <code>top -H</code>、一次 JFR 分配采样和一次 1 GB 堆（↺ 自测 4）；雷 3 用 <code>top -H</code>、两次 <code>jstack</code> 和 10 秒 JFR（<code>settings=profile</code>）。“只转储第一次”“OOM 时先转储再退出”“同名转储文件不覆盖”“GC overhead limit 只有 Parallel 会报”核对了 OpenJDK 17u 的 HotSpot 源码（<code>debug.cpp</code>、<code>heapDumper.cpp</code>、<code>parallelScavengeHeap.cpp</code>、<code>g1CollectedHeap.cpp</code>）；HTTP 服务器写缓冲按两倍申请核对了 JDK 17 的 <code>sun.net.httpserver.Request</code>；<code>GC.heap_dump</code> 的 <code>-all</code>、<code>-gz</code> 来自本机 <code>jcmd help</code>。16 GB 堆转储要停多久、一个导出请求同时拿着约 50 MB 是估算；版本差异表里 JDK 8 和 21 的部分来自发行说明和 JEP，没有在本机跑；JFR 开销引用的是官方文档的说法。</p>
+  <p>相关：<a href="../java/pano-j03-object-new-to-gc.html">全景：一个对象从 new 到被回收</a> · <a href="jvm-gc-log-tuning.html">GC 日志与调优</a> · <a href="jvm-memory-structure.html">JVM 内存结构</a> · <a href="g1-zgc.html">垃圾回收</a> · <a href="../juc/threadlocal-leak.html">ThreadLocal 与内存泄漏</a> · <a href="../juc/thread-state-context-switch.html">线程状态</a> · <a href="../java/roadmap.html#j03">Java 地图 J03</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+var TR_OPTS = [
+  { k: 'A', t: '内存 · 谁拉着：拍堆转储，MAT 看支配树' },
+  { k: 'B', t: '内存 · 谁在猛分配：看 Humongous，开 JFR 分配采样' },
+  { k: 'C', t: 'CPU · 哪一行：线程号换成 nid，隔几秒拍 jstack' },
+  { k: 'D', t: '堆外 / 容器：看退出码和容器事件，开 NMT' },
+  { k: 'E', t: '证据还不够：先补一条再下结论' }
+];
+var TR_WHY_NOT = {
+  A: '堆转储很贵（要停住进程、写一个堆那么大的文件），要先有“活对象一直在涨”的证据才值得拍。',
+  B: '“谁在猛分配”的前提是 Full GC 之后能降下来；这条证据还说明不了这一点。',
+  C: 'jstack 回答的是“线程在跑哪一行”，这条证据还没指向某个业务线程。',
+  D: '堆外和容器那一路的信号是进程被杀、没有 Java 异常；这里的证据都在 JVM 里面。',
+  E: '这条证据已经够指出方向了，再等只会让现场变得更难拿。'
+};
+var TR_CASES = [
+  { name: 'GC 日志 · 雷 1', src: '⑤ 实测',
+    ev: '[16.243s] Pause Full (G1 Compaction Pause) 124M->117M(128M) 33.7ms\n[16.570s] Pause Full (G1 Compaction Pause) 124M->120M(128M) 29.0ms\n[16.684s] Pause Full (G1 Compaction Pause) 123M->121M(128M) 27.8ms\n…\n[22.041s] Pause Full (G1 Compaction Pause) 125M->125M(128M) 30.1ms',
+    ans: 'A', why: 'Full GC 之后的占用一次比一次高，最后 125M→125M：活对象一直在涨，有东西拉着不放（④-2）。下一步拍堆转储找引用链，⑤-1 里 MAT 指到了 TradeServer.RECENT。' },
+  { name: 'GC 日志 · 雷 2', src: '⑤ 实测',
+    ev: 'Pause Young (Concurrent Start) (G1 Humongous Allocation) 135M->132M(256M) 13.7ms\nPause Young (Normal) (G1 Humongous Allocation) 236M->236M(256M) 0.5ms\nPause Full (G1 Compaction Pause) 236M->153M(256M) 87.5ms\nPause Full (G1 Compaction Pause) 203M->144M(256M) 66.6ms',
+    ans: 'B', why: 'Full GC 之后能降几十 MB，说明活对象不多；日志里成串的 G1 Humongous Allocation 指向大对象（④-2）。下一步用 JFR 分配采样看是谁在分配，⑤-2 里 97% 落在导出接口。' },
+  { name: 'top -H · 大导出时', src: '⑤ 实测',
+    ev: '    PID  %CPU  COMMAND\n1989791  72.4  GC Thre+\n1989773  70.8  GC Thre+\n1989775   8.0  G1 Conc+\n1989822   4.0  http-ex+',
+    ans: 'E', why: 'CPU 是 GC 线程吃掉的，所以该回到内存路线（③ 右列的回头箭头）。但光看 top 分不出是泄漏还是分配太猛，先补一条证据：GC 日志里 Full GC 之后降不降。' },
+  { name: 'top -H · 一分钱', src: '⑤ 实测',
+    ev: '    PID  S  %CPU  COMMAND\n1989158  R  93.8  http-ex+\n1989085  S   0.0  java\n1989088  S   0.0  GC Thre+',
+    ans: 'C', why: '吃 CPU 的是一个业务线程，GC 线程闲着。把 1989158 换成 0x1e5a26，到 jstack 里找 nid=0x1e5a26，隔 2 秒再拍一次，⑤-3 里两次都停在 Coupon.java:19（④-4）。' },
+  { name: 'kubectl describe', src: '按文档的典型输出',
+    ev: 'Last State:  Terminated\n  Reason:    OOMKilled\n  Exit Code: 137\nRestart Count: 6\n# 应用日志里没有 OutOfMemoryError，/data/dump 下没有 .hprof',
+    ans: 'D', why: '退出码 137、OOMKilled：是内核按整个进程的内存杀的，JVM 来不及抛异常、写转储（⑥ 坑 6）。查堆外：开 NMT，用 jcmd VM.native_memory 看线程栈、直接内存、元空间各占多少，再对照容器上限。' },
+  { name: 'OOM · Metaspace', src: '按文档的典型输出',
+    ev: 'java.lang.OutOfMemoryError: Metaspace\n# 每次热部署一个插件后，jstat -gc 里 MU（元空间已用）涨一截，从不回落',
+    ans: 'A', why: '元空间里放的是类的元数据，类只有在加载它的类加载器整个被回收时才会卸载。一直涨，说明旧的类加载器被谁拉着。查法和“谁拉着”一样：拍堆转储，看是谁引用着旧的 ClassLoader（见类加载页）。' },
+  { name: 'OOM 的异常栈', src: '⑤ 实测',
+    ev: 'java.lang.OutOfMemoryError: Java heap space\n  at java.nio.HeapByteBuffer.<init>(HeapByteBuffer.java:64)\n  at java.nio.ByteBuffer.allocate(ByteBuffer.java:363)\n  at sun.net.httpserver.Request$WriteStream.write(Request.java:418)\n  …\n  at labs…TradeServer.export(TradeServer.java:87)',
+    ans: 'E', why: 'OOM 只抛给“最后一个没要到内存的线程”（④-1），这个栈说明不了内存被谁占着。先补一条证据：GC 日志里 Full GC 之后降不降。这一次能降（雷 2），所以接下来走“谁在猛分配”；要是不降，就该拍堆转储了。' }
+];
+function trJudge(caseIdx, choice) {
+  var c = TR_CASES[caseIdx];
+  var ok = choice === c.ans;
+  var label = '';
+  for (var i = 0; i < TR_OPTS.length; i++) if (TR_OPTS[i].k === c.ans) label = TR_OPTS[i].t;
+  return { ok: ok, correct: c.ans,
+           msg: ok ? '猜对了。' + c.why
+                   : '不是这个。' + TR_WHY_NOT[choice] + ' 该选：' + label + '。' + c.why };
+}
+function trScore(results) {
+  var done = 0, right = 0;
+  for (var i = 0; i < results.length; i++) if (results[i] !== null) { done++; if (results[i]) right++; }
+  return { done: done, right: right, total: results.length };
+}
+/*SIM-END*/
+(function () {
+  var box = document.getElementById('tr');
+  if (!box) return;
+  var nav = document.getElementById('tr-nav'), ev = document.getElementById('tr-ev'),
+      opts = document.getElementById('tr-opts'), res = document.getElementById('tr-res'),
+      q = document.getElementById('tr-q'), score = document.getElementById('tr-score');
+  var cur = 0, picks = [], results = [];
+  for (var i = 0; i < TR_CASES.length; i++) { picks.push(null); results.push(null); }
+  var navBtns = TR_CASES.map(function (c, i) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.textContent = (i + 1) + ' ' + c.name;
+    b.addEventListener('click', function () { show(i); });
+    nav.appendChild(b); return b;
+  });
+  var optBtns = TR_OPTS.map(function (o) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.textContent = o.k + '. ' + o.t;
+    b.addEventListener('click', function () { pick(o.k); });
+    opts.appendChild(b); return b;
+  });
+  function paint() {
+    navBtns.forEach(function (b, i) {
+      b.setAttribute('aria-current', i === cur ? 'true' : 'false');
+      b.classList.toggle('ok', results[i] === true);
+      b.classList.toggle('ng', results[i] === false);
+    });
+    var p = picks[cur], r = p ? trJudge(cur, p) : null;
+    optBtns.forEach(function (b, i) {
+      var k = TR_OPTS[i].k;
+      b.setAttribute('aria-pressed', p === k ? 'true' : 'false');
+      b.classList.toggle('right', !!r && k === r.correct);
+      b.classList.toggle('wrong', !!r && p === k && !r.ok);
+    });
+    ev.textContent = TR_CASES[cur].ev;
+    q.textContent = '案例 ' + (cur + 1) + '（' + TR_CASES[cur].src + '）：看到这条证据，下一步该做什么？';
+    if (r) { res.textContent = r.msg; res.setAttribute('data-role', r.ok ? 'done' : 'bad'); }
+    else { res.textContent = '先选一个答案。'; res.setAttribute('data-role', 'bk'); }
+    var s = trScore(results);
+    score.textContent = '已答 ' + s.done + ' / ' + s.total + '，猜对 ' + s.right + ' 个';
+  }
+  function show(i) { cur = (i + TR_CASES.length) % TR_CASES.length; paint(); }
+  function pick(k) {
+    if (picks[cur]) return;               // 第一次的猜测才算数
+    picks[cur] = k; results[cur] = trJudge(cur, k).ok; paint();
+  }
+  document.getElementById('tr-prev').addEventListener('click', function () { show(cur - 1); });
+  document.getElementById('tr-next').addEventListener('click', function () { show(cur + 1); });
+  document.getElementById('tr-reset').addEventListener('click', function () {
+    for (var i = 0; i < picks.length; i++) { picks[i] = null; results[i] = null; }
+    show(0);
+  });
+  box.addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); show(cur + 1); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); show(cur - 1); }
+  });
+  paint();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
