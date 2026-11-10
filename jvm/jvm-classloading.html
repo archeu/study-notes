@@ -1,0 +1,1369 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>类加载与双亲委派</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step method for a mechanism (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), J03 panorama stop 1. Roles: bk teal = bootstrap loader, pd blue = platform (JDK 8: ext) loader, of amber = app loader (and page accent), cg purple = child loaders (Tomcat webapp, framework children), rn pink = SPI / ServiceLoader / TCCL; bad / good / other fixed. Interaction: one delegation walker in ④ (pick a scene, guess the defining loader, step through) — sim in SIM block, checked in node. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>JVM</span><span aria-hidden="true">/</span><span class="tb-here">类加载与双亲委派：SPI 为什么要打破它</span></div></nav>
+
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-good" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-rn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-rn" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+
+<header class="hero">
+  <p class="kicker">ClassLoader · loadClass · findLoadedClass · parent · findClass · 启动 / 平台 / 应用 · 类的身份 · ClassCastException · ServiceLoader · META-INF/services · TCCL · 子优先 · Metaspace</p>
+  <h1>类加载与双亲委派：先问上级，核心类就只有一份；SPI 要反着找，就得借线程手里的加载器</h1>
+  <p class="lead">JVM 里一个类的身份是<b>类名 + 定义它的加载器</b>。双亲委派规定每个加载器先问上级、上级找不到才自己来，所以 <code>java.lang.String</code> 这类核心类在整个 JVM 里只有一份，应用换不掉。代价是上层的代码<b>看不见下层的类</b>。可 JDBC 这类 SPI 正好要反过来：接口和 <code>DriverManager</code> 在 JDK 里，实现在你的 jar 里。于是 <code>ServiceLoader</code> 改用<b>线程上下文类加载器</b>（TCCL）去下层找。在交易靶场里实测：同一个 <code>Order.class</code> 被两个加载器各加载一次，就报 <code>Order cannot be cast to Order</code>；框架用自己的加载器找支付渠道的实现，找到 0 个，换成 TCCL 找到 1 个。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j03-object-new-to-gc.html#s-1">一个对象从 new 到被回收 · 第 1 站</a></span><span>地图：<a href="../java/roadmap.html#j03">J03 · 类加载与双亲委派，SPI 为什么要打破它</a></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：第一次 new Order，JVM 手里还没有 Order</h2>
+    <p class="lead">在全景第 1 站，下单线程执行到 <code>new Order(9527, 2)</code>。JVM 要先有 Order 这个类，才能知道一个订单占几个字节、构造方法在哪。可这时它手里只有一个名字 <code>labs.trade.Order</code>。从名字到能用的类，要回答三件事：<b>去哪找</b>字节（classpath 上几十个 jar），<b>找到后怎么变成类</b>（校验、放进元空间），<b>找到两份时用哪份</b>。负责这件事的就是类加载器（ClassLoader）。</p>
+  </div>
+  <div class="facts">
+    <div class="fact" data-role="of"><h4>app</h4><p><code>Order</code> 由应用类加载器定义，在第一次 <code>new</code> 时才加载 <span class="tag-real">实测</span></p></div>
+    <div class="fact" data-role="bk"><h4>null</h4><p><code>String.class.getClassLoader()</code>：启动类加载器是 C++ 写的，Java 里拿不到它 <span class="tag-real">实测</span></p></div>
+    <div class="fact" data-role="pd"><h4>platform</h4><p>JDK 17 上 <code>DriverManager</code> 由平台类加载器定义，不是启动类加载器 <span class="tag-real">实测</span></p></div>
+    <div class="fact" data-role="bad"><h4>0 → 1</h4><p>框架用自己的加载器找支付渠道实现：0 个；换成 TCCL：1 个 <span class="tag-real">实测</span></p></div>
+  </div>
+  <div class="scene"><b>场景</b><span>交易靶场的下单服务，<code>java -cp target/classes:lib/* …</code> 启动。用户 1024 下单，线程第一次执行 <code>new Order</code>；同一个进程里，订单要写库，<code>DriverManager.getConnection</code> 得找到 <code>-cp</code> 上 MySQL 驱动 jar 里的 <code>com.mysql.cj.jdbc.Driver</code>。这两件事都靠类加载器，后一件恰好要“打破”前一件的规矩。</span></div>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 260" role="img" aria-label="第 1 站发生的事：线程执行 new Order，JVM 发现 Order 还没加载，交给应用类加载器；加载器从 classpath 读出 Order.class 的字节，校验、解析成类的元数据放进元空间，在堆里建一个 Class 对象；然后才轮到第 3 站在 Eden 里分配 48 字节。">
+  <rect class="b-card" x="20" y="40" width="170" height="70" rx="12"/>
+  <text class="t-b" x="36" y="68">下单线程</text><text class="t-mono" x="36" y="92">new Order(9527, 2)</text>
+  <path class="e-ink" d="M190 75 L250 75" marker-end="url(#ah-ink)"/>
+  <rect class="b-neu" x="254" y="40" width="160" height="70" rx="12"/>
+  <text class="t-b" x="270" y="68">JVM 查一下</text><text class="t-s" x="270" y="92">Order 还没加载</text>
+  <path class="e-ink" d="M414 75 L470 75" marker-end="url(#ah-ink)"/>
+  <rect class="b-of" x="474" y="30" width="200" height="90" rx="12"/>
+  <text class="t-b" x="490" y="58">应用类加载器</text><text class="t-s" x="490" y="80">先问上级（本页的主角）</text><text class="t-xs" x="490" y="100">没人有，才自己去 classpath 找</text>
+  <path class="e-ink" d="M574 120 L574 160" marker-end="url(#ah-ink)"/>
+  <rect class="b-card" x="474" y="164" width="200" height="60" rx="12"/>
+  <text class="t-mono" x="490" y="188">target/classes/…/Order.class</text><text class="t-xs" x="490" y="208">一串字节：CA FE BA BE …</text>
+  <path class="e-ink" d="M674 75 L730 75" marker-end="url(#ah-ink)"/>
+  <rect class="b-pd" x="734" y="30" width="206" height="54" rx="12"/>
+  <text class="t-b" x="750" y="52">元空间（堆外）</text><text class="t-xs" x="750" y="72">类的元数据：字段、方法、常量池</text>
+  <rect class="b-bk" x="734" y="96" width="206" height="54" rx="12"/>
+  <text class="t-b" x="750" y="118">堆里一个 Class 对象</text><text class="t-xs" x="750" y="138">Order.class 拿到的就是它</text>
+  <path class="e-ofd" d="M836 150 L836 190" marker-end="url(#ah-ink)"/>
+  <text class="t-s" x="720" y="214">然后才到第 3 站：Eden 里分 48 字节</text>
+  <text class="t-xs" x="20" y="250">这一步只在第一次发生；之后每个 Order 对象头里的类指针都指向那份元数据。</text>
+</svg>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：每个加载器各找各的</h2>
+    <p class="lead">设想没有“先问上级”的规矩：每个加载器拿到名字，就去自己能看到的地方找，找到就定义。听起来更简单，问题出在“同一个名字可能被定义好几次”。</p>
+  </div>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>各找各的</h4>
+      <ul class="pains">
+        <li>classpath 上放一个自己写的 <code>java.lang.String</code>，应用加载器就会用它，JDK 的那份被顶掉</li>
+        <li>两个加载器都能看到 <code>Order.class</code>，就各定义一个 Order</li>
+        <li>每个加载器把 <code>Object</code>、<code>String</code> 这些基础类也各加载一遍</li>
+      </ul>
+    </div>
+    <div class="way" data-role="bad">
+      <h4>后果</h4>
+      <ul class="pains">
+        <li>安全和稳定都没了底：核心类可以被任何一个 jar 换掉，<code>String</code> 的不可变也就没了保证</li>
+        <li>两个 Order 名字一样，JVM 却当成两个类。⑤ 里实测：<code>(Order) fromA</code> 抛 <code>class labs…Order cannot be cast to class labs…Order</code></li>
+        <li>同样的元数据在元空间里存好几份；一个类的对象传给另一个加载器的代码，类型就对不上</li>
+      </ul>
+    </div>
+  </div>
+  <p class="tip">缺的是一条规矩，让同一个名字的类在需要共享的范围内<b>只被定义一次</b>，并且核心类<b>永远由最上层定义</b>。双亲委派就是这条规矩。不懂这一点的典型误用：以为“类名一样就是同一个类”。开了 Spring Boot devtools 热重启，或者把同一个 jar 同时放进 Tomcat 的 <code>lib/</code> 和应用的 <code>WEB-INF/lib</code>，看到 <code>X cannot be cast to X</code> 就一头雾水。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：请求往哪个方向走</h2>
+    <p class="lead">“谁来定义这个类”有几种做法。JDK 默认是父优先，其他几种都是在它上面为某个需要改的。</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>请求怎么走</th><th>谁在用</th><th>为了什么</th></tr></thead>
+      <tbody>
+        <tr class="hl"><th>父优先（双亲委派）</th><td>先问上级，上级都没有才自己找</td><td>JDK 的 <code>ClassLoader.loadClass</code> 默认实现；自己继承 <code>ClassLoader</code> 只重写 <code>findClass</code> 的也是</td><td>核心类唯一、不可替换；同一个类不重复加载</td></tr>
+        <tr><th>按模块直达</th><td>先看包属于哪个模块，直接交给定义这个模块的加载器；不在模块里才按父优先</td><td>JDK 9+ 的三个内置加载器（<code>BuiltinClassLoader</code>）</td><td>模块化以后，包和加载器的对应关系启动时就定了，不用一层层问</td></tr>
+        <tr><th>子优先</th><td>JDK 的类仍先交给上层；其余的先找自己，找不到才问上级</td><td>Tomcat 的 webapp 加载器（默认 <code>delegate=false</code>）</td><td>每个应用用自己 <code>WEB-INF/lib</code> 里的版本，互不干扰</td></tr>
+        <tr><th>反向（借 TCCL）</th><td>上层的代码拿着下层的加载器去加载</td><td><code>ServiceLoader</code>、JDBC、JNDI、Spring 的 <code>SpringFactoriesLoader</code></td><td>上层定义接口，下层提供实现（SPI）</td></tr>
+        <tr><th>网状</th><td>按声明的导入导出，直接找提供这个包的那个模块</td><td>OSGi</td><td>同一进程里一个库的多个版本并存</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">选择规则：普通应用不用选，用默认的父优先；需要“同一个 JVM 里多个应用各用各的版本”时用子优先或网状；需要“框架定义接口、业务提供实现”时用 SPI，它离不开 TCCL。本页学父优先，以及 SPI 和 Tomcat 这两种“打破”。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：一个类的一生、三层加载器、身份，以及 SPI 为什么要反着走</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><code>.class</code> 文件就是一串字节，开头是 <code>CA FE BA BE</code>。它可以来自目录、jar、网络，甚至运行时现生成（动态代理）。</li>
+      <li>类的元数据放在<b>元空间</b>，在堆外；堆里另有一个 <code>Class</code> 对象代表它。见 <a href="jvm-memory-structure.html#m-map">JVM 内存结构</a>。</li>
+      <li>每个对象头里有一个类指针，指向它的类的元数据，见 <a href="jvm-object-new-layout.html">new 一个对象的全过程</a>。<code>instanceof</code> 和强转比的就是这个指针。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-life">④-1 一个类的一生：加载器只管第一步</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 270" role="img" aria-label="类的一生：加载（类加载器找字节、定义类）→ 链接，包括验证（字节码合法）、准备（静态字段清零）、解析（符号引用换成直接引用，可以推迟）→ 初始化（执行 static 块，只一次，JVM 加锁）→ 使用 → 卸载（只有定义它的加载器整个不可达后才可能）。">
+  <rect class="b-of" x="16" y="40" width="160" height="96" rx="12"/>
+  <text class="t-h" x="32" y="66">加载</text>
+  <text class="t-s" x="32" y="90">类加载器按名字找字节</text><text class="t-s" x="32" y="110">调 defineClass 定义类</text>
+  <text class="t-xs" x="32" y="128">唯一能由你插手的一步</text>
+  <path class="e-ink" d="M176 88 L204 88" marker-end="url(#ah-ink)"/>
+  <rect class="b-card" x="208" y="28" width="330" height="120" rx="12"/>
+  <text class="t-h" x="224" y="52">链接</text>
+  <rect class="b-neu" x="222" y="62" width="96" height="74" rx="10"/><text class="t-b" x="232" y="84">验证</text><text class="t-xs" x="232" y="104">字节码合法吗</text><text class="t-xs" x="232" y="120">会不会越界</text>
+  <rect class="b-neu" x="326" y="62" width="96" height="74" rx="10"/><text class="t-b" x="336" y="84">准备</text><text class="t-xs" x="336" y="104">静态字段分配</text><text class="t-xs" x="336" y="120">先填 0 / null</text>
+  <rect class="b-neu" x="430" y="62" width="96" height="74" rx="10"/><text class="t-b" x="440" y="84">解析</text><text class="t-xs" x="440" y="104">符号引用换成</text><text class="t-xs" x="440" y="120">真地址，可推迟</text>
+  <path class="e-ink" d="M538 88 L566 88" marker-end="url(#ah-ink)"/>
+  <rect class="b-pd" x="570" y="40" width="160" height="96" rx="12"/>
+  <text class="t-h" x="586" y="66">初始化</text>
+  <text class="t-s" x="586" y="90">执行 static 块和</text><text class="t-s" x="586" y="110">静态字段赋值</text>
+  <text class="t-xs" x="586" y="128">只一次，JVM 加锁</text>
+  <path class="e-ink" d="M730 88 L758 88" marker-end="url(#ah-ink)"/>
+  <rect class="b-good" x="762" y="40" width="80" height="96" rx="12"/><text class="t-h" x="778" y="94">使用</text>
+  <path class="e-ink" d="M842 88 L862 88" marker-end="url(#ah-ink)"/>
+  <rect class="b-dash" x="866" y="40" width="80" height="96" rx="12"/><text class="t-h" x="882" y="80">卸载</text><text class="t-xs" x="876" y="104">加载器整个</text><text class="t-xs" x="876" y="120">不可达才行</text>
+  <text class="t-b" x="16" y="180">什么时候初始化（JLS 12.4.1，下面这些“第一次”）</text>
+  <text class="t-s" x="16" y="204">new · 调静态方法 · 读写非常量的静态字段 · Class.forName(name) · 子类初始化之前先初始化父类 · main 所在的类</text>
+  <text class="t-b" x="16" y="236">只加载、不初始化</text>
+  <text class="t-s" x="16" y="258">loader.loadClass(name) · Class.forName(name, false, loader) · 读 static final 的编译期常量（编译时就抄进调用方了）</text>
+</svg>
+  </div>
+  <p class="tip">⑤ 的 <code>WhoLoads</code> 里，<code>Order</code> 的 static 块在“准备 new Order”之后才打印，<code>-Xlog:class+load</code> 里那一行也排在它前面一点：加载和初始化都推迟到第一次真正用到。初始化失败时（static 块抛异常），这个类会被标成错误状态，之后每次用都报 <code>NoClassDefFoundError: Could not initialize class</code>，见 <a href="#p-init">⑥ 坑 4</a>。</p>
+
+  <h3 id="m-three">④-2 三层加载器，和 loadClass 的十几行</h3>
+  <div class="two">
+    <div class="fig-box">
+<svg class="sv" viewBox="0 0 470 380" role="img" aria-label="JDK 17 的加载器层次，从上到下：启动类加载器，管 java.base 等核心模块，Java 里是 null；平台类加载器，管 java.sql、java.xml.crypto 等模块；应用类加载器，管 -cp 上的目录和 jar；自定义加载器，比如 Tomcat 的 webapp 加载器、URLClassLoader。请求从下往上问，找不到再从上往下回来，由第一个找到的加载器定义。">
+  <rect class="b-bk" x="20" y="16" width="300" height="64" rx="12"/>
+  <text class="t-b" x="36" y="40">启动类加载器（Bootstrap）</text><text class="t-xs" x="36" y="60">java.base 等 · lib/modules · Java 里是 null</text>
+  <rect class="b-pd" x="20" y="108" width="300" height="64" rx="12"/>
+  <text class="t-b" x="36" y="132">平台类加载器（Platform）</text><text class="t-xs" x="36" y="152">java.sql、java.xml.crypto 等 · JDK 8 叫 Ext</text>
+  <rect class="b-of" x="20" y="200" width="300" height="64" rx="12"/>
+  <text class="t-b" x="36" y="224">应用类加载器（App / System）</text><text class="t-xs" x="36" y="244">-cp 上的目录和 jar · Order 在这里</text>
+  <rect class="b-cg" x="20" y="292" width="300" height="64" rx="12"/>
+  <text class="t-b" x="36" y="316">自定义加载器</text><text class="t-xs" x="36" y="336">Tomcat webapp、URLClassLoader、热部署</text>
+  <path class="e-ink" d="M350 340 L350 40" marker-end="url(#ah-ink)"/>
+  <text class="t-b" x="362" y="120">① 先问</text><text class="t-b" x="362" y="140">上级</text>
+  <path class="e-good" d="M420 40 L420 330" marker-end="url(#ah-good)"/>
+  <text class="t-good" x="362" y="250">② 上级没有</text><text class="t-good" x="362" y="270">才往下回</text>
+  <text class="t-xs" x="362" y="200" >parent 字段</text>
+</svg>
+    </div>
+    <div class="codebox">
+      <div class="code-bar"><span class="n">源码</span><b>java.lang.ClassLoader#loadClass</b><span class="tip" style="margin-left:auto">JDK 17，删了计时</span></div>
+<pre><code>protected Class&lt;?&gt; loadClass(String name, boolean resolve) {
+  synchronized (getClassLoadingLock(name)) {   <span class="cm">// 同名并发加载只放一个</span>
+    Class&lt;?&gt; c = <span class="hl">findLoadedClass(name)</span>;        <span class="cm">// 1. 我加载过吗</span>
+    if (c == null) {
+      try {
+        if (parent != null)
+          c = <span class="hl">parent.loadClass(name, false)</span>;  <span class="cm">// 2. 先问上级</span>
+        else
+          c = findBootstrapClassOrNull(name);   <span class="cm">// 顶上是启动类加载器</span>
+      } catch (ClassNotFoundException e) { }
+      if (c == null)
+        c = <span class="hl">findClass(name)</span>;                 <span class="cm">// 3. 都没有，才自己找</span>
+    }
+    if (resolve) resolveClass(c);
+    return c;
+  }
+}</code></pre>
+    </div>
+  </div>
+  <p class="tip">自定义加载器只需要重写 <code>findClass</code>：去哪找字节、然后 <code>defineClass</code>。要“打破”委派，就得重写 <code>loadClass</code> 本身，Tomcat 就是这么做的。JDK 9 以后三个内置加载器另有一套 <code>BuiltinClassLoader.loadClassOrNull</code>：先查这个包属于哪个模块，属于模块就<b>直接交给那个模块的加载器</b>，不在模块里（classpath 上的类）才走上面的父优先。效果一样，少问几层。</p>
+
+  <h3 id="m-walk">④-3 委派走一遍<small style="font-family:var(--font-body);font-size:14px;color:var(--muted);margin-left:8px">先猜由谁定义，再一步一步看</small></h3>
+  <div class="lab walker" id="dl" tabindex="0" aria-label="委派走一遍：方向键左右切换步骤">
+    <div class="presets scn" id="dl-presets"></div>
+    <div class="guess" data-role="of" id="dl-guess">
+      <p id="dl-q">先选一个场景。</p>
+      <div class="opts" id="dl-opts"></div>
+      <p class="res" id="dl-ans" hidden></p>
+    </div>
+    <div class="ldr" id="dl-ladder">
+      <div class="lrow" data-l="boot" data-role="bk"><div class="lname"><b>启动类加载器</b><span>null</span></div><div class="lsee">java.base 等核心模块：<code>java.lang.*</code>、<code>java.util.*</code></div><div class="lstate" id="dl-st-boot"></div></div>
+      <div class="lrow" data-l="plat" data-role="pd"><div class="lname"><b id="dl-plat-name">平台类加载器</b><span id="dl-plat-sub">platform</span></div><div class="lsee" id="dl-plat-see"><code>java.sql</code> 等模块：<code>DriverManager</code>、<code>Driver</code> 接口</div><div class="lstate" id="dl-st-plat"></div></div>
+      <div class="lrow" data-l="app" data-role="of"><div class="lname"><b>应用类加载器</b><span>app</span></div><div class="lsee" id="dl-app-see">-cp 上的 <code>target/classes</code> 和依赖 jar</div><div class="lstate" id="dl-st-app"></div></div>
+      <div class="lrow" data-l="web" data-role="cg" id="dl-row-web"><div class="lname"><b>webapp 加载器</b><span>Tomcat，子优先</span></div><div class="lsee"><code>WEB-INF/classes</code>、<code>WEB-INF/lib</code></div><div class="lstate" id="dl-st-web"></div></div>
+    </div>
+    <ol class="dlog" id="dl-log"></ol>
+    <div class="run-row">
+      <button class="btn" type="button" id="dl-prev">← 上一步</button>
+      <button class="btn primary" type="button" id="dl-next">下一步 →</button>
+      <button class="btn" type="button" id="dl-auto">自动播放</button>
+      <button class="btn" type="button" id="dl-reset">从头来</button>
+    </div>
+    <div class="lab-res" data-role="of" id="dl-res">选一个场景，猜一下，再点“下一步”。</div>
+  </div>
+  <p class="tip">步骤照 JDK 17 的 <code>ClassLoader.loadClass</code>、<code>BuiltinClassLoader.loadClassOrNull</code> 和 Tomcat 文档里 webapp 加载器的查找顺序编排，模拟逻辑在 node 里跑过；每个加载器“地盘里有什么”是这个场景的设定。</p>
+
+  <h3 id="m-id">④-4 类的身份：名字 + 定义它的加载器</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 220" role="img" aria-label="同一个 Order.class 文件，被应用类加载器和一个 URLClassLoader 各定义一次，在元空间里是两份元数据、两个 Class 对象。对象 fromA 的类指针指向 URLClassLoader 那份；强转成 Order 时，代码里写的 Order 是 app 那份，指针对不上，抛 ClassCastException。">
+  <rect class="b-card" x="20" y="80" width="170" height="60" rx="12"/><text class="t-mono" x="36" y="106">Order.class</text><text class="t-xs" x="36" y="126">同一个文件，同样的字节</text>
+  <path class="e-ink" d="M190 100 L290 50" marker-end="url(#ah-ink)"/><path class="e-ink" d="M190 120 L290 170" marker-end="url(#ah-ink)"/>
+  <rect class="b-of" x="294" y="20" width="300" height="60" rx="12"/><text class="t-b" x="310" y="46">Order @ app</text><text class="t-xs" x="310" y="66">代码里写的 Order、Order.class 都是它</text>
+  <rect class="b-cg" x="294" y="140" width="300" height="60" rx="12"/><text class="t-b" x="310" y="166">Order @ URLClassLoader@251a69d7</text><text class="t-xs" x="310" y="186">名字一样，元空间里另一份元数据</text>
+  <text class="t-bad" x="430" y="114" style="font-size:22px">≠</text>
+  <rect class="b-card" x="680" y="140" width="250" height="60" rx="12"/><text class="t-b" x="696" y="166">fromA（一个订单对象）</text><text class="t-xs" x="696" y="186">对象头的类指针 → 下面那份</text>
+  <path class="e-ink" d="M680 170 L598 170" marker-end="url(#ah-ink)"/>
+  <path class="e-badd" d="M805 140 L805 60 L598 50" marker-end="url(#ah-bad)"/>
+  <text class="t-bad" x="700" y="110">(Order) fromA：指针对不上</text><text class="t-bad" x="700" y="128">→ ClassCastException</text>
+</svg>
+  </div>
+  <p class="tip">这条规则是本页一半坑的根源。双亲委派保证的是：只要请求都先往上走，同一个名字在这条链上只会被<b>一个</b>加载器定义。一旦有两个加载器都绕开上级、自己定义了同名类，就是两个类。</p>
+
+  <h3 id="m-design">④-5 为什么非得先问上级</h3>
+  <div class="design">
+    <div class="way" data-role="of"><h4>父优先（选中）</h4>
+      <ul class="pains">
+        <li class="ok"><code>java.lang.String</code> 一定落到启动类加载器，全 JVM 只有一份；应用里同名的类永远轮不到</li>
+        <li class="ok">一个类被谁加载，只取决于“链上最高的、能看到它的那一层”，结果是确定的</li>
+        <li class="ok">上层定义过的不再重复定义，元空间里只一份</li>
+        <li class="ok">类型检查依然便宜：比一下类指针就行</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other"><h4>被放弃的：各找各的，或处处子优先</h4>
+      <ul class="pains">
+        <li>任何 jar 都能顶替核心类，JDK 的安全检查（比如 <code>String</code> 不可变、<code>SecurityManager</code> 时代的权限检查）就形同虚设</li>
+        <li>结果取决于“谁先被问到”，同一个名字在不同代码里可能是不同的类，处处有 ⑤ 那种 ClassCastException</li>
+        <li>要靠更复杂的规则补救：Tomcat 子优先时也得先把 JDK 的类交给上层，Servlet API 也不许应用自己带</li>
+      </ul>
+    </div>
+  </div>
+  <p class="mismatch"><b>决定胜负的约束：</b>核心类必须全 JVM 唯一、不可替换，而 JVM 判断“是不是同一个类”只看名字和定义它的加载器。在这两条下面，让请求一律先往上走，是最简单的能保证唯一的办法。它的代价也由此而来：<b>请求只往上走，上层的代码就看不见下层的类。</b></p>
+
+  <h3 id="m-spi">④-6 SPI 为什么要打破：接口在上面，实现在下面</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="SPI 的困境和解法：DriverManager 和 java.sql.Driver 接口由平台类加载器定义；MySQL 驱动 jar 在 classpath 上，由应用类加载器看到，它的 META-INF/services/java.sql.Driver 文件里写着 com.mysql.cj.jdbc.Driver。DriverManager 用自己的加载器往下看不到这个 jar。ServiceLoader.load(Driver.class) 改用当前线程的上下文类加载器 TCCL，main 线程的 TCCL 是应用类加载器，于是由应用类加载器读出服务文件、加载实现类；实现类引用的 java.sql.Driver 接口照常往上委派，拿到的是平台类加载器那一份，所以类型对得上。">
+  <rect class="b-pd" x="20" y="20" width="420" height="110" rx="14"/>
+  <text class="t-b" x="36" y="44">平台类加载器定义的</text>
+  <rect class="b-card" x="36" y="56" width="180" height="60" rx="10"/><text class="t-mono" x="48" y="80">DriverManager</text><text class="t-xs" x="48" y="100">getConnection 要找驱动</text>
+  <rect class="b-card" x="236" y="56" width="190" height="60" rx="10"/><text class="t-mono" x="248" y="80">java.sql.Driver</text><text class="t-xs" x="248" y="100">接口（SPI）</text>
+  <rect class="b-of" x="20" y="200" width="420" height="110" rx="14"/>
+  <text class="t-b" x="36" y="224">应用类加载器看得到的（-cp）</text>
+  <rect class="b-card" x="36" y="236" width="390" height="60" rx="10"/><text class="t-mono" x="48" y="258">mysql-connector-j.jar</text><text class="t-monos" x="48" y="280">META-INF/services/java.sql.Driver → com.mysql.cj.jdbc.Driver</text>
+  <path class="e-badd" d="M126 116 L126 196" marker-end="url(#ah-bad)"/>
+  <text class="t-bad" x="136" y="160">用自己的加载器往下找：看不见</text>
+  <path class="e-ink" d="M330 236 L330 120" marker-end="url(#ah-ink)"/>
+  <text class="t-s" x="340" y="176">实现类引用的接口</text><text class="t-s" x="340" y="194">照常往上委派 → 同一份</text>
+  <rect class="b-rn" x="520" y="40" width="420" height="250" rx="14"/>
+  <text class="t-h" x="540" y="68" style="fill:var(--rn)">解法：借线程手里的加载器</text>
+  <text class="t-mono" x="540" y="98">ServiceLoader.load(Driver.class)</text>
+  <text class="t-s" x="540" y="120">→ Thread.currentThread()</text>
+  <text class="t-s" x="556" y="140">.getContextClassLoader()</text>
+  <text class="t-s" x="540" y="168">每个线程带一个加载器引用（TCCL），</text>
+  <text class="t-s" x="540" y="188">默认继承自创建它的线程；main 线程的是 app</text>
+  <text class="t-s" x="540" y="216">所以 DriverManager 在上层，却能让 app</text>
+  <text class="t-s" x="540" y="236">读服务文件、加载 com.mysql.cj.jdbc.Driver</text>
+  <text class="t-xs" x="540" y="266">JDK 17 源码：ServiceLoader.load(Class) 第一行就取 TCCL</text>
+  <path class="e-ink" d="M520 120 L446 86" marker-end="url(#ah-rn)" style="stroke:var(--rn)"/>
+  <path class="e-ink" d="M520 230 L446 260" marker-end="url(#ah-rn)" style="stroke:var(--rn)"/>
+</svg>
+  </div>
+  <div class="trio">
+    <div class="ess" data-role="rn"><h4>破的是方向</h4><p>双亲委派只允许“下层问上层”。SPI 让上层的代码主动用下层的加载器去加载，这才叫打破。⑤ 的 <code>SpiDemo</code>：框架用自己的加载器找到 0 个实现，TCCL 换成 app 找到 1 个。</p></div>
+    <div class="ess" data-role="of"><h4>没破的是 loadClass</h4><p>TCCL 指向的 app 加载器自己仍然父优先：先问平台、启动，没有才在 <code>-cp</code> 上找。所以实现类里引用的 <code>java.sql.Driver</code> 拿到的还是上层那一份，类型对得上。</p></div>
+    <div class="ess" data-role="bad"><h4>新的约束</h4><p>TCCL 指向的加载器必须能把接口委派回同一份。⑤ 里把 TCCL 换成一个不委派的加载器，它自己又定义了一份接口，结果是 <code>MockPay not a subtype</code>。DriverManager 还会用调用方的加载器再核对一遍驱动（<code>isDriverAllowed</code>），就是在防这个。</p></div>
+  </div>
+  <p class="tip">Tomcat 是另一种打破：webapp 加载器重写了 <code>loadClass</code>，JDK 的类先交给上层，其余的先找 <code>WEB-INF</code>，找不到才问上级。目的是让每个应用用自己的依赖版本，热部署时整个加载器扔掉重建。这两种打破在实验台里都能走一遍。</p>
+
+  <div class="codebox">
+    <div class="code-bar"><span class="n">API</span><b>最少要会的几行</b><span class="tip" style="margin-left:auto">参数和版本差异放到 ⑥</span></div>
+<pre><code>Order.class.getClassLoader();                         <span class="cm">// 谁定义了它；启动类加载器返回 null</span>
+Class.forName("labs.trade.Order");                    <span class="cm">// 用调用方的加载器，加载并初始化</span>
+Class.forName("labs.trade.Order", false, loader);     <span class="cm">// 指定加载器，不初始化</span>
+loader.loadClass("labs.trade.Order");                 <span class="cm">// 走委派，只加载不初始化</span>
+Thread.currentThread().getContextClassLoader();       <span class="cm">// TCCL，框架加载“用户的类”时用它</span>
+ServiceLoader.load(PaymentChannel.class);             <span class="cm">// 读 META-INF/services/接口全名，按 TCCL 加载实现</span>
+
+<span class="cm"># src/main/resources/META-INF/services/labs.jvm.jvm_classloading.spi.PaymentChannel</span>
+labs.jvm.jvm_classloading.channel.MockPay</code></pre>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：交易靶场里的三个小实验</h2>
+    <p class="lead">代码在 study-labs 的 <code>jvm/jvm-classloading</code>，<code>--release 8</code> 编译，JDK 17 运行，不需要任何依赖。三个实验分别看：谁加载了谁；两个 Order；支付渠道的 SPI。</p>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">0</span><b>编译、运行</b><span class="tip" style="margin-left:auto">2 核 ARM · JDK 17.0.20.1</span></div>
+<pre><code>cd study-labs/java && JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64 mvn -q -pl jvm/jvm-classloading compile
+cd jvm/jvm-classloading            <span class="cm"># 实验按相对路径 target/classes 找类，要在这里运行</span>
+J=/usr/lib/jvm/java-17-openjdk-arm64/bin/java; M=labs.jvm.jvm_classloading
+$J -Xlog:class+load -cp target/classes $M.WhoLoads | grep -E "Order|DriverManager|─"
+$J -cp target/classes $M.TwoOrders
+$J -cp target/classes $M.SpiDemo</code></pre>
+  </div>
+
+  <h3 style="margin-top:8px">1. 谁加载了谁</h3>
+<pre class="console"><span class="w">加载器链（从下往上）：</span>
+  jdk.internal.loader.ClassLoaders$AppClassLoader@30946e09
+  jdk.internal.loader.ClassLoaders$PlatformClassLoader@5f712fd4
+  null = 启动类加载器（C++ 实现，Java 里拿不到对象）
+<span class="w">  String                     → <b>null</b></span>
+<span class="w">  DriverManager              → <b>…PlatformClassLoader</b>@5f712fd4</span>
+[class,load] java.sql.DriverManager source: jrt:/java.sql
+<span class="w">准备 new Order ……</span>
+[class,load] labs.jvm.jvm_classloading.Order source: file:/…/target/classes/   <span class="cm"># 第一次 new 时才加载</span>
+  [Order 的 static 块执行了：类初始化，只会有一次] loader=…AppClassLoader@30946e09
+<span class="w">  Order                      → <b>…AppClassLoader</b>@30946e09</span>
+<span class="w">当前线程的上下文类加载器（TCCL）：…AppClassLoader@30946e09</span></pre>
+
+  <h3 style="margin-top:8px">2. 两个 Order</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">2</span><b>TwoOrders.java（节选）</b><a href="https://github.com/archeu/study-labs/tree/main/java/jvm/jvm-classloading" style="margin-left:auto">完整代码 →</a></div>
+<pre><code>URL classes = new File("target/classes").toURI().toURL();
+<span class="cm">// parent = null：只问启动类加载器，不问 app，相当于“各找各的”</span>
+URLClassLoader a = new URLClassLoader(new URL[]{classes}, <span class="hl">null</span>);
+URLClassLoader b = new URLClassLoader(new URL[]{classes}, <span class="hl">null</span>);
+Class&lt;?&gt; ca = a.loadClass("labs.jvm.jvm_classloading.Order");
+Class&lt;?&gt; cb = b.loadClass("labs.jvm.jvm_classloading.Order");
+Object fromA = ca.getConstructor(long.class, int.class).newInstance(1024L, 2);
+Order o = (Order) fromA;     <span class="cm">// 这里的 Order 是 app 定义的那个</span></code></pre>
+  </div>
+<pre class="console"><span class="w">ca.getName().equals(cb.getName()) = true</span>
+<span class="w">ca == cb                           = <b>false</b></span>
+<span class="w">ca == Order.class                  = <b>false</b></span>
+  [Order 的 static 块执行了：类初始化，只会有一次] loader=java.net.URLClassLoader@251a69d7   <span class="cm"># “只一次”是对每个类而言：这是另一个类</span>
+<span class="w">fromA instanceof Order             = <b>false</b></span>
+<span class="r">ClassCastException: class labs.jvm.jvm_classloading.Order cannot be cast to class labs.jvm.jvm_classloading.Order
+ (labs.jvm.jvm_classloading.Order is in unnamed module of loader java.net.URLClassLoader @251a69d7;
+  labs.jvm.jvm_classloading.Order is in unnamed module of loader 'app')</span></pre>
+  <p class="tip">JDK 17 上这条异常信息会把两边的加载器都写出来。看到 <code>X cannot be cast to X</code>，先看括号里的两个 loader。</p>
+
+  <h3 style="margin-top:8px">3. 支付渠道 SPI：框架在上，实现在下</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">3</span><b>SpiDemo / ChannelRegistry（节选）</b><a href="https://github.com/archeu/study-labs/tree/main/java/jvm/jvm-classloading" style="margin-left:auto">完整代码 →</a></div>
+<pre><code><span class="cm">// 两层：framework 只定义 spi 包（接口 PaymentChannel、框架代码 ChannelRegistry），看不见服务文件</span>
+<span class="cm">//      app = URLClassLoader(target/classes)，parent = framework，能看到实现 channel.MockPay</span>
+FrameworkLoader framework = new FrameworkLoader();
+Named app      = new Named("app", framework);
+Named isolated = new Named("isolated", null);        <span class="cm">// 不委派：自己再定义一份接口</span>
+
+<span class="cm">// ChannelRegistry 里：</span>
+ServiceLoader.load(PaymentChannel.class, ChannelRegistry.class.getClassLoader());  <span class="cm">// ① 用自己的</span>
+ServiceLoader.load(PaymentChannel.class);                                           <span class="cm">// ②③④ 用 TCCL</span>
+
+<span class="cm">// 换 TCCL 的写法：用完一定还回去</span>
+ClassLoader old = t.getContextClassLoader();
+t.setContextClassLoader(cl);
+try { … } finally { t.setContextClassLoader(old); }</code></pre>
+  </div>
+<pre class="console"><span class="w">ChannelRegistry 由谁定义：<b>framework</b></span>
+<span class="w">MockPay        由谁定义：<b>app</b></span>
+<span class="w">① 框架用自己的加载器找实现：<b>0 个 []</b></span>
+<span class="w">② TCCL = framework → <b>0 个 []</b></span>
+<span class="w">③ TCCL = app        → <b>1 个 [MockPay(loader=app)]</b></span>
+<span class="r">④ TCCL = isolated   → ServiceConfigurationError: labs.jvm.jvm_classloading.spi.PaymentChannel: labs.jvm.jvm_classloading.channel.MockPay not a subtype</span></pre>
+  <p class="tip"><b>到这里已经能交差了</b>：能说出一个类由谁加载、为什么会 <code>X cannot be cast to X</code>、SPI 找不到实现时先查 TCCL。<b>已知还没处理的细节</b>：加载器泄漏把元空间撑爆（<a href="#p-leak">坑 2</a>），线程池里 TCCL 不对（<a href="#p-tccl">坑 3</a>），初始化失败后的 <code>NoClassDefFoundError</code>（<a href="#p-init">坑 4</a>），依赖冲突（<a href="#p-dup">坑 5</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：坑、规范、更深一层</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-cce"><b><em>坑 1</em>X cannot be cast to X<a class="root" href="#m-id">← ④-4 类的身份</a><span class="seen">⑤ 实测</span></b>
+      <dl><dt>现象</dt><dd>类名完全一样，强转却失败；或者 <code>instanceof</code> 莫名其妙地是 false。常见于 Spring Boot devtools 热重启后，以及同一个 jar 同时在 Tomcat <code>lib/</code> 和 <code>WEB-INF/lib</code> 里。</dd>
+      <dt>根源</dt><dd>有两个加载器各自定义了这个类。devtools 把你的代码放进一个会重建的 <code>RestartClassLoader</code>，依赖 jar 留在基础加载器里；如果某个库把对象缓存在 static 字段里，重启后拿出来的是旧加载器的类。</dd>
+      <dt>做法</dt><dd class="fix">看异常括号里的两个 loader，确定是哪两个；把这个类只留在一处（删掉重复的 jar），或者让缓存跟着重启一起清掉。</dd></dl>
+    </div>
+    <div class="pit" id="p-leak"><b><em>坑 2</em>反复热部署后 OutOfMemoryError: Metaspace<a class="root" href="#m-life">← ④-1 卸载要加载器整个不可达</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>每重新部署一次，元空间涨一截，几次之后 <code>OutOfMemoryError: Metaspace</code>。</dd>
+      <dt>根源</dt><dd>一个类只有在定义它的加载器、这个加载器定义的所有类、以及这些类的所有实例都没人引用时才能卸载。任何一个对象被长寿的地方攥着（容器线程的 <code>ThreadLocal</code>、JDBC 驱动注册表、static 缓存、没停的线程），整个加载器连同它的全部类都卸不掉。见 <a href="../juc/threadlocal-leak.html">ThreadLocal 与内存泄漏</a>。</dd>
+      <dt>做法</dt><dd class="fix">停应用时注销驱动、停线程、清 ThreadLocal；用 <code>jcmd &lt;pid&gt; VM.classloader_stats</code> 看加载器有多少个、各占多少元空间，用堆转储找谁引用着旧加载器。下面这张图是 <code>LoaderLeak</code> 的实测。</dd></dl>
+    </div>
+  </div>
+  <div class="fig-box wide" style="margin-top:12px">
+<svg class="sv" viewBox="0 0 960 260" role="img" aria-label="LoaderLeak 实测，元空间上限 32 MB，每轮一个新加载器加 4 个类。攥着对象时：第 500 轮 9.2 MB，第 1000 轮 17.0 MB，第 1500 轮 24.6 MB，然后在 2000 轮之前 OutOfMemoryError: Metaspace。用完就丢时：前 1500 轮一样涨到 24.6 MB，接近上限时触发 GC，卸载了 6192 个类，第 2000 轮降到 8.5 MB，之后 16.1、23.7 MB，跑完 3000 轮没有 OOM。">
+  <line class="e-axis" x1="80" y1="210" x2="920" y2="210"/><line class="e-axis" x1="80" y1="30" x2="80" y2="210"/>
+  <line class="e-badd" x1="80" y1="45.4" x2="920" y2="45.4"/><text class="t-bad" x="916" y="39.4" text-anchor="end">MaxMetaspaceSize = 32 MB</text>
+  <text class="t-xs" x="70" y="214.0" text-anchor="end">0</text><text class="t-xs" x="70" y="162.6" text-anchor="end">10</text><text class="t-xs" x="70" y="111.1" text-anchor="end">20</text><text class="t-xs" x="70" y="59.7" text-anchor="end">30</text>
+  <text class="t-xs" x="20" y="22">元空间已用（MB）</text>
+  <text class="t-xs" x="220" y="228" text-anchor="middle">500</text><text class="t-xs" x="360" y="228" text-anchor="middle">1000</text><text class="t-xs" x="500" y="228" text-anchor="middle">1500</text><text class="t-xs" x="640" y="228" text-anchor="middle">2000</text><text class="t-xs" x="780" y="228" text-anchor="middle">2500</text><text class="t-xs" x="900" y="228" text-anchor="middle">3000 轮</text>
+  <polyline class="e-good" points="80,213.0 220,165.7 360,125.6 500,86.5 640,166.3 780,127.2 920,88.1"/>
+  <polyline class="e-bad" points="80,210.0 220,162.7 360,122.6 500,83.5"/>
+  <path class="e-badd" d="M500 83.5 L560 50.6"/><text class="t-bad" x="566" y="54.6">攥着：2000 轮之前 OOM</text>
+  <text class="t-good" x="652" y="184.3">用完就丢：GC 卸载 6192 个类，掉回 8.5 MB</text>
+  <text class="t-xs" x="80" y="252">前 1500 轮两条线重合（绿线下移了 3 px 以便看见）：类卸载要等 GC，元空间涨到高水位才触发那次 GC。</text>
+</svg>
+  </div>
+  <div class="pits" style="margin-top:12px">
+    <div class="pit" id="p-tccl"><b><em>坑 3</em>SPI 或按名字加载，换个线程就找不到类<a class="root" href="#m-spi">← ④-6 TCCL</a><span class="seen">源码核对</span></b>
+      <dl><dt>现象</dt><dd>同一段代码在 main 线程里好好的，放进 <code>parallelStream()</code>、<code>CompletableFuture.supplyAsync</code>（默认用公共池）里，就 <code>ClassNotFoundException</code> 或找不到实现。Spring Boot 可执行 jar 里最常见。</dd>
+      <dt>根源</dt><dd>TCCL 是跟着线程走的。JDK 17 的 <code>ForkJoinPool</code> 公共池，工作线程的 TCCL 被设成系统类加载器（<code>ForkJoinWorkerThread</code> 源码、<code>ForkJoinPool</code> 文档）。可执行 jar 里你的类和依赖由 Spring Boot 自己的加载器加载，系统类加载器看不到。</dd>
+      <dt>做法</dt><dd class="fix">在用到的地方显式传加载器：<code>ServiceLoader.load(X.class, X.class.getClassLoader())</code>；或者用自己的线程池，线程工厂里设好 TCCL；临时换 TCCL 一定写在 try/finally 里还回去。</dd></dl>
+    </div>
+    <div class="pit" id="p-init"><b><em>坑 4</em>NoClassDefFoundError: Could not initialize class X<a class="root" href="#m-life">← ④-1 初始化只一次</a><span class="seen">按 JLS</span></b>
+      <dl><dt>现象</dt><dd>第一次报 <code>ExceptionInInitializerError</code>，之后每次都报 <code>NoClassDefFoundError: Could not initialize class X</code>，类明明就在 jar 里。</dd>
+      <dt>根源</dt><dd>static 块或静态字段赋值抛了异常，这个类被标成初始化失败（JLS 12.4.2），JVM 不会再试第二次。和 <code>ClassNotFoundException</code> 不同：后者是按名字（<code>Class.forName</code>、<code>loadClass</code>）找不到字节。</dd>
+      <dt>做法</dt><dd class="fix">往日志前面翻，找<b>第一次</b>的 <code>ExceptionInInitializerError</code> 和它的 cause；static 块里不要做读配置、连网络这种会失败的事，改成懒加载。</dd></dl>
+    </div>
+    <div class="pit" id="p-dup"><b><em>坑 5</em>依赖冲突：NoSuchMethodError、NoClassDefFoundError<a class="root" href="#m-three">← ④-2 findLoadedClass + 按顺序找</a><span class="seen">按文档</span></b>
+      <dl><dt>现象</dt><dd>编译通过，运行时 <code>NoSuchMethodError</code>；换一台机器或换个启动方式，问题时有时无。</dd>
+      <dt>根源</dt><dd>classpath 上有同一个类的两个版本（比如 guava 两个版本）。同一个加载器只定义一次，按 classpath 的顺序拿第一份，后面那份永远不会被用到。顺序变了，用到的版本就变了。</dd>
+      <dt>做法</dt><dd class="fix"><code>mvn dependency:tree -Dincludes=…</code> 找出是谁引进来的，排除掉一个；运行时用 <code>-Xlog:class+load</code>（JDK 8 是 <code>-verbose:class</code>）看这个类实际来自哪个 jar。</dd></dl>
+    </div>
+    <div class="pit" id="p-core"><b><em>坑 6</em>想覆盖一个 JDK 类，结果不生效或直接报错<a class="root" href="#m-design">← ④-5 核心类不可替换</a><span class="seen">源码核对</span></b>
+      <dl><dt>现象</dt><dd>在项目里放一个同名的 <code>java.util.XXX</code> 想打补丁，运行时还是 JDK 的；用自定义加载器 <code>defineClass</code> 它，报 <code>SecurityException: Prohibited package name: java.util</code>。</dd>
+      <dt>根源</dt><dd>请求一定先到上层；就算绕开委派自己定义，<code>ClassLoader.preDefineClass</code> 也拒绝非启动、非平台加载器定义 <code>java.*</code> 包里的类。</dd>
+      <dt>做法</dt><dd class="fix">别改 JDK 类。真要换框架里的类，用框架提供的扩展点；要改字节码用 Java agent（<code>Instrumentation</code>）。</dd></dl>
+    </div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>框架加载“用户的类”：先用传进来的加载器，没有再用 TCCL</b><p>别用 <code>Class.forName(name)</code> 一个参数的版本，它用的是框架自己的加载器。Spring 的 <code>ClassUtils.getDefaultClassLoader()</code> 就是 TCCL → 自己的加载器 → 系统加载器这个顺序。</p><p class="guard">坑 3，以及框架放在上层时找不到业务类。</p></div>
+    <div class="rl"><b>换 TCCL 一定 try/finally 还回去</b><p>⑤ 的 <code>SpiDemo.run</code> 就是这个写法。线程池里的线程会被复用，忘了还，下一个任务拿到的是别人的加载器。</p><p class="guard">莫名其妙的 ClassCastException，以及旧加载器被线程攥住（坑 2）。</p></div>
+    <div class="rl"><b>自定义加载器只重写 findClass</b><p>除非像 Tomcat 那样确实要改顺序，否则不要重写 <code>loadClass</code>；要支持并发加载，在 static 块里调 <code>registerAsParallelCapable()</code>。</p><p class="guard">核心类被重复定义；多线程同时加载时全局一把锁。</p></div>
+    <div class="rl"><b>长寿的地方别攥着短命加载器的东西</b><p>static 缓存、注册表、线程、<code>ThreadLocal</code> 里放的对象，要是来自会被丢掉的加载器（插件、热部署、脚本引擎），要有对应的清理或用弱引用。</p><p class="guard">坑 2 的元空间泄漏。</p></div>
+    <div class="rl"><b>static 块只做不会失败的事</b><p>读配置、连网络、加载本地库放到第一次使用时，失败可以重试。</p><p class="guard">坑 4：一次失败，整个进程里这个类再也用不了。</p></div>
+    <div class="rl"><b>元空间设上限，并且监控它</b><p><code>-XX:MaxMetaspaceSize</code> 默认不限，泄漏时会一直吃到容器被杀；设个上限，配合 <code>jvm.memory.used{area=nonheap,id=Metaspace}</code> 告警。</p><p class="guard">泄漏变成没有日志的容器 OOMKilled（全景第 10 站）。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>更深一层</h3></div>
+  <div class="two">
+    <div class="way" data-role="pd"><h4>JDK 9 以后，委派按模块走，平台加载器甚至会往下交</h4>
+      <p>三个内置加载器都是 <code>BuiltinClassLoader</code>。启动时建好“包 → 模块 → 加载器”的表，<code>loadClassOrNull</code> 先查表，查到就直接交给那个加载器（④-3 实验台里 String 那一步）。JDK 17 的 <code>ClassLoader</code> 文档写明：为了支持升级平台模块，平台加载器在某些情况下“may have to delegate to other class loaders, the application class loader for example”。classpath 上的类不在命名模块里，仍按父优先。</p></div>
+    <div class="way" data-role="bk"><h4>全景里那行 “source: shared objects file”</h4>
+      <p>JDK 自带的类大多从 CDS 归档里直接映射进来，跳过读文件和解析；JDK 12 起默认带一份归档。⑤ 里 <code>DriverManager</code> 显示 <code>source: jrt:/java.sql</code>，说明它不在默认归档里，是现读的。应用自己的类也可以做进归档（AppCDS），启动更快。</p></div>
+    <div class="way" data-role="cg"><h4>类为什么这么难卸载</h4>
+      <p>启动、平台、应用这三个加载器活到进程结束，它们定义的类永远不卸载（JLS 12.7）。只有自定义加载器整个变成垃圾，它的类才会在某次 GC 里一起卸载。⑤ 的 <code>LoaderLeak</code> 里，“用完就丢”的版本前 1500 轮也一直在涨，直到元空间接近上限触发 GC，才一次卸了 6192 个类。加 <code>-Xlog:class+unload</code> 能看到每一个。</p></div>
+    <div class="way" data-role="rn"><h4>Spring 的“SPI”：spring.factories 和 AutoConfiguration.imports</h4>
+      <p>Spring Boot 的自动配置也是“框架定义扩展点、jar 里写清单”，<code>SpringFactoriesLoader</code> 和 <code>ImportCandidates</code> 都用传入的加载器（通常是 TCCL）去读 <code>META-INF</code> 下的文件，原理和 <code>ServiceLoader</code> 相同。见 <a href="../spring/spring-boot-startup.html">Spring Boot 启动流程</a>。</p></div>
+  </div>
+
+  <h3 id="v-diff" style="margin-top:12px">版本差异</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>JDK</th><th>变化</th><th>对你意味着什么</th></tr></thead>
+      <tbody>
+        <tr><td>8</td><td>三层是启动 / 扩展（Ext，管 <code>jre/lib/ext</code>）/ 应用；核心类在 <code>rt.jar</code>；<code>DriverManager</code> 由启动类加载器加载，在静态初始化时就用 <code>ServiceLoader</code> 扫一遍驱动</td><td>老资料里的“扩展类加载器”指的是这一代</td></tr>
+        <tr><td>9</td><td>模块化（JEP 261）：去掉 <code>rt.jar</code> 和扩展机制（JEP 220），Ext 换成平台类加载器；<code>java.sql</code> 等模块改由平台加载器定义；内置加载器按模块直达</td><td>别再把 jar 放进 <code>lib/ext</code>；<code>DriverManager.class.getClassLoader()</code> 不再是 null（⑤ 实测是 platform）</td></tr>
+        <tr><td>17</td><td><code>DriverManager</code> 在第一次 <code>getConnection</code> / <code>getDrivers</code> 时才扫描驱动（<code>ensureDriversInitialized</code>，本机源码；具体从哪一版改的没有核对）；<code>ClassCastException</code> 信息带上两边的加载器；公共池线程的 TCCL 是系统加载器</td><td>驱动加载时机比 8 晚；排查坑 1 直接看异常信息；坑 3</td></tr>
+        <tr><td>21</td><td>类加载这一块和 17 一致（<code>DriverManager</code> 源码同样是 <code>ensureDriversInitialized</code>）；虚拟线程同样有 TCCL，默认继承创建它的线程</td><td>升级 17 → 21 这里不用改</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 style="margin-top:12px">下一圈</h3>
+  <ul class="next">
+    <li>Tomcat <code>WebappClassLoaderBase.loadClass</code> 源码：子优先的完整顺序，以及停应用时的泄漏检测</li>
+    <li>Spring Boot 可执行 jar 的 <code>LaunchedURLClassLoader</code>（3.2 起叫 <code>LaunchedClassLoader</code>）：jar 套 jar 是怎么读出来的</li>
+    <li>Java agent 与 <code>Instrumentation</code>：在类加载时改字节码（Arthas、SkyWalking 的原理）</li>
+    <li>隐藏类（JDK 15，JEP 371）：lambda 生成的类改成隐藏类以后，为什么可以单独卸载</li>
+    <li>JIT、逃逸分析（全景第 2 站，下一个知识点）：类加载完以后，代码是怎么变快的</li>
+    <li>JVM 故障排查（第 9 站）：用 <code>VM.classloader_stats</code>、堆转储把坑 2 查到具体引用链</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改造你的案例</h2>
+  </div>
+  <div class="trio">
+    <div class="ess" data-role="of"><h4>1. 让两个 Order 变成一个</h4><p>按 ④-4，把 <code>TwoOrders</code> 里两个加载器的 parent 从 <code>null</code> 改成 <code>TwoOrders.class.getClassLoader()</code>。先猜 <code>ca == cb</code> 和强转的结果，再跑；说出是哪一步委派让它们变成了同一个类。</p></div>
+    <div class="ess" data-role="rn"><h4>2. 在线程池里找支付渠道</h4><p>按坑 3，在 <code>SpiDemo</code> 里先把 main 线程的 TCCL 设成 <code>framework</code>，再建一个线程池去调 <code>viaTccl()</code>：找得到几个？然后用线程工厂修好它。</p></div>
+    <div class="ess" data-role="bad"><h4>3. 只放掉一半</h4><p>按坑 2，<code>LoaderLeak -Dkeep=true</code> 时只删掉 <code>HOLD.add(o)</code>，代理对象照留。先猜还会不会 OOM，再跑，用 ④-1 的卸载条件解释。</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>类的身份是“名字 + 定义它的加载器”；双亲委派让请求先往上走，保证核心类唯一、同名类不重复定义，代价是上层看不见下层；SPI 的接口在上层、实现在下层，所以要借线程上下文类加载器反过来找。</p></details>
+    <details><summary>2. 没有双亲委派、各找各的，疼在哪？</summary><p>核心类能被任何 jar 顶替；同一个名字被几个加载器各定义一次，就是几个不同的类，互相传对象就 ClassCastException（⑤ 实测 <code>Order cannot be cast to Order</code>）；同样的元数据存好几份。</p></details>
+    <details><summary>3. 热部署几次就 Metaspace OOM，根源是哪条原理？</summary><p>④-1 的卸载条件：类只有在定义它的加载器整个不可达时才能卸载。旧应用里只要有一个对象被容器线程、static 字段或注册表攥着，它的类 → 加载器 → 加载器定义的所有类都留在元空间里。</p></details>
+    <details><summary>4. 预测：在 JDK 17 上，把 <code>Class.forName("com.mysql.cj.jdbc.Driver")</code> 写在一个由平台类加载器定义的类里执行（假设能做到），会怎样？</summary><p>抛 <code>ClassNotFoundException</code>。一个参数的 <code>forName</code> 用调用方自己的加载器，平台加载器只会往上问启动类加载器，看不见 <code>-cp</code> 上的 jar（④-2、④-6）。这正是 <code>DriverManager</code> 要借 TCCL 的原因。</p></details>
+    <details><summary>5. 预测：Tomcat 里应用 A 和应用 B 都在 <code>WEB-INF/lib</code> 带了同一版本的 <code>jackson</code>，内存里有几份 <code>ObjectMapper</code> 类？如果把它挪到 Tomcat 的 <code>lib/</code> 并从两个应用里删掉呢？</summary><p>前者两份：webapp 加载器子优先，各自定义一份，两个应用之间不能直接传 jackson 对象。后者一份：两个 webapp 加载器在自己那里找不到，交给上级 common 加载器，它只定义一次（④-2 的 findLoadedClass）。代价是两个应用必须用同一个版本。</p></details>
+    <details><summary>6. 放回全景：第 1 站的前后各发生了什么？类加载坏了，整条链路会怎样？</summary><p>前面是下单线程执行到 <code>new Order</code>；后面是第 2 站 JIT 把热点代码编译进代码缓存、第 3 站在 Eden 的 TLAB 里分配 48 字节，对象头里的类指针就指向第 1 站放进元空间的元数据。类加载坏了有三种样子：加载器泄漏让元空间一直涨，最后 <code>OutOfMemoryError: Metaspace</code>，或者没设上限时进程超出容器内存被杀（第 10 站），下单接口整体不可用；同一个类被两个加载器加载，订单对象一过框架边界就 <code>ClassCastException</code>，请求在第 1 站之后就失败；SPI 找不到 MySQL 驱动，订单写不了库，堆和 GC 都正常，问题却在类加载。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机 2 核 ARM，JDK 17.0.20.1。标“实测”的来自 study-labs <code>jvm/jvm-classloading</code> 的四个程序各跑一次：<code>WhoLoads</code>（含 <code>-Xlog:class+load</code>）、<code>TwoOrders</code>、<code>SpiDemo</code>、<code>LoaderLeak</code>（<code>-XX:MaxMetaspaceSize=32m</code>，<code>keep=true</code> 和 <code>false</code> 各一次）。没有在 JDK 8、21 上跑；JDK 8 的行为按文档写，21 只核对了 <code>DriverManager</code> 源码。实验台是按源码和文档编排的模拟。</p>
+  <p>按源码和文档：JDK 17 源码 <code>ClassLoader.loadClass</code>、<code>preDefineClass</code>（<code>Prohibited package name</code>）、<code>jdk.internal.loader.BuiltinClassLoader.loadClassOrNull</code>、<code>ClassLoaders</code>（三个内置加载器的父子关系）、<code>ServiceLoader.load(Class)</code>、<code>ForkJoinWorkerThread</code> 和 <code>ForkJoinPool</code> 文档（公共池用系统加载器做 TCCL）；JDK 17 / 21 <code>java.sql.DriverManager</code>（<code>ensureDriversInitialized</code>、<code>isDriverAllowed</code>）；JLS 12.4（初始化时机和失败状态）、12.7（卸载）；JEP 220、261；Tomcat Class Loader How-To（webapp 加载器的查找顺序）。</p>
+  <p>相关：<a href="../java/pano-j03-object-new-to-gc.html">全景：一个对象从 new 到被回收</a> · <a href="jvm-memory-structure.html">JVM 内存结构</a> · <a href="jvm-object-new-layout.html">new 一个对象的全过程</a> · <a href="../juc/threadlocal-leak.html">ThreadLocal 与内存泄漏</a> · <a href="../javase/exception-reflection-proxy.html">异常、反射、注解与动态代理</a> · <a href="../spring/spring-boot-startup.html">Spring Boot 启动流程</a> · <a href="../java/roadmap.html#j03">Java 地图 J03</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 委派模拟：照 JDK 17 的 BuiltinClassLoader.loadClassOrNull（按包找模块 → 直达；否则先问 parent，再找自己的 classpath）
+// 和 Tomcat WebappClassLoader（delegate=false：先问启动类加载器，再找自己，最后才问上级）。
+var LOADERS = ['boot', 'plat', 'app', 'web'];
+var PARENT = { boot: null, plat: 'boot', app: 'plat', web: 'app' };
+// 包 → 定义它的模块所在的加载器（JDK 9+ 启动时就建好的表，只列这页用到的）
+var MODULE_PKG = { 'java.lang': 'boot', 'java.util': 'boot', 'java.sql': 'plat' };
+function pkgOf(cn) { return cn.substring(0, cn.lastIndexOf('.')); }
+
+function simulate(sc) {
+  var steps = [];
+  var cache = sc.cache || {};
+  function step(at, kind, text) { steps.push({ at: at, kind: kind, text: text }); }
+  function findOwn(l, cn) {
+    var has = (sc.sees[l] || []).indexOf(cn) >= 0;
+    step(l, has ? 'hit' : 'miss', has ? '在自己的地盘找到了 ' + short(cn) + '，读字节、定义这个类' : '自己的地盘里也没有');
+    return has ? l : null;
+  }
+  function load(l, cn) {
+    if (cache[l] && cache[l].indexOf(cn) >= 0) { step(l, 'cached', 'findLoadedClass 命中：这个加载器以前定义过它，直接返回'); return l; }
+    if (l === 'web') {
+      step(l, 'ask', '子优先，但 JDK 自己的类谁也不许换：先交给 JavaSE 那一层（平台 → 启动）');
+      var r0 = load('plat', cn);
+      if (r0) return r0;
+      var r1 = findOwn('web', cn); if (r1) return r1;
+      step(l, 'ask', '自己没有，才交给上级（app）');
+      return load('app', cn);
+    }
+    if (l === 'boot') return findOwn('boot', cn);
+    var m = sc.jdk8 ? null : MODULE_PKG[pkgOf(cn)];
+    if (m) {
+      if (m === l) return findOwn(l, cn);
+      step(l, 'direct', '包 ' + pkgOf(cn) + ' 属于一个命名模块，直接交给定义该模块的加载器');
+      return load(m, cn);
+    }
+    step(l, 'ask', '先问上级');
+    var r = load(PARENT[l], cn);
+    if (r) return r;
+    return findOwn(l, cn);
+  }
+  (sc.pre || []).forEach(function (p) { step(p[0], p[1], p[2]); });
+  var def = load(sc.start, sc.cn);
+  return { steps: steps, definer: def };
+}
+function short(cn) { return cn.substring(cn.lastIndexOf('.') + 1); }
+
+var SCENES = {
+  order1: { label: '第一次 new Order', start: 'app', cn: 'labs.trade.Order',
+    sees: { boot: ['java.lang.String', 'java.lang.Object'], app: ['labs.trade.Order'] } },
+  order2: { label: '第二次 new Order', start: 'app', cn: 'labs.trade.Order', cache: { app: ['labs.trade.Order'] },
+    sees: { boot: ['java.lang.String'], app: ['labs.trade.Order'] } },
+  string: { label: 'classpath 上放一个自己写的 java.lang.String', start: 'app', cn: 'java.lang.String', cache: { boot: ['java.lang.String'] },
+    sees: { boot: ['java.lang.String'], app: ['java.lang.String', 'labs.trade.Order'] } },
+  string8: { label: '同上，换成 JDK 8', start: 'app', cn: 'java.lang.String', jdk8: true, cache: { boot: ['java.lang.String'] },
+    sees: { boot: ['java.lang.String'], app: ['java.lang.String', 'labs.trade.Order'] } },
+  tomcat: { label: 'Tomcat 里的 webapp 加载 Order', start: 'web', cn: 'labs.trade.Order',
+    sees: { boot: ['java.lang.String'], app: ['labs.trade.Order'], web: ['labs.trade.Order'] } },
+  spi: { label: 'DriverManager 找 MySQL 驱动', start: 'app', cn: 'com.mysql.cj.jdbc.Driver',
+    pre: [['plat', 'ask', 'getConnection 第一次被调用：DriverManager（平台加载器定义的）要找 java.sql.Driver 的实现'],
+          ['plat', 'miss', '用自己的加载器找 META-INF/services/java.sql.Driver：mysql 的 jar 在 -cp 上，往上看不到它'],
+          ['app', 'tccl', 'ServiceLoader.load(Driver.class) 改用当前线程的上下文类加载器（TCCL），main 线程的 TCCL 就是 app']],
+    sees: { boot: ['java.lang.String'], app: ['com.mysql.cj.jdbc.Driver'] } }
+};
+/*SIM-END*/
+
+var GUESS = {
+  order1: { q: 'Order 第一次被用到，最后由哪个加载器定义？', opts: [['启动类加载器', 0], ['平台类加载器', 0], ['应用类加载器', 1]],
+    why: '上面两层都问过了，地盘里都没有 Order，才轮到 app 在 -cp 上找到它（④-2 的第 2、3 步）。这一路只在第一次走。' },
+  order2: { q: '第二次 new Order，还会一层层问上级吗？', opts: [['会，从头再走一遍', 0], ['不会，app 直接返回', 1]],
+    why: 'loadClass 第一步就是 findLoadedClass：这个加载器定义过的类直接返回。委派的开销只在第一次。' },
+  string: { q: 'classpath 上放了一个自己写的 java.lang.String，会被用上吗？', opts: [['会，app 在 -cp 上先找到它', 0], ['不会，用的是启动类加载器那份', 1]],
+    why: 'JDK 9+ 里 java.lang 属于 java.base 模块，app 查表后直接交给启动类加载器，它早就加载过 String。你的那份永远轮不到（④-5）。' },
+  string8: { q: '换成 JDK 8，和上一个场景比有什么不同？', opts: [['路径变了，结果一样', 1], ['结果变成你的 String', 0], ['完全一样', 0]],
+    why: 'JDK 8 没有模块表，app 先问扩展、扩展再问启动，到启动类加载器拿到 rt.jar 里的 String。多问了一层，结果相同。' },
+  tomcat: { q: 'webapp 的 WEB-INF/classes 和 -cp 上都有 Order，谁定义？', opts: [['应用类加载器（上级优先）', 0], ['webapp 加载器', 1]],
+    why: '子优先：JDK 的类先交给上层，其余的先找自己。webapp 有就用自己的，-cp 上那份没用上；webapp 没带，才交给 app。' },
+  spi: { q: 'DriverManager 由平台加载器定义，它拿到的 MySQL 驱动类由谁定义？', opts: [['平台类加载器', 0], ['应用类加载器', 1], ['找不到，抛异常', 0]],
+    why: 'DriverManager 自己往下看不见 -cp，借 TCCL（main 线程的就是 app）去加载；app 自己仍是父优先，问完上面两层才定义它（④-6）。' }
+};
+var NAMES = { boot: '启动类加载器', plat: '平台类加载器', app: '应用类加载器', web: 'webapp 加载器' };
+var KIND = { ask: '问上级', direct: '按模块直达', miss: '没有', hit: '找到，定义它', cached: '已加载过', tccl: '被 TCCL 选中' };
+
+(function () {
+  var box = document.getElementById('dl'); if (!box) return;
+  var presets = document.getElementById('dl-presets'), q = document.getElementById('dl-q'), opts = document.getElementById('dl-opts'),
+      ans = document.getElementById('dl-ans'), log = document.getElementById('dl-log'), res = document.getElementById('dl-res'),
+      autoBtn = document.getElementById('dl-auto');
+  var cur = null, run = null, idx = 0, timer = null;
+
+  Object.keys(SCENES).forEach(function (k) {
+    var b = document.createElement('button'); b.type = 'button'; b.dataset.k = k;
+    b.innerHTML = '<b>' + SCENES[k].label + '</b><span>' + SCENES[k].cn + '</span>';
+    b.addEventListener('click', function () { pick(k); });
+    presets.appendChild(b);
+  });
+
+  function stop() { if (timer) { clearInterval(timer); timer = null; autoBtn.textContent = '自动播放'; } }
+
+  function pick(k) {
+    stop(); cur = k; run = simulate(SCENES[k]); idx = 0;
+    presets.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.k === k ? 'true' : 'false'); });
+    var jdk8 = !!SCENES[k].jdk8;
+    document.getElementById('dl-plat-name').textContent = jdk8 ? '扩展类加载器' : '平台类加载器';
+    document.getElementById('dl-plat-sub').textContent = jdk8 ? 'ext（JDK 8）' : 'platform';
+    document.getElementById('dl-plat-see').innerHTML = jdk8 ? '<code>jre/lib/ext</code> 下的 jar' : '<code>java.sql</code> 等模块：<code>DriverManager</code>、<code>Driver</code> 接口';
+    document.getElementById('dl-row-web').hidden = k !== 'tomcat';
+    var g = GUESS[k]; q.textContent = g.q; opts.innerHTML = ''; ans.hidden = true;
+    g.opts.forEach(function (o) {
+      var b = document.createElement('button'); b.type = 'button'; b.textContent = o[0];
+      b.addEventListener('click', function () {
+        opts.querySelectorAll('button').forEach(function (x, i) {
+          x.classList.remove('right', 'wrong'); x.setAttribute('aria-pressed', 'false');
+          if (g.opts[i][1]) x.classList.add('right');
+        });
+        b.setAttribute('aria-pressed', 'true'); if (!o[1]) b.classList.add('wrong');
+        ans.hidden = false; ans.textContent = (o[1] ? '猜对了。' : '猜错了。') + g.why;
+      });
+      opts.appendChild(b);
+    });
+    render();
+  }
+
+  function render() {
+    var rows = box.querySelectorAll('.lrow');
+    rows.forEach(function (r) { r.classList.remove('on', 'def'); var st = r.querySelector('.lstate'); st.textContent = ''; st.className = 'lstate'; });
+    log.innerHTML = '';
+    if (!run) return;
+    for (var i = 0; i < idx; i++) {
+      var s = run.steps[i];
+      var li = document.createElement('li');
+      li.innerHTML = '<span class="who" data-role="' + roleOf(s.at) + '">' + NAMES[s.at] + '</span>' + s.text;
+      if (i === idx - 1) li.className = 'cur';
+      log.appendChild(li);
+      var st = document.getElementById('dl-st-' + s.at);
+      st.textContent = KIND[s.kind]; st.className = 'lstate k-' + s.kind;
+    }
+    if (idx > 0) box.querySelector('.lrow[data-l="' + run.steps[idx - 1].at + '"]').classList.add('on');
+    var done = idx >= run.steps.length;
+    if (done && run.definer) {
+      box.querySelector('.lrow[data-l="' + run.definer + '"]').classList.add('def');
+      res.setAttribute('data-role', roleOf(run.definer));
+      res.innerHTML = '<b>结果：由' + NAMES[run.definer] + '定义。</b>' + GUESS[cur].why;
+    } else {
+      res.setAttribute('data-role', 'of');
+      res.textContent = idx === 0 ? '第 0 / ' + run.steps.length + ' 步：点“下一步”，或者按方向键。' : '第 ' + idx + ' / ' + run.steps.length + ' 步';
+    }
+  }
+  function roleOf(l) { return { boot: 'bk', plat: 'pd', app: 'of', web: 'cg' }[l]; }
+  function next() { if (!run) pick('order1'); if (idx < run.steps.length) { idx++; render(); } else stop(); }
+  function prev() { stop(); if (run && idx > 0) { idx--; render(); } }
+
+  document.getElementById('dl-next').addEventListener('click', function () { stop(); next(); });
+  document.getElementById('dl-prev').addEventListener('click', prev);
+  document.getElementById('dl-reset').addEventListener('click', function () { stop(); idx = 0; render(); });
+  autoBtn.addEventListener('click', function () {
+    if (timer) { stop(); return; }
+    if (!run) pick('order1');
+    if (idx >= run.steps.length) idx = 0;
+    autoBtn.textContent = '暂停'; render();
+    timer = setInterval(function () { if (idx >= run.steps.length) stop(); else { idx++; render(); } }, 1100);
+  });
+  box.addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); stop(); next(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
+  });
+  pick('order1');
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
