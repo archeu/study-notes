@@ -122,6 +122,7 @@
 | 02 | [网络 IO 模型](https://archeu.github.io/study-notes/network/io-models.html) | 一万个连接要几个线程：五种 IO 模型的两段等待、连接便宜线程贵、Reactor 和 Tomcat NIO 连接器、事件循环为什么不能阻塞、HTTP 连接池和 keep-alive 等八个坑、BIO / NIO / 虚拟线程 1 万连接实测（JDK 17 / 21），keep-alive 连接分步演示 |
 | 03 | [TCP：握手、挥手、TIME_WAIT 与粘包](https://archeu.github.io/study-notes/network/tcp-handshake-timewait-framing.html) | 连接是两端内核的两本账、三次握手为什么是三次、四次挥手和 CLOSE_WAIT、TIME_WAIT 为什么在先关的一方、字节流与长度前缀、Nagle × 延迟 ACK 的 40 ms、accept 队列，真实抓包逐段演示 |
 | 04 | [Netty：EventLoop、Pipeline、ByteBuf](https://archeu.github.io/study-notes/network/netty-eventloop-pipeline-bytebuf.html) | EventLoop 终身绑定连接、Pipeline 入站出站方向、ByteBuf 双下标与引用计数、慢请求拖慢一个线程和漏 release 的实测、4.1→4.2 差异，EventLoop 阻塞实验台 |
+| 05 | [RPC 原理：序列化、协议、服务发现、负载均衡](https://archeu.github.io/study-notes/network/rpc-serialization-discovery-lb.html) | 一次调用的八步、动态代理 Stub、自描述和约定结构的序列化、帧头与请求 id 多路复用、客户端发现与负载均衡、为什么这样设计，纯 JDK 迷你 RPC 实测（慢实例、坏实例、超时），负载均衡实验台 |
 
 ## 架构
 
