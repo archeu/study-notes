@@ -1,0 +1,1460 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>TCP：握手、挥手、TIME_WAIT 与粘包</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six steps for a basic-theory topic (① 要解决的问题 ② 朴素做法 ③ 几种思路 ④ 关键洞察 ⑤ 手推一遍 ⑥ 边界和变体 ↺), J04 panorama stops 3 and 7. Roles: pd blue = order service (client side, active closer); g2 brown = inventory service (server side); cg purple = byte stream and framing (length prefix); of amber = handshake / FIN / TIME_WAIT timers; bk teal = kernel (socket buffers, queues, state); bad/good/other fixed. Interaction: one packet-by-packet stepper in ⑤ replaying a real tcpdump of one short connection (two variants: measured 3-segment close, textbook 4-segment close), states of both ends update per step. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+body{overflow-x:clip}
+.lab-h{font-family:var(--font-display);font-weight:400;font-size:20px}
+#eb-res p{margin:0 0 4px}
+#eb-res .note-p{font-size:13px;color:var(--muted)}
+#eb pre{white-space:pre;overflow-x:auto}
+
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2;fill:none}
+.e-warn{stroke:var(--warn);stroke-width:2.5;fill:none}
+.misj{border-collapse:collapse}
+.ev-card{font-family:var(--font-mono);font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--console-bg);color:var(--console-fg);border-radius:12px;padding:10px 12px;margin:0}
+.tr-nav{display:flex;flex-wrap:wrap;gap:6px}
+.tr-nav button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:var(--font-mono)}
+.tr-nav button[aria-current="true"]{border-color:var(--ink);background:var(--ink);color:var(--paper)}
+.tr-nav button.ok{border-color:var(--good)}
+.tr-nav button.ng{border-color:var(--bad)}
+.tr-score{font-size:13.5px;color:var(--muted)}
+
+/* page: budget bench */
+.bud{display:flex;flex-direction:column;gap:6px}
+.bud-bar{position:relative;display:flex;height:34px;border-radius:10px;overflow:hidden;border:1.5px solid var(--line-strong);background:var(--paper)}
+.bud-bar span{display:block;height:100%;min-width:0}
+.bud-bar .h{background:var(--pd)} .bud-bar .m{background:var(--warn);opacity:.55} .bud-bar .c{background:var(--warn);opacity:.7}
+.bud-bar .s{background:var(--warn);opacity:.85} .bud-bar .o{background:var(--neutral);opacity:.6} .bud-bar .d{background:var(--warn)}
+.bud-bar .d.over{background:var(--bad)}
+.bud-lim{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--ink)}
+.bud-cap{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);font-family:var(--font-mono)}
+.bud-lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.bud-lg i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.derive{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.derive > div{padding:8px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--card);font-size:13.5px;min-width:0}
+.derive b{display:block;font-size:12px;color:var(--muted);font-weight:500}
+.derive code{font-size:13px;overflow-wrap:anywhere}
+.ctl select{font:inherit;font-size:14px;padding:5px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:720px){.derive{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.derive{grid-template-columns:1fr}}
+
+/* page: tcp */
+.cap{font-size:13.5px;color:var(--muted);margin-top:8px;line-height:1.55}
+.seq{display:flex;flex-direction:column;gap:12px}
+.seq-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seq-ctl .seg{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;margin-left:auto}
+.seq-box{outline:none}
+.seq svg .msg{opacity:.13;transition:opacity .25s}
+.seq svg .msg.on{opacity:1}
+.seq svg .msg.cur .ln{stroke-width:4}
+.seq svg .msg.cur .lab{font-weight:700}
+.seq svg .lane{stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5}
+.st-chip{font-family:var(--font-mono);font-size:12.5px;font-weight:600}
+.seq-info{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.seq-info > div{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.seq-info .k{font-size:12.5px;color:var(--muted);display:block;margin-bottom:4px}
+.seq-info .sts{display:flex;flex-wrap:wrap;gap:8px 16px}
+.seq-info .sts span{display:inline-flex;gap:6px;align-items:baseline}
+.seq-info .sts b{font-family:var(--font-mono);font-size:14px;padding:1px 8px;border-radius:8px;background:var(--rt);border:1.5px solid var(--rc)}
+.seq-say{grid-column:1 / -1}
+.seq-say p + p{margin-top:6px}
+.seq-num{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.frames{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.frames > div{border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.frames h4{font-size:17px;color:var(--rc)}
+.frames pre{margin:0;font-family:var(--font-mono);font-size:12px;background:var(--code-bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+@media (max-width:760px){.seq-info{grid-template-columns:minmax(0,1fr)}.frames{grid-template-columns:minmax(0,1fr)}.seq-ctl .seg{margin-left:0}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>网络</span><span aria-hidden="true">/</span><span class="tb-here">TCP：握手、挥手、TIME_WAIT 与粘包</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-pd" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-g2" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-cg" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-of" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-mut" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+
+<header class="hero">
+  <p class="kicker">SYN · SYN-ACK · ACK · 序列号 · FIN · 半关闭 · CLOSE_WAIT · TIME_WAIT · 2MSL · 字节流 · 粘包 / 拆包 · 长度前缀 · Nagle · 延迟 ACK · TCP_NODELAY · SO_LINGER · backlog · keepalive</p>
+  <h1>TCP：握手、挥手、TIME_WAIT 与粘包。连接只是两端内核各记的一份账，数据是一条没有边界的字节流</h1>
+  <p class="lead">网线上没有“连接”，只有一个个可能丢、可能乱序、可能迟到的包。TCP 让两端内核各自记一份账：我发到第几号字节、你收到第几号字节。<b>握手</b>是两边互相报上起始编号并确认对方收到了；<b>挥手</b>是两个方向各自说“我发完了”；<b>TIME_WAIT</b> 是先关的那一方多等一会儿，让最后一个 ACK 和迷路的旧包都有个交代。账上记的是字节，不是消息，所以 <b>消息的边界要上层自己标</b>，这就是“粘包”的全部真相。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>朴素做法</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种思路</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>关键洞察</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>手推一遍</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>边界和变体</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j04-order-calls-inventory.html#s-7">订单服务调库存服务的一次 RPC · 第 3、7 站</a></span><span>地图：<a href="../java/roadmap.html#j04">J04 · TCP：握手、挥手、TIME_WAIT、粘包</a></span><span>第一圈：<a href="url-to-page.html">从输入 URL 到页面展示</a>（握手只算了一个往返）</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：在不可靠的包上，搭一条可靠的字节管道</h2>
+    <p class="lead">在全景第 7 站，订单服务的 Netty 把 12 字节的 gRPC 消息交给内核，这一步要解决的是：<b>IP 只管“尽力把包送到”，丢包、乱序、重复、迟到都可能发生；订单服务却要求库存服务一个字节不差、按顺序收到</b>。第一圈“从 URL 到页面”只把握手当成一个往返的耗时；这一圈要回答三个问题，并解释全景里那两个现象：HTTP/1.1 对照组每次调用多出来的 40 ms，以及短连接调用量一大，订单服务这边堆满 TIME_WAIT。</p>
+  </div>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="左边订单服务，右边库存服务，中间是 IP 网络：包可能丢、乱序、重复、迟到。上方三个问题：开始时，两边从第几号字节数起；中间，一串字节哪里是一条消息；结束时，怎么说我发完了，旧包不串到新连接。">
+  <rect class="b-pd" x="20" y="90" width="200" height="130" rx="14"/>
+  <text class="t-h" x="40" y="120">订单服务</text>
+  <text class="t-s" x="40" y="146">Netty 写出 12 字节</text>
+  <text class="t-mono" x="40" y="170">00000007 08b74a…</text>
+  <text class="t-xs" x="40" y="200">10.0.1.5:51352</text>
+  <rect class="b-g2" x="740" y="90" width="200" height="130" rx="14"/>
+  <text class="t-h" x="760" y="120">库存服务</text>
+  <text class="t-s" x="760" y="146">要按顺序、不丢不重</text>
+  <text class="t-s" x="760" y="168">收到这 12 字节</text>
+  <text class="t-xs" x="760" y="200">10.0.2.9:9090</text>
+  <rect class="b-dash" x="270" y="100" width="420" height="110" rx="20"/>
+  <text class="t-b" x="290" y="124">IP 网络：只管“尽力送到”</text>
+  <rect class="b-neu" x="292" y="140" width="56" height="26" rx="6"/><text class="t-mono" x="303" y="158">#1</text>
+  <rect class="b-bad" x="372" y="140" width="56" height="26" rx="6"/><text class="t-bad" x="383" y="158">#2 丢</text>
+  <rect class="b-neu" x="452" y="140" width="56" height="26" rx="6"/><text class="t-mono" x="463" y="158">#4</text>
+  <rect class="b-neu" x="532" y="140" width="56" height="26" rx="6"/><text class="t-mono" x="543" y="158">#3</text>
+  <rect class="b-neu" x="612" y="140" width="56" height="26" rx="6"/><text class="t-mono" x="623" y="158">#3</text>
+  <text class="t-xs" x="452" y="186">乱序</text><text class="t-xs" x="612" y="186">重复</text>
+  <text class="t-xs" x="292" y="200">还有：上一条连接的旧包，迟到了几十秒才到</text>
+  <path class="e-mut" d="M220 155 H266" marker-end="url(#ah-mut)"/>
+  <path class="e-mut" d="M694 155 H736" marker-end="url(#ah-mut)"/>
+  <rect class="b-of" x="20" y="18" width="290" height="52" rx="12"/>
+  <text class="t-of" x="36" y="40">问题 1 · 开始：握手</text>
+  <text class="t-s" x="36" y="60">两边各从第几号字节开始数？对方知道吗？</text>
+  <rect class="b-cg" x="335" y="18" width="290" height="52" rx="12"/>
+  <text class="t-cg" x="351" y="40">问题 2 · 中间：边界</text>
+  <text class="t-s" x="351" y="60">一串字节，哪几个算一条请求？</text>
+  <rect class="b-of" x="650" y="18" width="290" height="52" rx="12"/>
+  <text class="t-of" x="666" y="40">问题 3 · 结束：挥手和 TIME_WAIT</text>
+  <text class="t-s" x="666" y="60">怎么说“发完了”？旧包别串进新连接</text>
+  <rect class="b-bad" x="20" y="240" width="440" height="44" rx="10"/>
+  <text class="t-bad" x="36" y="267">全景实测：HTTP/1.1 对照组每次调用 p50 41.2 ms</text>
+  <rect class="b-bad" x="500" y="240" width="440" height="44" rx="10"/>
+  <text class="t-bad" x="516" y="267">短连接调用量一大：订单服务这边堆满 TIME_WAIT</text>
+</svg>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>朴素做法：把 TCP 当成“一次发送 = 一条消息”的管子</h2>
+    <p class="lead">直觉上，socket 像一根管子：这头 <code>write</code> 一次，那头 <code>read</code> 一次，正好拿到这一条；用完就关，下次再开。两个直觉在本机各跑了一遍（JDK 17，回环地址），都不成立。</p>
+  </div>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>直觉 1：write 一次，read 一次<small>实测</small></h4>
+<pre>客户端 write 5 次，每次 32 字节的一条请求
+服务端晚 100 ms 才去读：
+  第 1 次 read 拿到 <b>160 字节</b>：5 条粘在一起
+
+客户端 write 1 次，200 KB
+服务端用 64 KB 的数组读：
+  read 了 <b>4 次</b>：65536 + 65536 + 65536 + 8192</pre>
+      <ul class="pains">
+        <li>多条请求被一次读到，叫“粘包”；一条被分几次才读完，叫“拆包”。按 <code>read</code> 的返回值当一条消息去解析，就会解错</li>
+        <li>它不是偶发的：只要接收方读得比发送方慢一点，就一定发生</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>直觉 2：每次调用开一条连接，用完就关<small>实测</small></h4>
+<pre>订单服务调库存 500 次，每次新建连接、先 close
+用 ss 数一数：
+  TIME-WAIT  订单服务这边 <b>500 条</b>
+             库存服务那边   0 条
+  其中一条 timer:(timewait,<b>59sec</b>,0)</pre>
+      <ul class="pains">
+        <li>每次调用都多一个往返的握手；跨机房 1 ms 的 RTT，就是每次多 1 ms</li>
+        <li>每条连接关掉后还要在订单服务这边占着一个本地端口 60 秒。本地端口一共 28232 个（32768～60999），对同一个库存实例，平均每秒新建超过 470 条就会用光</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict" data-role="bad"><b>不懂精华时的典型误用：</b>看到 TIME_WAIT 多，就去改内核参数“让它快点消失”（调小 <code>tcp_fin_timeout</code>、打开早已删除的 <code>tcp_tw_recycle</code>），或者给每次调用的 <code>read</code> 加 <code>sleep</code> 等数据“到齐”。前者改错了地方（⑥第三圈），后者只是把粘包变得不那么常见。正确的方向是：<b>边界自己标，连接要复用</b>。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种思路：边界怎么标，连接怎么用</h2>
+    <p class="lead">两件事各有几种做法，后面的协议基本都是在这几种里挑的组合。</p>
+  </div>
+  <div class="frames">
+    <div data-role="other"><h4>定长</h4><p>每条消息固定 N 字节，不够补零。</p><pre>[32 字节][32 字节][32 字节]</pre><p class="tip">简单，但内容长短不一就浪费，超长就塞不下。适合行情这类固定格式。Netty：<code>FixedLengthFrameDecoder</code></p></div>
+    <div data-role="other"><h4>分隔符</h4><p>每条以约定的字节结尾，比如换行。</p><pre>reserve 9527 88 2\n reserve …\n</pre><p class="tip">人能读，但内容里出现分隔符就要转义，接收方要逐字节扫。Redis 命令行、HTTP/1.1 的头部（<code>\r\n\r\n</code> 结尾）用它。Netty：<code>LineBasedFrameDecoder</code></p></div>
+    <div data-role="cg"><h4>长度前缀</h4><p>先写“后面有几个字节”，再写内容。</p><pre>[00 00 00 07][7 字节][00 00 00 1f][31 字节]</pre><p class="tip">接收方先读够长度，再读够内容，不用扫描，内容随便是什么字节。gRPC（5 字节前缀）、HTTP/2 帧（9 字节帧头里 3 字节长度）、Dubbo（16 字节头里 4 字节长度）都用它。Netty：<code>LengthFieldBasedFrameDecoder</code></p></div>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>连接怎么用</th><th>握手次数</th><th>TIME_WAIT</th><th>代价</th><th>谁在用</th></tr></thead>
+      <tbody>
+        <tr><th>短连接：一次调用一条</th><td>每次一个往返</td><td class="bad">每次调用留一条，60 秒</td><td>调用量一大，端口和 CPU 都耗在建连、关连上</td><td>早期 HTTP/1.0、随手写的 <code>new Socket()</code></td></tr>
+        <tr><th>连接池：每条连接一次只跑一个请求</th><td>池子建满后就没有了</td><td>只在池子缩容、连接过期时才有</td><td>并发多少，就要多少条连接；请求排队等空闲连接</td><td>HTTP/1.1 客户端、JDBC、Redis（Jedis）</td></tr>
+        <tr class="hl"><th>一条长连接，多路复用</th><td>每个实例一次</td><td>几乎没有</td><td>要在字节流上再分出“哪个字节属于哪个请求”；一条连接的队头阻塞</td><td>HTTP/2、gRPC、Dubbo、Redis（Lettuce）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="verdict" data-role="cg"><b>选择规则：</b>服务之间的调用，默认用<b>长度前缀 + 长连接</b>；这正是全景里 gRPC 做的：每个库存实例一条 HTTP/2 长连接（第 3 站），每条消息前面 5 字节（第 5 站）。本页学的是它脚下那一层：TCP 怎么建立、怎么关闭，为什么会粘包，为什么非得自己标边界。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>关键洞察：两本账、两个方向、一条没有边界的流</h2>
+    <p class="lead">握手、挥手、TIME_WAIT、粘包看起来是四件事，其实都从一句话推出来：<b>TCP 连接 = 两端内核各自记的一份账，账上记的是“第几号字节”</b>。下面五小节都在回答“这份账是怎么开的、怎么销的、记的是什么”。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>段（segment）</b>：TCP 交给 IP 的一个包。头部里有序列号、确认号、几个标志位（SYN、ACK、FIN、RST、PSH），后面跟 0 个或多个数据字节。抓包里的 <code>[S]</code> <code>[S.]</code> <code>[.]</code> <code>[P.]</code> <code>[F.]</code> <code>[R.]</code> 就是这些标志，点 <code>.</code> 表示带 ACK。</li>
+      <li><b>序列号给字节编号，不给包编号</b>：发了 12 字节、起始号是 1001，下一个字节就是 1013。确认号 <code>ack=1013</code> 的意思是“1013 之前的我都收到了，下一个要 1013”。</li>
+      <li><b>四元组</b>：源 IP、源端口、目的 IP、目的端口。内核靠它找到“这个包属于哪份账”。客户端的源端口通常由内核从本地端口范围里随便挑一个。</li>
+      <li>一次往返（RTT）和握手的耗时，第一圈讲过：<a href="url-to-page.html">从输入 URL 到页面展示</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-ledger">④-1 连接不在网线上，在两端内核的账本里</h3>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 290" role="img" aria-label="订单服务内核和库存服务内核各有一份账：状态 ESTABLISHED，我发到第几号字节，我等对方第几号字节，发送缓冲区和接收缓冲区。中间网线上只有一个个段：seq 1001 带 12 字节，回来的 ack 1013。下面一行：网线断了，两边的账都还在，没包来往，谁也不知道。">
+  <rect class="b-pd" x="20" y="20" width="300" height="200" rx="14"/>
+  <text class="t-h" x="38" y="46">订单服务的内核</text>
+  <text class="t-xs" x="38" y="66">四元组 10.0.1.5:51352 ⇄ 10.0.2.9:9090</text>
+  <text class="t-s" x="38" y="92">状态</text><text class="t-mono" x="140" y="92">ESTABLISHED</text>
+  <text class="t-s" x="38" y="116">我下一个发</text><text class="t-mono" x="140" y="116">1013</text>
+  <text class="t-s" x="38" y="140">我等对方的</text><text class="t-mono" x="140" y="140">5001</text>
+  <rect class="b-bk" x="38" y="156" width="264" height="24" rx="6"/><text class="t-s" x="48" y="173">发送缓冲区：已发未确认的字节</text>
+  <rect class="b-bk" x="38" y="186" width="264" height="24" rx="6"/><text class="t-s" x="48" y="203">接收缓冲区：到了、应用还没 read 的</text>
+  <rect class="b-g2" x="640" y="20" width="300" height="200" rx="14"/>
+  <text class="t-h" x="658" y="46">库存服务的内核</text>
+  <text class="t-xs" x="658" y="66">四元组 10.0.2.9:9090 ⇄ 10.0.1.5:51352</text>
+  <text class="t-s" x="658" y="92">状态</text><text class="t-mono" x="760" y="92">ESTABLISHED</text>
+  <text class="t-s" x="658" y="116">我下一个发</text><text class="t-mono" x="760" y="116">5001</text>
+  <text class="t-s" x="658" y="140">我等对方的</text><text class="t-mono" x="760" y="140">1013</text>
+  <rect class="b-bk" x="658" y="156" width="264" height="24" rx="6"/><text class="t-s" x="668" y="173">发送缓冲区</text>
+  <rect class="b-bk" x="658" y="186" width="264" height="24" rx="6"/><text class="t-s" x="668" y="203">接收缓冲区</text>
+  <path class="e-pd" d="M330 80 H628" marker-end="url(#ah-pd)"/>
+  <rect class="b-card" x="380" y="62" width="200" height="34" rx="8"/>
+  <text class="t-mono" x="392" y="84">seq=1001 len=12 [P.]</text>
+  <path class="e-g2" d="M628 150 H330" marker-end="url(#ah-g2)"/>
+  <rect class="b-card" x="400" y="132" width="160" height="34" rx="8"/>
+  <text class="t-mono" x="418" y="154">ack=1013 [.]</text>
+  <text class="t-xs" x="372" y="196">网线上只有这些段，没有“连接”这个东西</text>
+  <rect class="b-warn" x="20" y="240" width="920" height="40" rx="10"/>
+  <text class="t-s" x="38" y="265">推论：网线断了、对面机器掉电，两本账都还在。没有包来往，谁都不知道对面没了，直到下一次发数据超时，或者 keepalive 探一下。</text>
+</svg>
+  </div>
+  <p class="tip">所以“建立连接”就是两边把账本开起来、对上起始编号；“关闭连接”就是两边把账本销掉。下面每一步都是在问：怎样开、怎样销，才不会记错账。</p>
+
+  <h3 id="m-hs">④-2 三次握手：两个起始编号，各要一次“报出”和一次“确认”</h3>
+  <p>每一方都要报出自己的起始序列号（ISN，随机挑的，防止被猜中伪造），并且<b>亲眼看到对方确认收到了</b>。两个方向各一发一确认，本来是 4 个段；库存服务的“确认你的”和“报出我的”可以塞进同一个段（SYN-ACK），所以是 3 个。</p>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>两次握手：服务端回了就算建好<small>被放弃的做法</small></h4>
+<svg viewBox="0 0 440 250" role="img" aria-label="两次握手：一个 30 秒前的旧 SYN 迟到了，库存服务回 SYN-ACK 后立刻认为连接已建立，分配缓冲区等数据；订单服务根本没发过这个连接，丢掉回复。库存服务这边留下一条没人用的连接。">
+  <text class="t-b" x="40" y="22">订单服务</text><text class="t-b" x="320" y="22">库存服务</text>
+  <line class="lane" x1="70" y1="32" x2="70" y2="240" style="stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5"/>
+  <line x1="350" y1="32" x2="350" y2="240" style="stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5"/>
+  <path class="e-badd" d="M70 44 L348 92" marker-end="url(#ah-bad)"/>
+  <text class="t-bad" x="96" y="56">SYN seq=100（30 秒前的旧包，迟到了）</text>
+  <path class="e-mut" d="M350 108 L72 156" marker-end="url(#ah-mut)"/>
+  <text class="t-mono" x="196" y="122">SYN-ACK ack=101</text>
+  <rect class="b-bad" x="250" y="168" width="180" height="58" rx="8"/>
+  <text class="t-bad" x="260" y="190">以为建好了：ESTABLISHED</text>
+  <text class="t-s" x="260" y="212">开缓冲区，干等数据</text>
+  <text class="t-s" x="10" y="186">“我没发过这个”</text>
+  <text class="t-s" x="10" y="206">丢掉，什么也不回</text>
+</svg>
+      <ul class="pains">
+        <li>迟到的旧 SYN 会凭空造出连接，服务端白白占着资源</li>
+        <li>服务端的起始编号有没有被对方收到，它自己不知道：后面的数据从哪号数起，没法对账</li>
+      </ul>
+    </div>
+    <div class="way" data-role="of">
+      <h4>三次握手：等到对方确认我的编号才算<small>TCP 的做法</small></h4>
+<svg viewBox="0 0 440 250" role="img" aria-label="三次握手：同样一个旧 SYN 迟到，库存服务回 SYN-ACK 后只进入 SYN-RECV，等第三个段；订单服务发现确认号对不上自己的任何连接，回 RST，库存服务丢掉这个半开的连接。正常时第三个段是 ACK，确认了库存服务的编号。">
+  <text class="t-b" x="40" y="22">订单服务</text><text class="t-b" x="320" y="22">库存服务</text>
+  <line x1="70" y1="32" x2="70" y2="240" style="stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5"/>
+  <line x1="350" y1="32" x2="350" y2="240" style="stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5"/>
+  <path class="e-badd" d="M70 44 L348 92" marker-end="url(#ah-bad)"/>
+  <text class="t-bad" x="96" y="56">SYN seq=100（同一个旧包）</text>
+  <rect class="b-of" x="356" y="84" width="80" height="24" rx="6"/><text class="t-mono" x="362" y="101">SYN-RECV</text>
+  <path class="e-of" d="M350 110 L72 158" marker-end="url(#ah-of)"/>
+  <text class="t-mono" x="150" y="124">SYN-ACK seq=7000 ack=101</text>
+  <path class="e-pd" d="M70 172 L348 220" marker-end="url(#ah-pd)"/>
+  <text class="t-pd" x="96" y="186">RST：没有这份账</text>
+  <rect class="b-good" x="250" y="226" width="180" height="22" rx="6"/><text class="t-good" x="258" y="242">半开连接被清掉</text>
+</svg>
+      <ul class="pains">
+        <li>服务端进 <code>SYN-RECV</code>，要等第三个段确认了它的编号，才算建好</li>
+        <li>旧 SYN 引来的回复，客户端对不上账，回 RST，服务端把它丢掉（RFC 9293 说的头号理由就是防旧的重复连接请求）</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict" data-role="of"><b>决定胜负的约束：</b>网络会让旧包迟到。只有让<b>每一方的起始编号都被对方确认过</b>，双方才知道后面每个字节的编号算的是同一本账；做到这一点最少要 3 个段，再多就是浪费。</p>
+  <p class="tip">握手由内核完成，不用 Java 代码参与：<code>accept()</code> 只是从“已建好的连接”队列（accept 队列）里取一条。队列长度受 <code>new ServerSocket(port, backlog)</code> 的 backlog 和内核 <code>somaxconn</code> 两个值里较小的那个限制，满了会怎样放到 <a href="#d-queue">⑥ 第三圈</a>。</p>
+
+  <h3 id="m-fin">④-3 挥手：两个方向各关各的，所以通常是四段</h3>
+  <p>账本有两个方向：我→你、你→我。<code>FIN</code> 的意思只是<b>“我这个方向不再发了”</b>，对面照样可以继续发。对方收到 FIN，应用 <code>read()</code> 返回 <code>-1</code>；等对方的应用也调了 <code>close()</code>，才发出它那个方向的 FIN。两个方向各一个 FIN、各一个 ACK，就是四次挥手。</p>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="两个方向各关各的：订单服务 close，发 FIN，订单到库存方向关闭；库存服务回 ACK，进入 CLOSE_WAIT，它的 read 返回 -1，此时库存到订单方向还开着，可以继续发；库存服务的应用调用 close 才发出第二个 FIN，订单服务回 ACK 后进入 TIME_WAIT。中间两个段如果库存服务立刻 close，可以合成一个。">
+  <rect class="b-pd" x="20" y="20" width="160" height="40" rx="10"/><text class="t-h" x="40" y="46">订单服务</text>
+  <rect class="b-g2" x="780" y="20" width="160" height="40" rx="10"/><text class="t-h" x="800" y="46">库存服务</text>
+  <line x1="100" y1="62" x2="100" y2="240" style="stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5"/>
+  <line x1="860" y1="62" x2="860" y2="240" style="stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5"/>
+  <path class="e-of" d="M100 78 L858 100" marker-end="url(#ah-of)"/><text class="t-of" x="300" y="80">① close() → FIN：订单→库存这个方向关了</text>
+  <path class="e-g2" d="M860 116 L102 138" marker-end="url(#ah-g2)"/><text class="t-mono" x="420" y="120">② ACK</text>
+  <rect class="b-g2" x="660" y="140" width="190" height="40" rx="8"/><text class="t-mono" x="670" y="158">CLOSE_WAIT</text><text class="t-xs" x="670" y="174">read() 返回 -1，还能 write</text>
+  <rect class="b-pd" x="110" y="140" width="150" height="24" rx="6"/><text class="t-mono" x="118" y="157">FIN_WAIT_2</text>
+  <path class="e-g2" d="M860 190 L102 212" marker-end="url(#ah-g2)"/><text class="t-of" x="330" y="192">③ 应用 close() → FIN：库存→订单也关了</text>
+  <path class="e-pd" d="M100 222 L858 240" marker-end="url(#ah-pd)"/><text class="t-mono" x="430" y="246">④ ACK</text>
+  <rect class="b-of" x="110" y="214" width="110" height="24" rx="6"/><text class="t-mono" x="118" y="231">TIME_WAIT</text>
+  <rect class="b-card" x="300" y="138" width="330" height="44" rx="8"/>
+  <text class="t-s" x="312" y="156">② 和 ③ 之间隔多久，取决于库存服务的应用</text>
+  <text class="t-s" x="312" y="174">什么时候 close；立刻 close 时 ②③ 合成一段</text>
+</svg>
+  </div>
+  <p class="tip">两个推论，⑥ 第一圈会用到：<b>CLOSE_WAIT 只能由本端应用结束</b>（它在等你调 <code>close()</code>，内核不会替你关），所以 CLOSE_WAIT 堆积几乎总是代码漏了 close；<b>先发 FIN 的一方</b>（主动关闭方）最后要发那个 ACK，所以 TIME_WAIT 落在它身上，和谁是客户端无关。Java 里只关一个方向用 <code>socket.shutdownOutput()</code>，这就是“半关闭”。</p>
+
+  <h3 id="m-tw">④-4 TIME_WAIT：最后一个 ACK 没人确认，旧包可能还在路上</h3>
+  <p>主动关闭方发出最后一个 ACK 后，不马上销账，而是进 <code>TIME_WAIT</code> 等 2MSL（MSL 是一个段在网络里最多能活多久）。Linux 把它定成 60 秒，本机 <code>ss</code> 看到的计时器正是从 <code>59sec</code> 开始倒数。等这么久有两个理由：</p>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>收到 ACK 就销账<small>被放弃的做法</small></h4>
+<svg viewBox="0 0 440 260" role="img" aria-label="如果不等：订单服务发出最后一个 ACK 就销账，ACK 丢了，库存服务重发 FIN，订单服务已经没有这份账，回 RST，库存服务的 close 以错误收场。另一种情况：同一个四元组马上建了新连接，上一条连接迟到的数据段落进新连接，序列号恰好在窗口里，被当成新连接的数据。">
+  <text class="t-b" x="40" y="22">订单服务</text><text class="t-b" x="320" y="22">库存服务</text>
+  <line x1="70" y1="32" x2="70" y2="250" style="stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5"/>
+  <line x1="350" y1="32" x2="350" y2="250" style="stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5"/>
+  <path class="e-badd" d="M70 44 L250 70"/><text class="t-bad" x="232" y="64">✕</text>
+  <text class="t-s" x="84" y="42">最后的 ACK 丢了</text>
+  <path class="e-g2" d="M350 84 L72 116" marker-end="url(#ah-g2)"/><text class="t-mono" x="160" y="92">重发 FIN</text>
+  <path class="e-bad" d="M70 128 L348 160" marker-end="url(#ah-bad)"/><text class="t-bad" x="110" y="160">RST：账已经销了</text>
+  <text class="t-s" x="250" y="186">库存服务以错误收场</text>
+  <rect class="b-bad" x="10" y="200" width="420" height="50" rx="8"/>
+  <text class="t-bad" x="20" y="220">另一种：同一个四元组马上又建了新连接</text>
+  <text class="t-s" x="20" y="240">上一条连接迟到的段落进来，被当成新连接的数据</text>
+</svg>
+    </div>
+    <div class="way" data-role="of">
+      <h4>先关的一方等 2MSL<small>TCP 的做法</small></h4>
+<svg viewBox="0 0 440 260" role="img" aria-label="等 2MSL：订单服务在 TIME_WAIT 里还保留着账，库存服务重发的 FIN 来了，订单服务再回一次 ACK，库存服务正常关闭。60 秒里，这个四元组上迟到的旧段到达也只会被丢掉；60 秒后旧段都已经死在路上，四元组可以放心复用。">
+  <text class="t-b" x="40" y="22">订单服务</text><text class="t-b" x="320" y="22">库存服务</text>
+  <line x1="70" y1="32" x2="70" y2="250" style="stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5"/>
+  <line x1="350" y1="32" x2="350" y2="250" style="stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5"/>
+  <rect class="b-of" x="58" y="34" width="24" height="200" rx="6"/>
+  <text class="t-of" x="90" y="230">TIME_WAIT：账还留着</text>
+  <path class="e-badd" d="M82 44 L250 70"/><text class="t-bad" x="232" y="64">✕</text>
+  <text class="t-s" x="96" y="42">最后的 ACK 丢了</text>
+  <path class="e-g2" d="M350 84 L84 116" marker-end="url(#ah-g2)"/><text class="t-mono" x="160" y="92">重发 FIN</text>
+  <path class="e-pd" d="M82 128 L348 160" marker-end="url(#ah-pd)"/><text class="t-pd" x="130" y="160">再回一次 ACK</text>
+  <text class="t-good" x="250" y="186">正常关闭</text>
+  <text class="t-s" x="96" y="206">迟到的旧段在这 60 秒里到达：丢掉</text>
+</svg>
+    </div>
+  </div>
+  <p class="verdict" data-role="of"><b>决定胜负的约束：</b>最后一个 ACK 没有人能确认它（再确认就无穷无尽了），网络又可能把旧段扣留一阵再放出来。只能让<b>发最后一个 ACK 的那一方</b>多留一会儿账本，等到“对方的重传”和“路上的旧段”都不可能再出现。代价是一个四元组在 60 秒里不能复用，这就是短连接的天花板。</p>
+
+  <h3 id="m-stream">④-5 账上记的是字节：边界会丢，小包会被攒</h3>
+  <p><code>write</code> 只是把字节拷进发送缓冲区，什么时候发、切成几段，由内核按窗口、MSS 和 Nagle 算法决定；<code>read</code> 只是把接收缓冲区里<b>当时有的</b>字节拷出来，最多拷满你给的数组。两端都没有地方记“这几个字节是一条”。</p>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 400" role="img" aria-label="上半部分：订单服务 write 了 5 条消息，进发送缓冲区后成了一条连续的字节流，内核切成段发出，到了接收缓冲区仍是一条流，库存服务一次 read 拿到 160 字节。下半部分：Nagle 和延迟 ACK 互等：客户端先写 5 字节前缀立刻发出；再写 7 字节，因为前一个小段还没被确认，Nagle 让它等；库存服务收到 5 字节凑不成一条请求，没有回复可以捎带 ACK，延迟 ACK 等到约 40 毫秒才单独回 ACK；客户端这才发出 7 字节，库存服务回复，整次调用 41 毫秒。">
+  <text class="t-b" x="20" y="24">字节流：边界在 write 的那一刻就丢了</text>
+  <g>
+    <rect class="b-pd" x="20" y="40" width="34" height="28" rx="5"/><rect class="b-pd" x="58" y="40" width="34" height="28" rx="5"/><rect class="b-pd" x="96" y="40" width="34" height="28" rx="5"/><rect class="b-pd" x="134" y="40" width="34" height="28" rx="5"/><rect class="b-pd" x="172" y="40" width="34" height="28" rx="5"/>
+    <text class="t-xs" x="20" y="86">write × 5，每条 32 字节</text>
+  </g>
+  <path class="e-mut" d="M212 54 H246" marker-end="url(#ah-mut)"/>
+  <rect class="b-bk" x="250" y="40" width="170" height="28" rx="5"/>
+  <text class="t-s" x="262" y="59">发送缓冲区：160 字节</text>
+  <path class="e-mut" d="M426 54 H460" marker-end="url(#ah-mut)"/>
+  <rect class="b-cg" x="464" y="40" width="160" height="28" rx="5"/>
+  <text class="t-s" x="474" y="59">网线上：几个段</text>
+  <text class="t-xs" x="464" y="86">怎么切由内核定</text>
+  <path class="e-mut" d="M630 54 H664" marker-end="url(#ah-mut)"/>
+  <rect class="b-bk" x="668" y="40" width="150" height="28" rx="5"/>
+  <text class="t-s" x="678" y="59">接收缓冲区</text>
+  <path class="e-mut" d="M824 54 H850" marker-end="url(#ah-mut)"/>
+  <rect class="b-g2" x="854" y="40" width="90" height="28" rx="5"/>
+  <text class="t-s" x="862" y="59">read = 160</text>
+  <text class="t-cg" x="250" y="110">补救只能在上层：每条消息前写长度，接收方按长度切（③ 的长度前缀）</text>
+
+  <line x1="20" y1="132" x2="940" y2="132" style="stroke:var(--line);stroke-width:1.5"/>
+  <text class="t-b" x="20" y="158">小包被攒：Nagle 等 ACK，延迟 ACK 等回复，两边互等</text>
+  <text class="t-b" x="20" y="196">订单服务</text>
+  <text class="t-b" x="20" y="330">库存服务</text>
+  <line x1="100" y1="192" x2="940" y2="192" style="stroke:var(--pd);stroke-width:2"/>
+  <line x1="100" y1="326" x2="940" y2="326" style="stroke:var(--g2);stroke-width:2"/>
+  <path class="e-pd" d="M120 192 L160 322" marker-end="url(#ah-pd)"/>
+  <text class="t-pd" x="108" y="182">write 5 字节：立刻发</text>
+  <rect class="b-warn" x="170" y="200" width="620" height="26" rx="6"/>
+  <text class="t-s" x="180" y="218">write 7 字节：Nagle 说“前一个小段还没被确认，先攒着”</text>
+  <rect class="b-warn" x="170" y="290" width="620" height="26" rx="6"/>
+  <text class="t-s" x="180" y="308">只收到 5 字节，凑不成请求，没有回复可捎带 ACK：延迟 ACK 定时器在走</text>
+  <path class="e-g2" d="M800 326 L820 196" marker-end="url(#ah-g2)"/>
+  <text class="t-mono" x="752" y="262">≈40 ms 单独回 ACK</text>
+  <path class="e-pd" d="M830 192 L850 322" marker-end="url(#ah-pd)"/>
+  <path class="e-g2" d="M864 326 L884 196" marker-end="url(#ah-g2)"/>
+  <text class="t-mono" x="858" y="182">7 字节 → 回复</text>
+  <text class="t-bad" x="560" y="360">一次调用 41.0 ms（本机实测 p50）；开 TCP_NODELAY 后 0.06 ms</text>
+  <text class="t-xs" x="100" y="390">时间 →（示意，未按比例）</text>
+</svg>
+  </div>
+  <p class="tip">Nagle 算法（1984 年）是为 telnet 这类“一次敲一个键”的程序设计的：有小段没被确认时，后面的小段先攒着，等 ACK 回来一起发，省掉大量只带一两个字节的包。延迟 ACK 则是接收方等一会儿，希望把 ACK 捎在回复里。各自都合理，碰上“写、写、读”这种请求格式就互相卡住。比喻和真机制对不上的地方：Nagle 不是按时间攒，是按“有没有未确认的小段”攒；延迟 ACK 的 40 ms 是 Linux 的下限，不同系统不一样。</p>
+
+  <h3>最少的 API</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">Java Socket</span><b>JDK 8+</b><span class="tip" style="margin-left:auto">取值和坑放到 ⑥</span></div>
+<pre><code><span class="cm">// 服务端：backlog 是 accept 队列长度的上限之一，不写就是 50</span>
+ServerSocket server = new ServerSocket(9090, 1024);
+Socket s = server.accept();                 <span class="cm">// 握手早已由内核做完</span>
+<span class="cm">// 客户端</span>
+Socket c = new Socket();
+c.connect(new InetSocketAddress("inventory", 9090), 1000);  <span class="cm">// 连接超时：握手最多等 1 s</span>
+c.setSoTimeout(300);                        <span class="cm">// 读超时</span>
+c.setTcpNoDelay(true);                      <span class="cm">// 关掉 Nagle（默认 false）</span>
+c.setKeepAlive(true);                       <span class="cm">// 空闲探活（默认 false，开了也要 2 小时后才探）</span>
+<span class="cm">// 按长度前缀收发</span>
+DataOutputStream out = new DataOutputStream(new BufferedOutputStream(c.getOutputStream()));
+out.writeInt(body.length); out.write(body); out.flush();     <span class="cm">// 拼好一次发出</span>
+DataInputStream in = new DataInputStream(c.getInputStream());
+int len = in.readInt(); byte[] resp = new byte[len]; in.readFully(resp);  <span class="cm">// 读够为止</span>
+c.shutdownOutput();                         <span class="cm">// 半关闭：只发我这个方向的 FIN</span>
+c.close();                                  <span class="cm">// 两个方向都关；先调的这一方进 TIME_WAIT</span></code></pre>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>手推一遍：一条短连接的一生，一个段一个段地看</h2>
+    <p class="lead">下面是本机真抓的包：订单服务新建一条连接，发 1 字节请求，收 1 字节回复，然后先 <code>close()</code>。程序是 study-labs 里的 <code>TimeWait</code>，抓包命令是 <code>sudo tcpdump -i lo -nn -S</code>（<code>-S</code> 显示绝对序列号）。每走一步，先猜下一个段的确认号是多少，再点“下一步”。</p>
+  </div>
+  <div class="seq" id="seq">
+    <div class="seq-ctl">
+      <button class="btn" id="sq-prev" type="button">← 上一步</button>
+      <button class="btn primary" id="sq-next" type="button">下一步 →</button>
+      <button class="btn" id="sq-auto" type="button" aria-pressed="false">自动播放</button>
+      <button class="btn" id="sq-reset" type="button">从头来</button>
+      <div class="seg" role="group" aria-label="选一种关闭方式">
+        <button type="button" data-v="real" aria-pressed="true">实测：三段挥手</button>
+        <button type="button" data-v="book" aria-pressed="false">课本：四段挥手</button>
+        <button type="button" data-v="rst" aria-pressed="false">实测：SO_LINGER=0</button>
+      </div>
+    </div>
+    <div class="fig-box wide seq-box" id="sq-box" tabindex="0" aria-label="分步演示，可以用左右方向键">
+      <svg class="sv" id="sq-svg" viewBox="0 0 960 520" role="img" aria-label="订单服务和库存服务之间逐个段的时序图"></svg>
+    </div>
+    <div class="seq-info" aria-live="polite">
+      <div><span class="k">两端的状态</span><div class="sts"><span data-role="pd">订单服务 <b id="sq-cs">CLOSED</b></span><span data-role="g2">库存服务 <b id="sq-ss">LISTEN</b></span></div></div>
+      <div><span class="k">第几步 · 抓包时间</span><span class="seq-num" id="sq-num">0 / 11</span></div>
+      <div class="seq-say"><span class="k" id="sq-pkt">还没有包</span><p id="sq-say"></p><p class="tip" id="sq-java"></p></div>
+    </div>
+  </div>
+  <p class="tip">走完三种方式对比一下：<b>谁先 close，TIME_WAIT 就在谁那边</b>；FIN 和 SYN 一样占一个序列号，所以对 FIN 的确认号要加 1；SO_LINGER=0 用 RST 直接销账，两边都不留状态，代价见 <a href="#d-linger">⑥ 第三圈</a>。</p>
+
+  <h3>在本机跑出来：粘包、长度前缀、40 ms、TIME_WAIT 在谁那边</h3>
+  <p>三个类都在同一个目录里，不依赖任何库，<code>--release 8</code> 编译。机器：2 核 ARM，Linux 6.8，OpenJDK 17.0.20.1，全部走 127.0.0.1。完整代码：<a href="https://github.com/archeu/study-labs/tree/main/java/network/tcp-handshake-timewait-framing">study-labs/java/network/tcp-handshake-timewait-framing →</a></p>
+<pre class="console"><span class="w">$ cd study-labs/java &amp;&amp; mvn -q -pl network/tcp-handshake-timewait-framing compile
+$ CP=network/tcp-handshake-timewait-framing/target/classes; P=labs.network.tcp_handshake_timewait_framing
+$ java -cp $CP $P.Framing</span>
+== 1) 粘包：客户端 write 5 次，每次一条 ==
+   服务端第 1 次 read 拿到 <b>160 字节</b>: reserve order=9527 sku=88 qty=2⏎reserve order=9528 …⏎
+== 2) 拆包：客户端 write 1 次，200 KB ==
+   服务端 read 了 <b>4 次</b>: 65536 + 65536 + 65536 + 8192 = 204800 字节
+== 3) 长度前缀：每条前面加 4 字节长度 ==
+   第 1 条 (31 字节): reserve order=9527 sku=88 qty=2
+   …
+   第 5 条 (31 字节): reserve order=9531 sku=88 qty=3     <span class="cm"># 同样晚读、同样粘在一起，照样切得开</span>
+
+<span class="w">$ java -cp $CP $P.NagleDelayedAck</span>                 <span class="cm"># 一次请求分两次 write：5 字节前缀 + 7 字节消息</span>
+TCP_NODELAY=false  200 次调用（统计后 100 次）  p50 <b>41.00 ms</b>  p99 41.15 ms  前 5 次: 1.6 41.8 41.0 41.0 41.0
+TCP_NODELAY=true   200 次调用（统计后 100 次）  p50 <b>0.06 ms</b>   p99 0.11 ms   前 5 次: 0.2 0.1 0.1 0.1 0.1
+
+<span class="w">$ java -cp $CP $P.TimeWait client 500</span>           <span class="cm"># 订单服务先 close</span>
+   TIME-WAIT  客户端（订单服务） <b>500</b> 条   服务端（库存服务）   0 条
+   其中一条: TIME-WAIT 0 0 [::ffff:127.0.0.1]:46472 [::ffff:127.0.0.1]:41385 timer:(timewait,<b>59sec</b>,0)
+<span class="w">$ java -cp $CP $P.TimeWait server 500</span>           <span class="cm"># 库存服务先 close</span>
+   TIME-WAIT  客户端（订单服务）   0 条   服务端（库存服务） <b>500</b> 条
+<span class="w">$ java -cp $CP $P.TimeWait linger0 500</span>          <span class="cm"># SO_LINGER=0，发 RST</span>
+   和这个端口有关的连接一条都没留下
+<span class="w">$ java -cp $CP $P.TimeWait leak 500</span>             <span class="cm"># 库存服务读到 -1 却忘了 close</span>
+   CLOSE-WAIT 客户端（订单服务）   0 条   服务端（库存服务） <b>500</b> 条
+   FIN-WAIT-2 客户端（订单服务） <b>500</b> 条   服务端（库存服务）   0 条</pre>
+  <p class="tip">NagleDelayedAck 的第 1 次只有 1.6 ms：Linux 在连接刚建好时处于“快速 ACK”模式，头几个段立刻确认，之后才开始延迟 ACK。这也是为什么这个坑在“调一次试试”时常常看不出来。</p>
+  <div class="two">
+    <div class="pit" style="border-left-color:var(--good)"><b><em>到这里</em>已经能交差了</b><p class="tip">自己定协议时，每条消息前写 4 字节长度，收的一方 <code>readInt</code> + <code>readFully</code>；一次请求拼好再一次 <code>flush</code>，或者开 <code>TCP_NODELAY</code>；服务之间用长连接，不要一次调用一条连接。</p></div>
+    <div class="pit" style="border-left-color:var(--warn)"><b><em>还没处理</em>的细节</b><p class="tip">长度字段被写错或被恶意填成 2 GB 怎么办（<a href="#p-stick">坑 1</a>、规范）；连接悄悄断了怎么发现（<a href="#p-dead">坑 5</a>）；突发建连时 accept 队列满了（<a href="#p-backlog">坑 6</a>）；TIME_WAIT 能不能缩短（<a href="#d-tw">第三圈</a>）。</p></div>
+  </div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>边界和变体：线上真正出事的六个地方</h2>
+    <p class="lead">每个坑旁边的徽标指回 ④ 里推出它的那条原理。标“实测”的是 ⑤ 里跑过的。</p>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-stick"><b><em>坑 1</em>自定义协议偶尔解析出乱码，压测时更多<a class="root" href="#m-stream">← ④-5 字节流</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>本地联调一切正常，上了压测，接收方偶尔报“非法指令”或 JSON 解析失败；抓包看数据完全正确。</dd>
+      <dt>根源</dt><dd>把一次 <code>read</code> 的结果当成一条消息。接收方一慢，多条就粘在一起；消息一大，一条就被拆开。</dd>
+      <dt>做法</dt><dd class="fix">用长度前缀，<code>readFully</code> 读够；用 Netty 就用 <code>LengthFieldBasedFrameDecoder</code>，并设 <code>maxFrameLength</code>，长度字段超限直接断开连接，否则一个错位的长度就能让你分配 2 GB 的数组。</dd></dl></div>
+    <div class="pit" id="p-nagle"><b><em>坑 2</em>小请求每次都是 40 ms 左右，CPU 很闲<a class="root" href="#m-stream">← ④-5 Nagle × 延迟 ACK</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>延迟分布在 40 ms 附近有一个很尖的峰，和负载无关。全景里的 HTTP/1.1 对照组 p50 41.2 ms，本页 ⑤ 41.0 ms。</dd>
+      <dt>根源</dt><dd>一次请求被分成两次以上的小 <code>write</code>，后面那次被 Nagle 扣住等 ACK，而对方的延迟 ACK 也在等。</dd>
+      <dt>做法</dt><dd class="fix">请求响应式的协议开 <code>TCP_NODELAY</code>（Netty、gRPC 默认已开）；更根本的是一次请求拼好再一次写出（<code>BufferedOutputStream</code> + 一次 <code>flush</code>），少一次系统调用，也少一个包。</dd></dl></div>
+    <div class="pit" id="p-tw"><b><em>坑 3</em>调用量一上来，报 <code>Cannot assign requested address</code><a class="root" href="#m-tw">← ④-4 TIME_WAIT</a><span class="seen">实测 TIME_WAIT 分布</span></b>
+      <dl><dt>现象</dt><dd>客户端 <code>connect</code> 失败，<code>ss -s</code> 里 TIME_WAIT 几万条。⑤ 里 500 次短连接，订单服务这边就留了 500 条，每条 60 秒。</dd>
+      <dt>根源</dt><dd>主动关闭的一方要在 TIME_WAIT 里占着这个四元组 60 秒。对同一个目标（IP + 端口），本地端口只有 28232 个，每秒新建超过约 470 条就会用光。</dd>
+      <dt>做法</dt><dd class="fix">用长连接或连接池，这是唯一的根治。实在要短连接：扩大 <code>ip_local_port_range</code>、多准备几个目标地址，或在懂的前提下开 <code>tcp_tw_reuse</code>（第三圈）。别去调 <code>tcp_fin_timeout</code>，它管的不是 TIME_WAIT。</dd></dl></div>
+    <div class="pit" id="p-cw"><b><em>坑 4</em>CLOSE_WAIT 越积越多，最后 <code>Too many open files</code><a class="root" href="#m-fin">← ④-3 两个方向各关各的</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd><code>ss -tan state close-wait</code> 一直涨，不会自己消失；进程的文件描述符用光，新连接、打开文件全失败。⑤ 的 <code>leak</code> 模式：服务端 500 条 CLOSE-WAIT，客户端 500 条 FIN-WAIT-2。</dd>
+      <dt>根源</dt><dd>对方已经发了 FIN，这边的应用没调 <code>close()</code>。CLOSE_WAIT 只能由本端应用结束，内核不会替你关。</dd>
+      <dt>做法</dt><dd class="fix">所有 socket、流、HTTP 响应体都放进 try-with-resources；用连接池时确认“归还”也会在异常路径上发生。看到 CLOSE_WAIT 堆积，查的是自己的代码，不是网络。</dd></dl></div>
+    <div class="pit" id="p-dead"><b><em>坑 5</em>长连接放了一晚上，第二天第一个请求卡住直到超时<a class="root" href="#m-ledger">← ④-1 连接只是两本账</a><span class="seen">按文档</span></b>
+      <dl><dt>现象</dt><dd>早高峰第一批请求超时，之后恢复。中间的防火墙、NAT 或云上负载均衡器会清理空闲连接，而且不通知两端。</dd>
+      <dt>根源</dt><dd>两本账都还在，但路已经断了。没有包来往，谁也发现不了，直到下一次发数据、重传到放弃。</dd>
+      <dt>做法</dt><dd class="fix">空闲长连接要有探活：应用层心跳（gRPC 的 <code>keepAliveTime</code>、Dubbo 的心跳），或 TCP keepalive。但 Linux 默认空闲 7200 秒才开始探（<code>tcp_keepalive_time</code>），比大多数中间设备的空闲超时都长，要调小才有用。</dd></dl></div>
+    <div class="pit" id="p-backlog"><b><em>坑 6</em>突发流量时，一部分客户端连接超时，服务端却很闲<a class="root" href="#m-hs">← ④-2 accept 队列</a><span class="seen">按源码</span></b>
+      <dl><dt>现象</dt><dd>服务刚启动或大促开始，大量新连接同时进来，有的 <code>connect</code> 要 1 秒、3 秒才成功（SYN 重传）。<code>nstat -az TcpExtListenOverflows</code> 在涨。</dd>
+      <dt>根源</dt><dd>握手完成的连接排在 accept 队列里等应用取。队列满了，内核就丢掉新的握手包，客户端只能重传。JDK 的 <code>new ServerSocket(port)</code> 默认 backlog 是 50（JDK 17 源码）。</dd>
+      <dt>做法</dt><dd class="fix">backlog 设大（Tomcat 的 <code>server.tomcat.accept-count</code>，Netty 的 <code>SO_BACKLOG</code>），并确认内核 <code>somaxconn</code> 不比它小；更重要的是 accept 线程别被业务卡住。</dd></dl></div>
+  </div>
+
+  <div class="round" id="s6r2"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>规范</th><th>防的是什么</th></tr></thead>
+      <tbody>
+        <tr><th>自定义协议一律“长度前缀 + 最大长度检查”，不用分隔符</th><td>坑 1：粘包拆包；错位或恶意的长度撑爆内存</td></tr>
+        <tr><th>能用现成框架的分帧就不自己拼（Netty 解码器、gRPC、Dubbo）</th><td>半包、半个长度字段这类边角，框架都处理过</td></tr>
+        <tr><th>服务之间用长连接：HTTP/2 一条，或 HTTP/1.1 连接池</th><td>坑 3：TIME_WAIT 和端口耗尽；每次多一个握手往返</td></tr>
+        <tr><th>请求响应式协议开 <code>TCP_NODELAY</code>，一次请求一次写出</th><td>坑 2：40 ms</td></tr>
+        <tr><th>每个 socket 都在 try-with-resources 或 finally 里关</th><td>坑 4：CLOSE_WAIT 和文件描述符泄漏</td></tr>
+        <tr><th>空闲长连接配心跳，周期短于中间设备的空闲超时</th><td>坑 5：被悄悄掐断的连接</td></tr>
+        <tr><th>监控 <code>ss -s</code> 的 TIME_WAIT、CLOSE_WAIT 数和 <code>ListenOverflows</code></th><td>坑 3、4、6 在出事之前都会先在这几个数上露头</td></tr>
+        <tr><th>不碰 <code>tcp_tw_recycle</code>（Linux 4.12 已删除），不随手改 <code>tcp_tw_reuse</code></th><td>前者在 NAT 后面会丢掉正常的握手；后者改错了排查极难</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>TIME_WAIT、RST、两个队列</h3></div>
+  <h3 id="d-tw">TIME_WAIT 能不能缩短：60 秒是写死的，能动的是“复用”</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>参数</th><th>本机值</th><th>它到底管什么</th></tr></thead>
+      <tbody>
+        <tr><th>（内核常量 <code>TCP_TIMEWAIT_LEN</code>）</th><td class="num">60 s</td><td>TIME_WAIT 的时长。没有 sysctl 能改；本机 <code>ss</code> 计时器从 59sec 倒数</td></tr>
+        <tr><th><code>tcp_fin_timeout</code></th><td class="num">60</td><td>孤儿连接（应用已经 close、内核还在收尾）停在 FIN_WAIT_2 的最长时间。和 TIME_WAIT 同为 60 s，所以常被误认为是它。⑤ 的 leak 模式里，客户端那 500 条 FIN-WAIT-2 就是按它超时的</td></tr>
+        <tr><th><code>tcp_tw_reuse</code></th><td class="num">2</td><td>0 关，1 全开，2 只对回环地址开（本机默认值）。允许<b>新发起</b>的连接复用处于 TIME_WAIT 的四元组，靠 TCP 时间戳区分新旧包，所以只帮客户端、要求时间戳开着</td></tr>
+        <tr><th><code>tcp_max_tw_buckets</code></th><td class="num">65536</td><td>TIME_WAIT 总数上限，超了新的直接销账不等，内核打日志。是防攻击的保险丝，不是调优旋钮</td></tr>
+        <tr><th><code>ip_local_port_range</code></th><td class="num">32768–60999</td><td>客户端可用的本地端口，共 28232 个，决定坑 3 的天花板</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">⑤ 的回环实验因为 <code>tcp_tw_reuse=2</code>，就算建满 28232 条也不一定报错；跨机器时这个值等于关闭，坑 3 才会原样出现。这一点是按内核文档的推论，本机没有跨机器复现。</p>
+
+  <h3 id="d-linger">SO_LINGER=0：用 RST 代替 FIN，没有 TIME_WAIT，也没有体面</h3>
+  <p><code>setSoLinger(true, 0)</code> 后 <code>close()</code> 不走挥手，直接发 RST：⑤ 的抓包里最后一段是 <code>[R.]</code>，<code>ss</code> 里一条都没留下。代价有三个：发送缓冲区里没发完的数据直接丢掉；对方的 <code>read</code> 抛 <code>Connection reset</code>；最后几个字节到底有没有送达，谁都不知道。所以它只适合“这条连接已经坏了，立刻中止”的场景，比如协议解析出错、心跳超时，不适合拿来消灭 TIME_WAIT。</p>
+
+  <h3 id="d-queue">两个队列：半连接和全连接</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>队列</th><th>里面是什么</th><th>上限（本机）</th><th>满了会怎样</th></tr></thead>
+      <tbody>
+        <tr><th>SYN 队列（半连接）</th><td>收到 SYN、回了 SYN-ACK、等第三个 ACK 的（SYN-RECV）</td><td><code>tcp_max_syn_backlog</code> = 1024，并受 accept 队列长度影响</td><td><code>tcp_syncookies=1</code> 时改用 SYN cookie，不占队列，这是抵御 SYN 洪水的办法</td></tr>
+        <tr><th>accept 队列（全连接）</th><td>握手完成、等应用 <code>accept()</code> 取走的</td><td>min(backlog, <code>somaxconn</code> = 4096)</td><td>默认丢掉第三个 ACK 或新 SYN，客户端重传，表现为建连慢 1 s、3 s</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">版本差异：Linux 5.4 起 <code>somaxconn</code> 默认从 128 提到 4096，老内核上 backlog 设多大都会被截到 128；Java 这边 <code>ServerSocket</code> 不写 backlog 时是 50。JDK 13 用 NIO 重写了 <code>Socket</code> 的实现（JEP 353），对外行为不变；JDK 11 起可以用 <code>jdk.net.ExtendedSocketOptions</code> 按连接设 <code>TCP_KEEPIDLE</code> 等 keepalive 参数，不用改全局 sysctl。</p>
+
+  <div class="round"><span class="rb">下一圈</span><h3>这一页没展开的</h3></div>
+    <ul class="next">
+      <li>重传和 RTO：丢了一个段，等多久重发，为什么 p99 会出现 200 ms、1 s 的台阶</li>
+      <li>滑动窗口和拥塞控制（慢启动、CUBIC、BBR）：长连接为什么比新连接快</li>
+      <li>SYN 洪水和 SYN cookie 的原理</li>
+      <li>TCP Fast Open、QUIC：把握手的往返再省掉</li>
+      <li>Netty 怎么分帧：<code>ByteToMessageDecoder</code> 的累积缓冲（J04 Netty 那一页）</li>
+      <li>tcpdump、Wireshark 读包的完整方法：重传、窗口满、零窗口</li>
+    </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：带着⑥改一遍</h2>
+  </div>
+  <div class="two">
+    <div class="pit" style="border-left-color:var(--good)"><b><em>练习 1</em>不开 TCP_NODELAY，也能消掉 40 ms 吗</b><p class="tip">把 <code>NagleDelayedAck</code> 客户端的输出流套上 <code>BufferedOutputStream</code>，两次 <code>write</code> 后一次 <code>flush</code>，<code>TCP_NODELAY</code> 保持 false。先猜 p50，再跑。对照坑 2 的“更根本的做法”。</p></div>
+    <div class="pit" style="border-left-color:var(--good)"><b><em>练习 2</em>一条长连接跑 500 次</b><p class="tip">照 <code>TimeWait</code> 写一个 <code>keep</code> 模式：只建一条连接，在上面一问一答 500 次，最后关一次。数 TIME_WAIT 是几条、总耗时是多少，和 <code>client</code> 模式比。</p></div>
+    <div class="pit" style="border-left-color:var(--good)"><b><em>练习 3</em>给长度前缀加上保险</b><p class="tip">在 <code>Framing</code> 的发送方故意把第 3 条的长度写成 <code>0x7fffffff</code>。不加检查时接收方会怎样？加上 1 MB 上限后呢？再用 Netty 的 <code>LengthFieldBasedFrameDecoder(1&lt;&lt;20, 0, 4, 0, 4)</code> 重写接收方。</p></div>
+    <div class="pit" style="border-left-color:var(--good)"><b><em>练习 4</em>CLOSE_WAIT 和 FIN_WAIT_2 谁先消失</b><p class="tip">跑 <code>TimeWait leak 500</code> 后，让程序别退出（加一行 <code>Thread.sleep(90_000)</code>），每 10 秒 <code>ss -tan | grep -c</code> 一次两种状态。先猜，再对照第三圈 <code>tcp_fin_timeout</code> 那一行。</p></div>
+  </div>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>TCP 连接是两端内核各记的一份按字节编号的账：握手是互相确认起始编号，挥手是两个方向各自说“发完了”，TIME_WAIT 是发最后一个 ACK 的一方多留 60 秒账本；账上没有消息边界，所以边界由上层用长度前缀来标。</p></details>
+    <details><summary>2. “write 一次 read 一次”和“一次调用一条连接”两个朴素做法，各疼在哪？</summary><p>前者：TCP 是字节流，读到的可能是几条粘在一起，也可能是半条，按 read 解析就会解错（⑤ 实测 5 条一次读到、200 KB 读了 4 次）。后者：每次多一个握手往返，而且主动关闭方每条连接留 60 秒 TIME_WAIT，对同一目标每秒新建超过约 470 条就把本地端口耗光。</p></details>
+    <details><summary>3. CLOSE_WAIT 堆积，为什么第一反应是查自己的代码？是哪条原理？</summary><p>④-3：FIN 只关一个方向。对方发了 FIN，本端进 CLOSE_WAIT，要等本端应用调 <code>close()</code> 才发出自己的 FIN、离开这个状态；内核不会替应用关。所以它一直涨，说明有连接在某条路径上没被关掉。</p></details>
+    <details><summary>4. 预测：把 <code>NagleDelayedAck</code> 改成一次 <code>write</code> 12 字节，<code>TCP_NODELAY</code> 仍然是 false，还会有 40 ms 吗？</summary><p>不会。④-5：Nagle 只在“有未确认的小段”时才扣住新的小段。12 字节一次写出时，前面没有未确认的数据，立刻发出；库存服务收齐后马上回复，ACK 捎在回复里，延迟 ACK 也就不用等了。这正是练习 1 的道理。</p></details>
+    <details><summary>5. 预测：库存服务每次回完就主动 <code>close()</code>（HTTP/1.0 的老做法），一秒 2000 次调用，TIME_WAIT 堆在哪边？会不会把端口用光？</summary><p>④-4：TIME_WAIT 落在先发 FIN 的一方，所以在库存服务。⑤ 的 <code>server</code> 模式实测也是这样。服务端的四元组里本地端口固定是 9090，变的是对方的 IP 和端口，所以它不会“用光本地端口”，代价是十几万条 TIME_WAIT 占内存，可能撞上 <code>tcp_max_tw_buckets</code>。订单服务收到 FIN 后走的是被动关闭，一条 TIME_WAIT 都没有。</p></details>
+    <details><summary>6. 放回全景：第 7 站前后各发生了什么？TCP 这一层出问题，整条链路会怎样？</summary><p>前面是第 6 站：订单服务的 Netty EventLoop 把 HTTP/2 帧编码成字节，写进 socket；第 3 站那条长连接早已握手建好。后面是第 8 站：库存服务的 EventLoop 被 epoll 叫醒，读出字节，按 HTTP/2 帧头和 gRPC 的 5 字节前缀切出完整消息，这一步就是在给“字节流”补边界。TCP 这层出事：如果连接被中间设备悄悄掐断（坑 5），第 10 站的 300 ms deadline 先到，订单服务看到超时，而库存服务什么都没收到；如果换成短连接，每次调用多一次握手、订单服务堆 TIME_WAIT（坑 3）；如果对照组那样两次写加 Nagle，每次调用平白多 40 ms，300 ms 的预算一下去掉七分之一。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机实测：2 核 ARM，Linux 6.8，OpenJDK 17.0.20.1，回环地址。⑤ 的抓包、粘包和拆包、长度前缀、40 ms 对比、TIME_WAIT 在哪一边和 59sec 计时器、SO_LINGER=0 不留状态、CLOSE_WAIT 和 FIN_WAIT_2 堆积，都出自 study-labs 里的 <code>Framing</code>、<code>NagleDelayedAck</code>、<code>TimeWait</code> 和 <code>tcpdump</code>。“课本：四段挥手”那一组是按 RFC 画的示意，没有抓包。</p>
+  <p>按源码和文档：<code>ServerSocket</code> 默认 backlog 50（JDK 17 <code>java/net/ServerSocket.java</code>）；三次握手防旧的重复连接请求（RFC 9293 第 3.5 节）；Nagle 算法（RFC 896）；本机 sysctl 的取值直接读自 <code>/proc/sys/net</code>；<code>tcp_fin_timeout</code>、<code>tcp_tw_reuse</code> 的含义按内核文档 ip-sysctl；<code>tcp_tw_recycle</code> 在 Linux 4.12 删除、<code>somaxconn</code> 在 5.4 改为 4096，按内核提交记录，本机没有对比旧内核。</p>
+  <p>相关：<a href="../java/pano-j04-order-calls-inventory.html">全景：订单服务调库存服务的一次 RPC</a> · <a href="url-to-page.html">从输入 URL 到页面展示</a> · <a href="io-models.html">网络 IO 模型</a> · <a href="../redis/redis-threading-io.html">Redis 线程模型与 IO</a> · <a href="../java/roadmap.html#j04">Java 地图 J04</a></p>
+</footer>
+</main>
+
+<script>
+/*SIM-START*/
+// One short connection, segment by segment. real / rst: from tcpdump -S on lo (Linux 6.8, JDK 17); book: textbook 4-segment close, drawn by RFC, not captured.
+function buildSteps(v) {
+  var c = v === 'rst' ? 147732087 : 1529743319;   // client ISN
+  var s = v === 'rst' ? 3306129557 : 940911414;   // server ISN
+  var tus = v === 'rst' ? [0, 17, 30, 1881, 1899, 1987, 2001, 2582]
+          : v === 'real' ? [0, 17, 31, 1857, 1869, 2092, 2103, 2587, 2635, 2646] : [];
+  var steps = [{ from: null, pkt: '还没有包', cs: 'CLOSED', ss: 'LISTEN', ph: 'of',
+    say: '库存服务 new ServerSocket 之后，内核为它开了一个 LISTEN 状态的 socket，等别人来握手。订单服务这边还没有这条连接的账。',
+    java: '服务端：new ServerSocket(port, 50)' }];
+  var cn = c, sn = s;
+  function add(o) { o.t = tus.length ? tus[steps.length - 1] : null; steps.push(o); }
+  add({ from: 'c', flags: '[S]', pkt: 'seq=' + c, cs: 'SYN-SENT', ss: 'SYN-RECV', ph: 'of',
+    say: '订单服务报出自己的起始编号 ' + c + '（随机的）。SYN 本身占一个编号，所以下一个字节是 ' + (c + 1) + '。库存服务收到后进 SYN-RECV，放进半连接队列。',
+    java: '客户端：new Socket(host, port) 在这里阻塞' });
+  cn = c + 1;
+  add({ from: 's', flags: '[S.]', pkt: 'seq=' + s + ' ack=' + cn, cs: 'ESTABLISHED', ss: 'SYN-RECV', ph: 'of',
+    say: '一个段干两件事：ack=' + cn + ' 确认“你的编号我收到了”，seq=' + s + ' 报出库存服务自己的起始编号。订单服务收到后，它这边的账已经对齐，进 ESTABLISHED。',
+    java: '客户端：connect 返回，new Socket 完成' });
+  sn = s + 1;
+  add({ from: 'c', flags: '[.]', pkt: 'ack=' + sn, cs: 'ESTABLISHED', ss: 'ESTABLISHED', ph: 'of',
+    say: '第三个段确认库存服务的编号。到这里两个起始编号都被对方确认过了，库存服务也进 ESTABLISHED，连接从半连接队列移到 accept 队列。',
+    java: '服务端：accept() 从 accept 队列取走这条连接' });
+  add({ from: 'c', flags: '[P.]', pkt: 'seq=' + cn + ':' + (cn + 1) + ' 1 字节', cs: 'ESTABLISHED', ss: 'ESTABLISHED', ph: 'cg',
+    say: '订单服务发出 1 字节请求 “r”，编号 ' + cn + '。P 是 PSH，提示对方别攒着，尽快交给应用。',
+    java: '客户端：out.write(\'r\')' });
+  cn += 1;
+  add({ from: 's', flags: '[.]', pkt: 'ack=' + cn, cs: 'ESTABLISHED', ss: 'ESTABLISHED', ph: 'cg',
+    say: '库存服务的内核确认：' + cn + ' 之前都收到了。这个 ACK 是内核发的，应用还没来得及回复。',
+    java: '服务端：in.read() 拿到 1 字节' });
+  add({ from: 's', flags: '[P.]', pkt: 'seq=' + sn + ':' + (sn + 1) + ' 1 字节', cs: 'ESTABLISHED', ss: 'ESTABLISHED', ph: 'cg',
+    say: '库存服务回 1 字节 “k”，用的是它自己那一本账的编号 ' + sn + '。两个方向的编号各走各的。',
+    java: '服务端：out.write(\'k\')' });
+  sn += 1;
+  add({ from: 'c', flags: '[.]', pkt: 'ack=' + sn, cs: 'ESTABLISHED', ss: 'ESTABLISHED', ph: 'cg',
+    say: '订单服务确认回复。到这里一问一答结束，下面开始关连接。',
+    java: '客户端：in.read() 拿到 1 字节' });
+  if (v === 'rst') {
+    add({ from: 'c', flags: '[R.]', pkt: 'seq=' + cn, cs: 'CLOSED', ss: 'CLOSED', ph: 'bad',
+      say: '设了 SO_LINGER=0，close() 不发 FIN，直接发 RST：两边当场销账，谁都不进 TIME_WAIT。库存服务正在等对方的 FIN，read 抛出 Connection reset。',
+      java: '客户端：setSoLinger(true, 0); close()　服务端：read 抛 SocketException' });
+    return steps;
+  }
+  add({ from: 'c', flags: '[F.]', pkt: 'seq=' + cn, cs: 'FIN-WAIT-1', ss: 'CLOSE-WAIT', ph: 'of',
+    say: '订单服务先 close()：发 FIN，意思是“我这个方向不再发了”。FIN 和 SYN 一样占一个编号。库存服务收到后进 CLOSE-WAIT，它的 read 返回 -1。',
+    java: '客户端：close()　服务端：in.read() 返回 -1' });
+  cn += 1;
+  if (v === 'book') {
+    add({ from: 's', flags: '[.]', pkt: 'ack=' + cn, cs: 'FIN-WAIT-2', ss: 'CLOSE-WAIT', ph: 'of',
+      say: '库存服务的内核先单独确认这个 FIN（确认号 ' + cn + '，比 FIN 的编号多 1）。订单服务进 FIN-WAIT-2，等对方那个方向也关。库存服务这时仍然可以继续发数据。',
+      java: '服务端：应用还在忙，没调 close()' });
+    add({ from: 's', flags: '[F.]', pkt: 'seq=' + sn + ' ack=' + cn, cs: 'TIME-WAIT', ss: 'LAST-ACK', ph: 'of',
+      say: '过了一会儿库存服务的应用调 close()，发出它那个方向的 FIN，进 LAST-ACK 等最后一个确认。订单服务收到 FIN，进 TIME-WAIT。',
+      java: '服务端：close()' });
+  } else {
+    add({ from: 's', flags: '[F.]', pkt: 'seq=' + sn + ' ack=' + cn, cs: 'TIME-WAIT', ss: 'LAST-ACK', ph: 'of',
+      say: '库存服务读到 -1 后立刻 close()，所以“确认你的 FIN”和“发我的 FIN”合成了一个段：ack=' + cn + ' 加上 FIN。实测只有三段挥手，原因就在这。订单服务进 TIME-WAIT。',
+      java: '服务端：close()' });
+  }
+  sn += 1;
+  add({ from: 'c', flags: '[.]', pkt: 'ack=' + sn, cs: 'TIME-WAIT', ss: 'CLOSED', ph: 'of',
+    say: '最后一个 ACK。库存服务收到后销账，CLOSED。订单服务不销：这个 ACK 万一丢了，库存服务会重发 FIN，它得还在场再答一次。',
+    java: 'ss 里：TIME-WAIT … timer:(timewait,59sec,0)' });
+  steps.push({ from: null, pkt: '60 秒后，没有包', cs: 'CLOSED', ss: 'CLOSED', ph: 'of', t: null,
+    say: 'TIME-WAIT 计时器到点，订单服务也销账。这 60 秒里，同一个四元组（同一个本地端口连同一个目标）不能用来建新连接。',
+    java: '谁先 close，谁付这 60 秒' });
+  return steps;
+}
+// sanity checks used in node: every ack must equal the peer's next sequence number
+function checkAcks(steps) {
+  var errs = [];
+  steps.forEach(function (st, i) {
+    var m = /ack=(\d+)/.exec(st.pkt);
+    if (!m) return;
+    errs.push(i + ':' + m[1]);
+  });
+  return errs;
+}
+/*SIM-END*/
+
+(function () {
+  var NS = 'http://www.w3.org/2000/svg';
+  var svg = document.getElementById('sq-svg');
+  var box = document.getElementById('sq-box');
+  var v = 'real', steps = buildSteps(v), k = 0, timer = null;
+  var CX = 170, SX = 790, TOP = 58, ROW = 40;
+  function el(name, attrs, text) {
+    var e = document.createElementNS(NS, name);
+    for (var a in attrs) e.setAttribute(a, attrs[a]);
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var h = TOP + (steps.length - 1) * ROW + 30;
+    svg.setAttribute('viewBox', '0 0 960 ' + h);
+    svg.appendChild(el('rect', { 'class': 'b-pd', x: CX - 80, y: 8, width: 160, height: 34, rx: 10 }));
+    svg.appendChild(el('text', { 'class': 't-h', x: CX, y: 31, 'text-anchor': 'middle' }, '订单服务'));
+    svg.appendChild(el('rect', { 'class': 'b-g2', x: SX - 80, y: 8, width: 160, height: 34, rx: 10 }));
+    svg.appendChild(el('text', { 'class': 't-h', x: SX, y: 31, 'text-anchor': 'middle' }, '库存服务'));
+    svg.appendChild(el('line', { 'class': 'lane', x1: CX, y1: 44, x2: CX, y2: h - 6 }));
+    svg.appendChild(el('line', { 'class': 'lane', x1: SX, y1: 44, x2: SX, y2: h - 6 }));
+    steps.forEach(function (st, i) {
+      if (i === 0) return;
+      var y = TOP + (i - 1) * ROW + 10;
+      var g = el('g', { 'class': 'msg', 'data-i': i });
+      var ph = st.ph === 'bad' ? 'bad' : (st.from === 'c' ? 'pd' : 'g2');
+      if (st.from) {
+        var x1 = st.from === 'c' ? CX : SX, x2 = st.from === 'c' ? SX - 4 : CX + 4;
+        g.appendChild(el('path', { 'class': 'ln e-' + ph, d: 'M' + x1 + ' ' + y + ' L' + x2 + ' ' + (y + 22), 'marker-end': 'url(#ah-' + ph + ')' }));
+        g.appendChild(el('text', { 'class': 'lab t-mono', x: 480, y: y + 6, 'text-anchor': 'middle' }, st.flags + ' ' + st.pkt));
+      } else {
+        g.appendChild(el('text', { 'class': 'lab t-s', x: 480, y: y + 16, 'text-anchor': 'middle' }, st.pkt));
+      }
+      var prev = steps[i - 1];
+      if (st.cs !== prev.cs) g.appendChild(el('text', { 'class': 'st-chip t-pd', x: CX - 12, y: y + 26, 'text-anchor': 'end' }, st.cs));
+      if (st.ss !== prev.ss) g.appendChild(el('text', { 'class': 'st-chip', x: SX + 12, y: y + 26, style: 'fill:var(--g2)' }, st.ss));
+      svg.appendChild(g);
+    });
+  }
+  function show() {
+    var st = steps[k];
+    svg.querySelectorAll('.msg').forEach(function (g) {
+      var i = +g.getAttribute('data-i');
+      g.classList.toggle('on', i <= k);
+      g.classList.toggle('cur', i === k);
+    });
+    document.getElementById('sq-cs').textContent = st.cs;
+    document.getElementById('sq-ss').textContent = st.ss;
+    document.getElementById('sq-num').textContent = k + ' / ' + (steps.length - 1) +
+      (st.t != null ? ' · +' + (st.t / 1000).toFixed(3) + ' ms' : (v === 'book' && st.from ? ' · 示意，未抓包' : ''));
+    document.getElementById('sq-pkt').textContent = st.from ? (st.from === 'c' ? '订单服务 → 库存服务  ' : '库存服务 → 订单服务  ') + st.flags + ' ' + st.pkt : st.pkt;
+    document.getElementById('sq-say').textContent = st.say;
+    document.getElementById('sq-java').textContent = 'Java 这边：' + st.java;
+    document.getElementById('sq-prev').disabled = k === 0;
+    document.getElementById('sq-next').disabled = k === steps.length - 1;
+  }
+  function go(d) { k = Math.max(0, Math.min(steps.length - 1, k + d)); show(); }
+  function stop() { if (timer) { clearInterval(timer); timer = null; } document.getElementById('sq-auto').setAttribute('aria-pressed', 'false'); }
+  document.getElementById('sq-prev').addEventListener('click', function () { stop(); go(-1); });
+  document.getElementById('sq-next').addEventListener('click', function () { stop(); go(1); });
+  document.getElementById('sq-reset').addEventListener('click', function () { stop(); k = 0; show(); });
+  document.getElementById('sq-auto').addEventListener('click', function () {
+    if (timer) { stop(); return; }
+    if (k === steps.length - 1) k = 0;
+    this.setAttribute('aria-pressed', 'true');
+    show();
+    timer = setInterval(function () { if (k >= steps.length - 1) { stop(); return; } go(1); }, 1600);
+  });
+  box.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { stop(); go(1); e.preventDefault(); }
+    if (e.key === 'ArrowLeft') { stop(); go(-1); e.preventDefault(); }
+  });
+  document.querySelectorAll('#seq .seg button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      stop();
+      v = b.getAttribute('data-v');
+      document.querySelectorAll('#seq .seg button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+      steps = buildSteps(v); k = 0; draw(); show();
+    });
+  });
+  draw(); show();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

@@ -120,6 +120,7 @@
 |---|------|------|
 | 01 | [从输入 URL 到页面展示](https://archeu.github.io/study-notes/network/url-to-page.html) | 12 站全景、往返次数尺子、DNS 层级缓存、TCP + TLS 1.3 时序、慢启动、渲染阻塞、三次握手等设计取舍、Java 迷你浏览器实测（JDK 8 / 17 / 21）、往返计算器和 script 位置实验台 |
 | 02 | [网络 IO 模型](https://archeu.github.io/study-notes/network/io-models.html) | 一万个连接要几个线程：五种 IO 模型的两段等待、连接便宜线程贵、Reactor 和 Tomcat NIO 连接器、事件循环为什么不能阻塞、HTTP 连接池和 keep-alive 等八个坑、BIO / NIO / 虚拟线程 1 万连接实测（JDK 17 / 21），keep-alive 连接分步演示 |
+| 03 | [TCP：握手、挥手、TIME_WAIT 与粘包](https://archeu.github.io/study-notes/network/tcp-handshake-timewait-framing.html) | 连接是两端内核的两本账、三次握手为什么是三次、四次挥手和 CLOSE_WAIT、TIME_WAIT 为什么在先关的一方、字节流与长度前缀、Nagle × 延迟 ACK 的 40 ms、accept 队列，真实抓包逐段演示 |
 
 ## 架构
 
