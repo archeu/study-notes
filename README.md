@@ -30,6 +30,7 @@
 | 01 | [全景：一个订单对象的一生](https://archeu.github.io/study-notes/java/pano-j01-order-object-life.html) | J01 的场景全景：用户 1024 下单 2 件 88 号商品，一个 Order 经过 Tomcat 收字节、Jackson 反序列化成 record、Spring 代理开事务、HashMap 查商品、new 实体与泛型擦除、Stream 和模式匹配算价、扣库存抛异常回滚、放进集合、DelayQueue、序列化写回、留在堆里十一站，每站挂上 J01 知识点；本机 Spring Boot 实测每站类名、桶下标、冷热耗时和存活对象数，分步演示 |
 | 02 | [全景：一个下单请求在线程池里](https://archeu.github.io/study-notes/java/pano-j02-order-in-threadpool.html) | J02 的场景全景：1000 人抢 100 件 88 号键盘，一个请求经过 Tomcat Acceptor 和 Poller、exec 线程池、ThreadLocal 绑用户、读库存、写回撞车超卖，再分三种修法（synchronized、CAS、数据库条件更新），最后进 ConcurrentHashMap、CompletableFuture 异步通知、清 ThreadLocal 回池十一站，每站挂上 J02 知识点；本机 Spring Boot 实测五种写法的超卖件数、BLOCKED 线程数和虚拟线程，分步演示 |
 | 03 | [全景：一个对象从 new 到被回收](https://archeu.github.io/study-notes/java/pano-j03-object-new-to-gc.html) | J03 JVM 与调优的场景全景：类加载、JIT 与逃逸分析、TLAB 分配、大对象、Young GC、晋升、并发标记与 Mixed GC、泄漏到 Full GC、OOM 排查、容器内存十站，附实测 GC 日志，分步演示 |
+| 04 | [全景：订单服务调库存服务的一次 RPC](https://archeu.github.io/study-notes/java/pano-j04-order-calls-inventory.html) | J04 场景全景：Stub、服务发现与负载均衡、长连接、protobuf、HTTP/2 帧、Netty EventLoop、TCP、服务端 Reactor、业务线程池、deadline 十站，gRPC 对 HTTP/1.1 的延迟和连接数实测，分步演示 |
 
 ## Spring
 

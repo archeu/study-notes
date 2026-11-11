@@ -1,0 +1,958 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>订单服务调库存服务的一次 RPC</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, same family as the other notes; a scenario panorama (reverse-learn) for Java map J04: hero + stop strip, scene card + code lines tagged with stop numbers, panorama map (left zone = order-service JVM with stops 1-6 top to bottom, middle = registry, kernel TCP stop 7 and return/timeout stop 10, right zone = inventory-service with stops 8-9), measured latency bars (log scale) + connection-count dots, step-through walk linked to the map, node table, retell/predict/next loop. Roles: cg = RPC principles (stub, discovery+LB, serialization), rn = HTTP client, connection pool and timeouts, of = HTTP/2, bk = Netty, pd = TCP, g2 = IO model and Reactor; bad = red, only for what goes wrong. Interaction: the walk stepper (prev/next/auto/reset, arrow keys) highlights the matching box on a cloned map; boxes and strip links jump to the step. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:80px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:22px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:22px}
+.lead{color:var(--muted);max-width:46em}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .stop[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--bk)}
+.strip{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:4px;scrollbar-width:thin}
+.strip a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:5px 12px 5px 6px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.strip a:hover{border-color:var(--rc)}
+.strip a b{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--rc);color:var(--on-accent);font-family:var(--font-mono);font-size:12px;font-weight:600}
+.strip i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.where a{font-weight:500}
+
+/* ---------- scene ---------- */
+.scene-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:18px;align-items:start}
+.card{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:18px 20px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.facts{display:grid;grid-template-columns:4.2em minmax(0,1fr);gap:8px 12px;margin:0;font-size:15px}
+.facts dt{font-weight:700;color:var(--muted)}
+.facts dd{margin:0;min-width:0}
+.facts code{overflow-wrap:anywhere}
+.result{border-top:1.5px dashed var(--line);padding-top:12px;font-size:14.5px}
+.result b{color:var(--good)}
+.result .bad{color:var(--bad);font-weight:700}
+.tag-real{display:inline-block;font-size:12px;font-weight:700;padding:0 7px;border-radius:6px;background:var(--good-tint);color:var(--good);vertical-align:1px}
+.tag-doc{display:inline-block;font-size:12px;font-weight:700;padding:0 7px;border-radius:6px;background:var(--neutral-tint);color:var(--neutral);vertical-align:1px}
+.code-card h3{font-size:18px}
+.code-card p.cap{font-size:13.5px;color:var(--muted)}
+.code{margin:0;background:var(--code-bg);border:1px solid var(--line);border-radius:12px;padding:12px 0;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.6}
+.code .ln{display:grid;grid-template-columns:3.4em max-content;white-space:pre;padding-right:14px}
+.code .ln i{font-style:normal;text-align:center;font-family:var(--font-body);font-weight:700;color:var(--rc,transparent)}
+.code .ln.hl{background:color-mix(in srgb,var(--rc) 9%,transparent)}
+.code .cm{color:var(--muted)}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:56em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto;min-width:760px}
+.sv text{font-family:var(--font-body)}
+.sv .mono{font-family:var(--font-mono)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13.5px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend span::before{content:"";width:12px;height:12px;border-radius:3px;background:var(--rt);border:2px solid var(--rc)}
+
+/* map svg */
+.pmap .box rect{fill:var(--card);stroke:var(--rc);stroke-width:2}
+.pmap .box .bt{font-size:14px;font-weight:700;fill:var(--ink)}
+.pmap .box .bn{fill:var(--rc)}
+.pmap .box .bs{font-size:12px;fill:var(--muted)}
+.pmap .box{cursor:pointer;transition:opacity .25s}
+.pmap .box rect{transition:fill .25s,stroke-width .25s}
+.pmap .zone{fill:none;stroke:var(--line-strong);stroke-width:1.4;stroke-dasharray:6 5}
+.pmap .zl{font-size:12.5px;fill:var(--muted)}
+.pmap .client rect{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.pmap .client text{fill:var(--ink)}
+.pmap .host rect{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.pmap .host text{font-size:12px;fill:var(--ink)}
+.pmap .host.bad rect{fill:var(--bad-tint);stroke:var(--bad)}
+.pmap .host.bad text{fill:var(--bad)}
+.pmap .ed line,.pmap .ed path{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.pmap .ed.ret line,.pmap .ed.ret path{stroke-dasharray:5 4}
+.pmap .ed.bad line{stroke:var(--bad)}
+.pmap .ed{transition:opacity .25s}
+.pmap .el{font-size:11px;fill:var(--muted)}
+.pmap .el.bad{fill:var(--bad);font-weight:700}
+.pmap .mk{fill:var(--line-strong)}
+.pmap .mk-bad{fill:var(--bad)}
+/* walk highlighting (only on the clone inside .walk) */
+.walk .pmap .box{opacity:.28}
+.walk .pmap .box.past{opacity:.6}
+.walk .pmap .box.on{opacity:1}
+.walk .pmap .box.on rect{fill:var(--rt);stroke-width:3.2}
+.walk .pmap .ed{opacity:.3}
+.walk .pmap .ed.hot{opacity:1}
+.walk .pmap .ed.hot line,.walk .pmap .ed.hot path{stroke:var(--ink);stroke-width:2}
+.walk .pmap .ed.hot.bad line{stroke:var(--bad)}
+
+/* timing svg */
+.tim .lane{font-size:12px;fill:var(--ink)}
+.tim .pt{font-size:14px;font-weight:700;fill:var(--ink)}
+.tim .ps{font-size:12px;fill:var(--muted)}
+.tim .bar{fill:var(--bk)}
+.tim .bar.bad{fill:var(--bad)}
+.tim .bv{font-size:11.5px;fill:var(--muted)}
+.tim .bin{font-size:11.5px;fill:var(--on-accent);font-weight:700}
+.tim .tot{stroke:var(--ink);stroke-width:1.6;stroke-dasharray:4 3}
+.tim .tl{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.tim .ax{stroke:var(--line-strong);stroke-width:1.2}
+.tim .tk{font-size:11px;fill:var(--muted)}
+.tim .grid{stroke:var(--line);stroke-width:1}
+
+/* ---------- walk ---------- */
+.walk{display:flex;flex-direction:column;gap:14px;outline:none}
+.ctrl{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.btn[aria-pressed="true"]{background:var(--bk-tint);border-color:var(--bk)}
+.cnt{margin-left:auto;font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.walk-fig:empty{display:none}
+.stops{display:flex;flex-direction:column;gap:14px}
+.stop{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;padding:16px 18px;display:flex;flex-direction:column;gap:8px}
+.stop h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:21px}
+.stop h3 .no{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:50%;background:var(--rc);color:var(--on-accent);font-family:var(--font-mono);font-size:14px;font-weight:600;flex:none;align-self:center}
+.stop p{font-size:15px;max-width:60em}
+.stop p > b:first-child{display:inline-block;min-width:5.2em;font-size:13px;color:var(--muted)}
+.stop .risk > b:first-child{color:var(--bad)}
+.stop .down > b:first-child{color:var(--rc)}
+.stop .jv{color:var(--muted);font-size:14px}
+.stop code{overflow-wrap:anywhere}
+.todo-chip{display:inline-block;font-size:12px;font-weight:700;padding:0 7px;border-radius:6px;border:1.5px dashed var(--line-strong);color:var(--muted);vertical-align:1px}
+.walk.js .stop{display:none}
+.walk.js .stop.cur{display:flex}
+
+/* ---------- nodes ---------- */
+.tbl{overflow-x:auto;background:var(--card);border:1.5px solid var(--line);border-radius:16px}
+table.nodes{border-collapse:collapse;width:100%;min-width:720px;font-size:14.5px;line-height:1.55}
+table.nodes th,table.nodes td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+table.nodes th{font-size:13px;color:var(--muted);font-weight:700}
+table.nodes tr:last-child td{border-bottom:0}
+table.nodes td.st{font-family:var(--font-mono);white-space:nowrap}
+table.nodes td.ord{white-space:nowrap}
+table.nodes td.ord b{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--ink);color:var(--paper);font-family:var(--font-mono);font-size:12.5px;margin-right:8px}
+table.nodes .why{color:var(--muted);font-size:13.5px}
+.dp{font-size:12px;color:var(--muted);white-space:nowrap}
+.aside-box{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:14px 18px;display:flex;flex-direction:column;gap:8px;font-size:14.5px}
+.aside-box h3{font-size:18px}
+.aside-box ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:6px}
+
+/* ---------- back ---------- */
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}
+.retell{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:8px}
+.retell li{padding-left:4px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p{font-size:14.5px}
+details p + p{margin-top:6px}
+details .from{font-size:13px;color:var(--muted)}
+.preds{display:flex;flex-direction:column;gap:10px}
+.mines{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:8px;font-size:15px}
+.next{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+.next .card h4{font-size:18px}
+.next .card p{font-size:14.5px;color:var(--muted)}
+
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+
+@media (max-width:860px){
+  .scene-grid,.two,.next{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:520px){
+  main{gap:64px;padding-block:28px 56px}
+  .facts{grid-template-columns:minmax(0,1fr);gap:2px 0}
+  .facts dd{margin-bottom:6px}
+  .cnt{margin-left:0;width:100%}
+}
+/* ---------- this page ---------- */
+.stop .log{font-size:13.5px;color:var(--muted);background:var(--code-bg);border:1px solid var(--line);border-radius:10px;padding:6px 10px}
+.stop .log code{font-size:12.5px;color:var(--ink)}
+.result .from{font-size:13px;color:var(--muted);margin-top:6px}
+#map > h3{font-size:20px;margin-top:8px}
+.note-p{font-size:14px;color:var(--muted);max-width:56em}
+table.runs td.num{font-family:var(--font-mono);white-space:nowrap;font-variant-numeric:tabular-nums}
+table.runs .bad-t{color:var(--bad);font-weight:700}
+/* race timeline */
+.race .lane{font-size:14px;font-weight:700;fill:var(--ink);font-family:var(--font-mono)}
+.race .lsub{font-size:12px;fill:var(--muted)}
+.race .axis{stroke:var(--line-strong);stroke-width:1.2}
+.race .tk{font-size:11.5px;fill:var(--muted)}
+.race .ev rect{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.race .ev text{font-size:13px;font-weight:700;fill:var(--ink)}
+.race .ev text.r{font-size:12px;font-weight:400;fill:var(--muted)}
+.race .ev.off rect{fill:none;stroke:var(--line-strong);stroke-dasharray:5 4}
+.race .ev.off text{fill:var(--muted);font-weight:400}
+.race .qv rect{fill:var(--card);stroke:var(--line-strong);stroke-width:1.4}
+.race .qv text{font-family:var(--font-mono);font-size:15px;font-weight:700;fill:var(--ink)}
+.race .qv.bad rect{fill:var(--bad-tint);stroke:var(--bad)}
+.race .qv.bad text{fill:var(--bad)}
+.race .lk{stroke:var(--line-strong);stroke-width:1.2;stroke-dasharray:3 3}
+.race .lk.bad{stroke:var(--bad)}
+.race .note{font-size:12.5px;fill:var(--muted)}
+.race .note.bad{fill:var(--bad);font-weight:700}
+
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+table.runs td.why code.bad{color:var(--bad)}
+/* J04: measured latency bars and connection dots */
+.lat .bar rect{fill:var(--rt);stroke:var(--rc);stroke-width:1.6}
+.lat .bl{font-size:12.5px;fill:var(--ink)}
+.lat .bv{font-size:12.5px;font-weight:700;fill:var(--ink);font-family:var(--font-mono)}
+.lat .gl{stroke:var(--line);stroke-width:1}
+.lat .gt{font-size:11px;fill:var(--muted);font-family:var(--font-mono)}
+.lat .dl{stroke:var(--bad);stroke-width:1.6;stroke-dasharray:5 4}
+.lat .dt{font-size:11.5px;fill:var(--bad);font-weight:700}
+.conn .dot{fill:var(--rt);stroke:var(--rc);stroke-width:1.4}
+.conn .ct{font-size:13px;font-weight:700;fill:var(--ink)}
+.conn .cs{font-size:12px;fill:var(--muted)}
+.conn .pipe{fill:var(--rt);stroke:var(--rc);stroke-width:2}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 后端架构</span><span aria-hidden="true">/</span><span class="tb-here">全景：订单服务调库存服务的一次 RPC</span></div></nav>
+
+<main>
+
+<header class="hero">
+  <p class="kicker">JAVA 后端架构 · J04 网络与 RPC · 场景全景</p>
+  <h1>订单服务调库存服务的一次 RPC</h1>
+  <p class="lead">用户 1024 下单买 2 件 88 号商品，订单服务要先让库存服务把这 2 件预占下来。代码里只有一行 <code>stub.reserve(req)</code>，看着像调本地方法，底下却过了十站：找到库存服务在哪台机器、挑一台、拿一条连接、把对象编码成 7 个字节、装进 HTTP/2 帧、由 Netty 写进内核、过 TCP、在对面被 epoll 叫醒、切到业务线程扣库存，再沿原路回来。<b>任何一站慢了，都由最后一站的 300 ms 超时来兜底</b>，而超时只管客户端，不管对面。这张全景回答：一次远程调用经过了哪十站，J04 的 6 个知识点各管哪一站，以及哪几站最容易出事。</p>
+  <nav class="strip" aria-label="十站">
+    <a href="#s-1" data-role="cg"><b>1</b>Stub</a><i>›</i>
+    <a href="#s-2" data-role="cg"><b>2</b>发现与负载均衡</a><i>›</i>
+    <a href="#s-3" data-role="rn"><b>3</b>连接</a><i>›</i>
+    <a href="#s-4" data-role="cg"><b>4</b>序列化</a><i>›</i>
+    <a href="#s-5" data-role="of"><b>5</b>HTTP/2 帧</a><i>›</i>
+    <a href="#s-6" data-role="bk"><b>6</b>客户端 Netty</a><i>›</i>
+    <a href="#s-7" data-role="pd"><b>7</b>TCP</a><i>›</i>
+    <a href="#s-8" data-role="g2"><b>8</b>服务端 Reactor</a><i>›</i>
+    <a href="#s-9" data-role="bk"><b>9</b>业务线程池</a><i>›</i>
+    <a href="#s-10" data-role="rn"><b>10</b>回程与超时</a>
+  </nav>
+  <p class="where"><span>所在：<a href="roadmap.html#j04">Java 地图 J04 · 网络与 RPC</a></span><span>上一站：<a href="pano-j03-object-new-to-gc.html">一个对象从 new 到被回收</a></span><span>第一圈：<a href="../network/url-to-page.html">从输入 URL 到页面展示</a></span><span>整条链路在本机真跑过 <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ============ 场景 ============ -->
+<section id="scene">
+  <h2>场景：订单 9527 要预占 2 件库存</h2>
+  <div class="scene-grid">
+    <div class="card">
+      <dl class="facts">
+        <dt>谁</dt><dd>交易靶场的订单服务。用户 1024 买 2 件 88 号机械键盘，生成订单 9527，下单前先调库存服务预占库存。</dd>
+        <dt>部署</dt><dd>库存服务两个实例（<code>:50051</code>、<code>:50052</code>），登记在注册中心的名字 <code>inventory</code> 下。双方用 gRPC：HTTP/2 + protobuf，传输层是 Netty。JDK 21，gRPC 1.84.1。</dd>
+        <dt>调用</dt><dd><code>InventoryService.Reserve(order_id=9527, sku_id=88, qty=2)</code>，deadline 300 ms，轮询分到两台。</dd>
+        <dt>期望</dt><dd>平时一次调用 1 ms 左右，连接不随并发涨；库存服务慢了，订单服务 300 ms 内给出答复，不把自己的线程拖死；<b>库存只扣一次</b>。</dd>
+      </dl>
+      <div class="result">
+        <p><span class="tag-real">实测</span> 稳定后 gRPC 一次 p50 0.65 ms；50 个线程同时调，gRPC 每台只用 <b>1 条</b>连接，HTTP/1.1 开了 27～46 条。<span class="bad">冷启动的第一次调用 312～329 ms，3 次里 2 次超过了 300 ms 的 deadline</span>；慢订单超时以后，库存那边<span class="bad">照样扣了 2 件</span>。</p>
+        <p class="from">实测环境：本机 2 核 ARM，JDK 21.0.12，订单服务和两个库存实例跑在同一个 JVM 里、走本机回环，延迟只看相对大小。另起一个 HTTP/1.1 + JSON 的库存接口（JDK 自带的 HttpServer 和 HttpClient）做对照。完整跑了 3 次。</p>
+      </div>
+    </div>
+    <div class="card code-card">
+      <h3>这几行代码，各在第几站起作用</h3>
+      <p class="cap">左边的号是这一行触发的那一站。</p>
+<pre class="code"><span class="ln hl" data-role="cg"><i>2</i>forTarget("registry:///inventory")      <span class="cm">// 名字，不是地址</span></span><span class="ln hl" data-role="cg"><i>2</i>  .defaultLoadBalancingPolicy("round_robin")</span><span class="ln" data-role="rn"><i>3</i><span class="cm">// 每个实例一条 HTTP/2 长连接，不是连接池</span></span><span class="ln hl" data-role="cg"><i>1</i>stub = InventoryServiceGrpc.newBlockingStub(ch);</span><span class="ln hl" data-role="cg"><i>4</i>req = ReserveRequest.newBuilder().setOrderId(9527)</span><span class="ln" data-role="cg"><i></i>        .setSkuId(88).setQty(2).build();     <span class="cm">// 7 字节</span></span><span class="ln hl" data-role="rn"><i>10</i>stub.withDeadlineAfter(300, MILLISECONDS)</span><span class="ln hl" data-role="cg"><i>1</i>    .reserve(req);                   <span class="cm">// 看着像本地调用</span></span><span class="ln" data-role="bk"><i>9</i><span class="cm">// 库存那边：serverBuilder.executor(bizPool)</span></span></pre>
+      <p class="cap">完整代码在 study-labs：<a href="https://github.com/archeu/study-labs/tree/main/java/java/pano-j04-order-calls-inventory">java/java/pano-j04-order-calls-inventory →</a>，一条命令跑完全部测量。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 全景图 ============ -->
+<section id="map">
+  <h2>全景图：十站</h2>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv pmap" viewBox="0 0 960 560" role="img" aria-label="全景图：左边是订单服务进程，从上到下六站：第 1 站 Stub 把方法调用包装成远程调用；第 2 站问注册中心 inventory 在哪，得到两个地址，轮询选一台；第 3 站拿到这台的 HTTP/2 长连接；第 4 站把请求编码成 7 字节的 protobuf；第 5 站装成 HEADERS 和 DATA 两个 HTTP/2 帧；第 6 站 Netty 的 EventLoop 线程把字节写进 socket。中间第 7 站是内核的 TCP，把字节送到对面。右边是库存服务进程：第 8 站 epoll 唤醒服务端的 EventLoop，解出帧和消息；第 9 站切到业务线程池扣库存。第 10 站响应沿原路回来，客户端的 deadline 300 毫秒一到就放弃。">
+  <defs>
+    <marker id="pm-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+
+  <rect class="zone" x="12" y="36" width="300" height="512" rx="14"/>
+  <text class="zl" x="24" y="56">订单服务 · JVM 进程</text>
+  <rect class="zone" x="330" y="440" width="290" height="108" rx="12"/>
+  <text class="zl" x="342" y="460">两边的内核 + 网络</text>
+  <rect class="zone" x="640" y="36" width="308" height="512" rx="14"/>
+  <text class="zl" x="652" y="56">库存服务 · 实例 A :50051</text>
+
+  <g class="box" data-stop="1" data-role="cg">
+    <rect x="30" y="70" width="264" height="56" rx="12"/>
+    <text class="bt" x="42" y="94"><tspan class="bn">①</tspan> Stub</text>
+    <text class="bs" x="42" y="114">reserve(req) 看着像本地方法</text>
+  </g>
+  <g class="box" data-stop="2" data-role="cg">
+    <rect x="30" y="152" width="264" height="56" rx="12"/>
+    <text class="bt" x="42" y="176"><tspan class="bn">②</tspan> 发现与负载均衡</text>
+    <text class="bs" x="42" y="196">两个地址，轮询挑一台</text>
+  </g>
+  <g class="box" data-stop="3" data-role="rn">
+    <rect x="30" y="234" width="264" height="56" rx="12"/>
+    <text class="bt" x="42" y="258"><tspan class="bn">③</tspan> 连接</text>
+    <text class="bs" x="42" y="278">每台一条长连接，已经建好</text>
+  </g>
+  <g class="box" data-stop="4" data-role="cg">
+    <rect x="30" y="316" width="264" height="56" rx="12"/>
+    <text class="bt" x="42" y="340"><tspan class="bn">④</tspan> 序列化</text>
+    <text class="bs" x="42" y="360">protobuf 编码成 7 字节</text>
+  </g>
+  <g class="box" data-stop="5" data-role="of">
+    <rect x="30" y="398" width="264" height="56" rx="12"/>
+    <text class="bt" x="42" y="422"><tspan class="bn">⑤</tspan> HTTP/2 帧</text>
+    <text class="bs" x="42" y="442">一个 stream：HEADERS + DATA</text>
+  </g>
+  <g class="box" data-stop="6" data-role="bk">
+    <rect x="30" y="480" width="264" height="56" rx="12"/>
+    <text class="bt" x="42" y="504"><tspan class="bn">⑥</tspan> 客户端 Netty</text>
+    <text class="bs" x="42" y="524">EventLoop 线程写进 socket</text>
+  </g>
+
+  <g class="host">
+    <rect x="350" y="152" width="250" height="56" rx="12"/>
+    <text x="362" y="175" style="font-weight:700">注册中心（Nacos、K8s DNS）</text>
+    <text x="362" y="195">inventory → :50051、:50052</text>
+  </g>
+  <g class="box" data-stop="10" data-role="rn">
+    <rect x="350" y="70" width="250" height="56" rx="12"/>
+    <text class="bt" x="362" y="94"><tspan class="bn">⑩</tspan> 回程与超时</text>
+    <text class="bs" x="362" y="114">回结果，或 300 ms 到点放弃</text>
+  </g>
+  <g class="box" data-stop="7" data-role="pd">
+    <rect x="350" y="480" width="250" height="56" rx="12"/>
+    <text class="bt" x="362" y="504"><tspan class="bn">⑦</tspan> TCP</text>
+    <text class="bs" x="362" y="524">发送缓冲 → 网络 → 接收缓冲</text>
+  </g>
+
+  <g class="host" style="opacity:.7">
+    <rect x="660" y="70" width="270" height="56" rx="12" style="stroke-dasharray:5 4"/>
+    <text x="672" y="93" style="font-weight:700">实例 B :50052</text>
+    <text x="672" y="113">同样一套 ⑧ ⑨，另一条连接</text>
+  </g>
+  <g class="box" data-stop="9" data-role="bk">
+    <rect x="660" y="362" width="270" height="70" rx="12"/>
+    <text class="bt" x="672" y="386"><tspan class="bn">⑨</tspan> 业务线程池</text>
+    <text class="bs" x="672" y="406">inventory-biz：88 号扣 2 件</text>
+    <text class="bs" x="672" y="423">不占 EventLoop 线程</text>
+  </g>
+  <g class="box" data-stop="8" data-role="g2">
+    <rect x="660" y="480" width="270" height="56" rx="12"/>
+    <text class="bt" x="672" y="504"><tspan class="bn">⑧</tspan> 服务端 Reactor</text>
+    <text class="bs" x="672" y="524">epoll 叫醒 EventLoop，切出消息</text>
+  </g>
+
+  <g class="ed" data-edge="1"><line x1="48" y1="126" x2="48" y2="149" marker-end="url(#pm-ar)"/><text class="el" x="58" y="143">方法名 + 请求对象</text></g>
+  <g class="ed" data-edge="r"><line x1="294" y1="180" x2="347" y2="180" marker-end="url(#pm-ar)"/><text class="el" x="321" y="172" text-anchor="middle">查名字</text></g>
+  <g class="ed" data-edge="2"><line x1="48" y1="208" x2="48" y2="231" marker-end="url(#pm-ar)"/><text class="el" x="58" y="225">选中实例 A</text></g>
+  <g class="ed" data-edge="3"><line x1="48" y1="290" x2="48" y2="313" marker-end="url(#pm-ar)"/><text class="el" x="58" y="307">在这条连接上开一个 stream</text></g>
+  <g class="ed" data-edge="4"><line x1="48" y1="372" x2="48" y2="395" marker-end="url(#pm-ar)"/><text class="el" x="58" y="389">7 字节的消息</text></g>
+  <g class="ed" data-edge="5"><line x1="48" y1="454" x2="48" y2="477" marker-end="url(#pm-ar)"/><text class="el" x="58" y="471">HEADERS 帧 + DATA 帧</text></g>
+  <g class="ed" data-edge="6"><line x1="294" y1="508" x2="347" y2="508" marker-end="url(#pm-ar)"/><text class="el" x="321" y="500" text-anchor="middle">ByteBuf</text></g>
+  <g class="ed" data-edge="7"><line x1="600" y1="508" x2="657" y2="508" marker-end="url(#pm-ar)"/><text class="el" x="629" y="500" text-anchor="middle">TCP 段</text></g>
+  <g class="ed" data-edge="8"><line x1="795" y1="480" x2="795" y2="435" marker-end="url(#pm-ar)"/><text class="el" x="803" y="462">解出的请求对象</text></g>
+  <g class="ed ret" data-edge="9"><path d="M660,385 H626 V98 H603" marker-end="url(#pm-ar)"/><text class="el" x="672" y="300">↖ 响应沿原路回去：DATA 帧</text><text class="el" x="672" y="316">+ trailers（grpc-status: 0）</text></g>
+  <g class="ed ret" data-edge="10"><line x1="350" y1="98" x2="297" y2="98" marker-end="url(#pm-ar)"/><text class="el" x="362" y="64">← 返回值，或 DEADLINE_EXCEEDED</text></g>
+
+  <text class="el bad" x="350" y="236">超时后，库存那边照样扣了 2 件（实测）</text>
+  <text class="el bad" x="350" y="300">冷启动第一次 312～329 ms，</text>
+  <text class="el bad" x="350" y="316">3 次里 2 次超过 deadline（实测）</text>
+  <text class="el bad" x="350" y="420">HTTP/1.1 服务端不开 TCP_NODELAY：</text>
+  <text class="el bad" x="350" y="434">每次多等约 40 ms（实测）</text>
+</svg>
+    </div>
+    <div class="legend" aria-label="颜色">
+      <span data-role="cg">RPC 原理：序列化、协议、服务发现、负载均衡</span>
+      <span data-role="rn">HTTP 客户端与连接池：超时怎么配</span>
+      <span data-role="of">HTTP/1.1、HTTP/2 与 HTTPS</span>
+      <span data-role="bk">Netty</span>
+      <span data-role="pd">TCP</span>
+      <span data-role="g2">IO 模型与 Reactor</span>
+    </div>
+    <figcaption>左边一列是订单服务里发生的事，从业务代码一路往下，到 Netty 把字节交给内核为止；中间是 TCP；右边是库存服务从下往上：epoll 叫醒 EventLoop，切到业务线程。虚线是回程。红字是实测里出过事的三处。点任意一站，跳到下面的分步讲解。</figcaption>
+  </figure>
+
+  <h3>时间花在哪：实测的几次调用</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv lat" viewBox="0 0 960 330" role="img" aria-label="对数刻度的耗时对比：gRPC 稳定后 p50 0.65 毫秒；HTTP/1.1 稳定后 p50 约 0.86 毫秒；类已加载后新建一条 HTTP/1.1 连接的第一次调用 4.5 到 8 毫秒，gRPC 9 到 20 毫秒；HTTP/1.1 服务端不开 TCP_NODELAY 时 p50 41 毫秒；冷启动第一次调用 HTTP/1.1 约 96 毫秒，gRPC 312 到 329 毫秒，超过 300 毫秒的 deadline。">
+  <g class="gl-g">
+    <line class="gl" x1="290" y1="20" x2="290" y2="290"/><text class="gt" x="290" y="310" text-anchor="middle">0.1 ms</text>
+    <line class="gl" x1="447" y1="20" x2="447" y2="290"/><text class="gt" x="447" y="310" text-anchor="middle">1 ms</text>
+    <line class="gl" x1="604" y1="20" x2="604" y2="290"/><text class="gt" x="604" y="310" text-anchor="middle">10 ms</text>
+    <line class="gl" x1="761" y1="20" x2="761" y2="290"/><text class="gt" x="761" y="310" text-anchor="middle">100 ms</text>
+    <line class="gl" x1="918" y1="20" x2="918" y2="290"/><text class="gt" x="918" y="310" text-anchor="middle">1 s</text>
+  </g>
+  <g class="bar" data-role="cg"><rect x="290" y="26" width="128" height="24" rx="5"/></g>
+  <text class="bl" x="16" y="43">gRPC 稳定后 p50</text><text class="bv" x="426" y="43">0.65 ms</text>
+  <g class="bar" data-role="other"><rect x="290" y="62" width="147" height="24" rx="5"/></g>
+  <text class="bl" x="16" y="79">HTTP/1.1 稳定后 p50</text><text class="bv" x="445" y="79">0.84～0.91 ms</text>
+  <g class="bar" data-role="other"><rect x="290" y="98" width="275" height="24" rx="5"/></g>
+  <text class="bl" x="16" y="115">HTTP/1.1 新连接（类已加载）</text><text class="bv" x="573" y="115">4.5～8 ms</text>
+  <g class="bar" data-role="rn"><rect x="290" y="134" width="333" height="24" rx="5"/></g>
+  <text class="bl" x="16" y="151">gRPC 新连接（类已加载）</text><text class="bv" x="631" y="151">9～20 ms</text>
+  <g class="bar" data-role="bad"><rect x="290" y="170" width="410" height="24" rx="5"/></g>
+  <text class="bl" x="16" y="187">HTTP/1.1 不开 NODELAY p50</text><text class="bv" x="708" y="187">41 ms</text>
+  <g class="bar" data-role="other"><rect x="290" y="206" width="468" height="24" rx="5"/></g>
+  <text class="bl" x="16" y="223">HTTP/1.1 冷启动第一次</text><text class="bv" x="766" y="223">94～100 ms</text>
+  <g class="bar" data-role="bad"><rect x="290" y="242" width="549" height="24" rx="5"/></g>
+  <text class="bl" x="16" y="259">gRPC 冷启动第一次</text><text class="bv" x="847" y="259">312～329 ms</text>
+  <line class="dl" x1="835" y1="16" x2="835" y2="290"/>
+  <text class="dt" x="829" y="30" text-anchor="end">deadline 300 ms</text>
+</svg>
+    </div>
+    <figcaption>横轴是对数刻度，每一格差 10 倍。稳定后两种协议都在 1 ms 上下（回环上没有网络延迟，差别主要是协议和序列化的开销）。真正的大头是“第一次”：冷启动时要加载 Netty、protobuf、gRPC 的类，再建连接、做 HTTP/2 的开场，比稳定后慢 500 倍，正好撞上 300 ms 的 deadline。红色的 41 ms 是一个 TCP 的坑，在第 7 站讲。</figcaption>
+  </figure>
+
+  <h3>50 个线程同时调：各用了几条连接</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv conn" viewBox="0 0 960 220" role="img" aria-label="连接数对比：HTTP/1.1 下，50 个线程并发各调 2000 次，同一个服务端开了 27 到 46 条连接，因为一条 HTTP/1.1 连接同一时刻只能跑一个请求。gRPC 下，每个实例只有 1 条连接，2500 次调用都是这条连接上的 stream，stream id 递增到 5005。">
+  <text class="ct" x="20" y="30">HTTP/1.1 + JSON：一条连接同时只跑一个请求</text>
+  <text class="cs" x="20" y="50">50 个线程 → 服务端看到 27～46 条连接（3 次分别 46、27、38）</text>
+  <g data-role="other"><circle class="dot" cx="32" cy="92" r="12"/><circle class="dot" cx="66" cy="92" r="12"/><circle class="dot" cx="100" cy="92" r="12"/><circle class="dot" cx="134" cy="92" r="12"/><circle class="dot" cx="168" cy="92" r="12"/><circle class="dot" cx="202" cy="92" r="12"/><circle class="dot" cx="236" cy="92" r="12"/><circle class="dot" cx="270" cy="92" r="12"/><circle class="dot" cx="304" cy="92" r="12"/><circle class="dot" cx="338" cy="92" r="12"/><circle class="dot" cx="372" cy="92" r="12"/><circle class="dot" cx="406" cy="92" r="12"/><circle class="dot" cx="440" cy="92" r="12"/><circle class="dot" cx="32" cy="128" r="12"/><circle class="dot" cx="66" cy="128" r="12"/><circle class="dot" cx="100" cy="128" r="12"/><circle class="dot" cx="134" cy="128" r="12"/><circle class="dot" cx="168" cy="128" r="12"/><circle class="dot" cx="202" cy="128" r="12"/><circle class="dot" cx="236" cy="128" r="12"/><circle class="dot" cx="270" cy="128" r="12"/><circle class="dot" cx="304" cy="128" r="12"/><circle class="dot" cx="338" cy="128" r="12"/><circle class="dot" cx="372" cy="128" r="12"/><circle class="dot" cx="406" cy="128" r="12"/><circle class="dot" cx="440" cy="128" r="12"/><circle class="dot" cx="32" cy="164" r="12"/><circle class="dot" cx="66" cy="164" r="12"/><circle class="dot" cx="100" cy="164" r="12"/><circle class="dot" cx="134" cy="164" r="12"/><circle class="dot" cx="168" cy="164" r="12"/><circle class="dot" cx="202" cy="164" r="12"/><circle class="dot" cx="236" cy="164" r="12"/><circle class="dot" cx="270" cy="164" r="12"/><circle class="dot" cx="304" cy="164" r="12"/><circle class="dot" cx="338" cy="164" r="12"/><circle class="dot" cx="372" cy="164" r="12"/><circle class="dot" cx="406" cy="164" r="12"/><text class="cs" x="20" y="206">每个圆是一条 TCP 连接（这里画的是中间那次，38 条）</text></g>
+  <text class="ct" x="520" y="30">gRPC：每台 1 条，请求是连接上的 stream</text>
+  <text class="cs" x="520" y="50">两台各 1 条，各跑了 2500 次；stream id 走到 5005</text>
+  <g data-role="cg">
+    <rect class="pipe" x="520" y="80" width="400" height="34" rx="17"/>
+    <text class="cs" x="540" y="102" style="fill:var(--ink)">实例 A：stream 1, 3, 5 … 5005（同时在途的互不阻塞）</text>
+    <rect class="pipe" x="520" y="140" width="400" height="34" rx="17"/>
+    <text class="cs" x="540" y="162" style="fill:var(--ink)">实例 B：同样一条</text>
+  </g>
+</svg>
+    </div>
+    <figcaption>HTTP/1.1 想并发，只能多开连接，所以要配连接池，池子大小就是并发上限。HTTP/2 把一个请求变成连接上的一个 stream，一条连接上可以同时跑很多个，gRPC 默认每个地址就用一条。代价是这一条连接成了单点：它所在的那个 EventLoop 线程忙不过来，或者 TCP 丢包重传，上面所有请求一起慢。</figcaption>
+  </figure>
+
+  <h3>实测：这十站在输出和帧日志里长什么样</h3>
+  <div class="tbl">
+    <table class="nodes runs">
+      <thead><tr><th>做了什么</th><th>站</th><th>看到的（原样摘自输出和 Netty 帧日志）</th></tr></thead>
+      <tbody>
+        <tr><td>假注册中心 + <code>round_robin</code>，并发调 5000 次</td><td class="st">2</td><td class="why">实例 A <code>调用 2501 次</code>，实例 B <code>调用 2501 次</code></td></tr>
+        <tr><td>冷启动后的第一次和第二次调用</td><td class="st">3</td><td class="why bad-t">第一次 <code>329.2 ms，失败 DEADLINE_EXCEEDED</code>（3 次：329、329、312 ms，前两次超时）；第二次 8.5～16.6 ms</td></tr>
+        <tr><td>同一个请求，两种编码</td><td class="st">4</td><td class="why"><code>protobuf 7 字节: 08 b7 4a 10 58 18 02</code>；<code>JSON 35 字节: {"orderId":9527,"skuId":88,"qty":2}</code></td></tr>
+        <tr><td>打开 <code>NettyClientHandler</code> 的 FINE 日志，调一次</td><td class="st">5</td><td class="why"><code>OUTBOUND HEADERS: streamId=5005 … :path: /inventory.InventoryService/Reserve … grpc-timeout: 299936u</code>；<code>OUTBOUND DATA: streamId=5005 endStream=true length=12 bytes=000000000708b74a10581802</code></td></tr>
+        <tr><td>同上，看是谁在写</td><td class="st">6</td><td class="why">每行日志都出自线程 <code>grpc-default-worker-ELG-3-2</code>（epoll 版的 EventLoop，不是调用方线程）</td></tr>
+        <tr><td>HttpServer 不开 <code>TCP_NODELAY</code>（JDK 默认）</td><td class="st">7</td><td class="why bad-t">HTTP/1.1 稳定后 <code>p50 41.244 ms, p99 43.860 ms</code>；打开后 <code>p50 0.835～0.907 ms</code></td></tr>
+        <tr><td>服务端记下的线程名</td><td class="st">8、9</td><td class="why">连接由 <code>grpc-default-worker-ELG-3-1</code> 接下；业务代码跑在 <code>inventory-biz-7</code> 这类自己配的池里</td></tr>
+        <tr><td>回程</td><td class="st">10</td><td class="why"><code>INBOUND HEADERS :status: 200</code> → <code>INBOUND DATA length=11</code> → <code>INBOUND HEADERS grpc-status: 0 endStream=true</code></td></tr>
+        <tr><td>订单 9528，库存那边要等 500 ms</td><td class="st">10</td><td class="why bad-t"><code>客户端 302 ms 后收到: DEADLINE_EXCEEDED</code>；服务端：<code>等了 500 ms 才干活；这时 Context.isCancelled()=true，库存照样扣了 2 件</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note-p">实验里订单服务和库存服务在同一个 JVM，所以两边共用 gRPC 默认的那组 Netty EventLoop（线程名都是 <code>grpc-default-worker-ELG-3-*</code>）。分开部署时各有各的，结构一样。回环上没有真正的网络延迟，跨机房时每次调用还要加上一个往返（RTT），第 3、7 站会更显眼。</p>
+</section>
+
+<!-- ============ 一步一步走 ============ -->
+<section id="walk">
+  <h2>一步一步走</h2>
+  <div class="walk" tabindex="0" aria-label="分步演示，左右方向键切换">
+    <div class="ctrl">
+      <button class="btn" type="button" id="w-prev">← 上一步</button>
+      <button class="btn primary" type="button" id="w-next">下一步 →</button>
+      <button class="btn" type="button" id="w-auto" aria-pressed="false">自动播放</button>
+      <button class="btn" type="button" id="w-reset">从头来</button>
+      <span class="cnt" id="w-cnt" aria-live="polite"></span>
+    </div>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box walk-fig" id="w-fig"></div>
+    <div class="stops">
+      <div class="stop" id="s-1" data-stop="1" data-role="cg">
+        <h3><span class="no">1</span>Stub：远程调用被包装成一个普通方法</h3>
+        <p><code>InventoryServiceGrpc</code> 是从 <code>inventory.proto</code> 生成的。它的 <code>reserve(req)</code> 不干业务，只做一件事：把“调 <code>/inventory.InventoryService/Reserve</code> 这个方法、参数是 req、deadline 300 ms”包成一次调用（<code>ClientCall</code>），交给通道，然后让当前的下单线程等结果。Dubbo 用动态代理做同一件事，Feign 用接口加注解。</p>
+        <p class="why"><b>为什么要它</b>业务代码只管“我要预占库存”，不用知道下面是哪种协议、哪台机器。代价也在这里：它太像本地方法了，人很容易忘记它会慢、会超时、会失败一半。</p>
+        <p class="down"><b>往下一层</b>RPC 原理：序列化、协议、服务发现、负载均衡 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>在循环里一次次调远程方法（N+1 次 RPC），或者在持有数据库事务和锁的时候调它：对面慢 300 ms，本地的锁就多拿 300 ms。</p>
+      </div>
+      <div class="stop" id="s-2" data-stop="2" data-role="cg">
+        <h3><span class="no">2</span>发现与负载均衡：inventory 在哪，挑哪一台</h3>
+        <p>通道的目标是 <code>registry:///inventory</code>，一个名字。名字解析器（NameResolver）去注册中心查，拿到 <code>:50051</code>、<code>:50052</code> 两个地址；负载均衡器（这里是 <code>round_robin</code>）给每个地址维护一个子通道，每次调用轮着挑一个。注册中心里的地址变了，解析器推新列表过来，负载均衡器跟着增删子通道。</p>
+        <p class="log"><span class="tag-real">实测</span> 5000 次并发调用，实例 A 和 B 各 <code>2501</code> 次（含第一次和帧日志那一次）。不配策略时 gRPC 默认是 <code>pick_first</code>：所有调用都去第一个地址。</p>
+        <p class="why"><b>为什么要它</b>实例会扩容、缩容、挂掉、换 IP。调用方写死地址，每次变动都要改配置、重启；有了发现，地址是活的。</p>
+        <p class="down"><b>往下一层</b>RPC 原理：服务发现、负载均衡 <span class="todo-chip">待做</span> · 注册中心本身在 J10 微服务治理</p>
+        <p class="risk"><b>常出的事</b>实例已经挂了，注册中心还没摘掉它（心跳超时要几秒到几十秒），请求继续被分过去；或者忘了配策略，默认 pick_first，一台累死、一台闲着。</p>
+      </div>
+      <div class="stop" id="s-3" data-stop="3" data-role="rn">
+        <h3><span class="no">3</span>连接：每台一条长连接，第一次要现建</h3>
+        <p>子通道背后是一条 TCP 连接，上面跑 HTTP/2。连接已经在了，这一步就是“在这条连接上开一个新的 stream”，几乎不花时间。第一次调用时还没有：要 TCP 三次握手、发 HTTP/2 的开场白（连接前言 + SETTINGS 帧），再加上 JVM 第一次碰这些代码时加载类、解释执行。</p>
+        <p class="log"><span class="tag-real">实测</span> 冷启动的第一次 312～329 ms，3 次里 2 次被自己的 300 ms deadline 判了超时；第二次 8.5～16.6 ms。类都加载过以后，再新建一条连接的第一次是 9～20 ms，HTTP/1.1 是 4.5～8 ms。所以冷启动那 300 ms 里，大头是类加载和 JIT 之前的解释执行，不是握手。</p>
+        <p class="why"><b>为什么要它</b>建连接贵（跨机房一次握手就是一个 RTT，加 TLS 再多一两个），所以连接要复用。HTTP/1.1 靠连接池复用，HTTP/2 一条连接就够。</p>
+        <p class="down"><b>往下一层</b>HTTP 客户端与连接池：超时怎么配（连接超时、空闲回收、预热，第一圈在 <a href="../network/io-models.html">网络 IO 模型</a>） · TCP 握手：<a href="../network/url-to-page.html">从 URL 到页面</a> · 类加载和预热：<a href="../jvm/jvm-jit-escape.html">JIT 与逃逸分析</a></p>
+        <p class="risk"><b>常出的事</b>服务刚发布，流量一来，头几百个请求全部超时，触发熔断，看起来像“新版本有 bug”。修法是启动时先调几次预热、建好连接，再在注册中心上线。另一个坑：长连接被中间的防火墙或负载均衡器悄悄掐了，客户端不知道，下一次调用才发现，要靠 keepalive 探活（gRPC 客户端默认关着）。</p>
+      </div>
+      <div class="stop" id="s-4" data-stop="4" data-role="cg">
+        <h3><span class="no">4</span>序列化：对象变成 7 个字节</h3>
+        <p>protobuf 按 <code>.proto</code> 里的字段号编码：<code>08 b7 4a</code> 是“1 号字段，变长整数 9527”，<code>10 58</code> 是“2 号字段，88”，<code>18 02</code> 是“3 号字段，2”。不写字段名，整数用变长编码，小数字只占一两个字节。JSON 要把 <code>"orderId"</code> 这些名字每次都带上，还得按文本解析。</p>
+        <p class="log"><span class="tag-real">实测</span> 同一个请求：protobuf 7 字节，JSON 35 字节。</p>
+        <p class="why"><b>为什么要它</b>网络上只能传字节。编码越小、解析越快，同样的带宽和 CPU 能跑更多调用；靠字段号而不是字段名，两边可以各自加字段而不互相打断。</p>
+        <p class="down"><b>往下一层</b>RPC 原理：序列化 <span class="todo-chip">待做</span>（protobuf、JSON、Hessian 对比，字段兼容规则）</p>
+        <p class="risk"><b>常出的事</b>改了 <code>.proto</code> 里已有字段的编号或类型，旧版本的调用方还在按老编号发，对面解出来是错的值，而且不报错。删字段要把编号保留下来（<code>reserved</code>），不能挪作他用。</p>
+      </div>
+      <div class="stop" id="s-5" data-stop="5" data-role="of">
+        <h3><span class="no">5</span>HTTP/2 帧：一次调用 = 一个 stream 上的两个帧</h3>
+        <p>gRPC 把一次调用映射成 HTTP/2 的一个 stream。先发 HEADERS 帧：<code>:path</code> 是方法名，<code>grpc-timeout</code> 把剩下的 deadline 告诉对面；再发 DATA 帧：5 字节前缀（1 字节“是否压缩” + 4 字节长度 <code>00000007</code>）加 7 字节消息，共 12 字节，<code>endStream=true</code> 表示请求发完。头部用 HPACK 压缩，重复的头几乎不占字节。</p>
+        <p class="log"><span class="tag-real">实测</span> <code>OUTBOUND HEADERS: streamId=5005 … grpc-timeout: 299936u</code>（还剩 299.936 ms），<code>OUTBOUND DATA: … length=12 bytes=000000000708b74a10581802</code>。客户端发起的 stream 编号是奇数，每次加 2，所以 5005 说明这条连接上已经跑过两千多次调用。</p>
+        <p class="why"><b>为什么要它</b>HTTP/1.1 一条连接同时只能有一个请求在途，想并发就得多开连接。HTTP/2 给每个请求一个 stream 编号，帧可以交错发，一条连接上同时跑很多个请求。</p>
+        <p class="down"><b>往下一层</b><a href="../network/url-to-page.html">HTTP/1.1、HTTP/2 与 HTTPS</a>（第一圈）</p>
+        <p class="risk"><b>常出的事</b>中间的代理或网关只会 HTTP/1.1，gRPC 过不去；或者负载均衡器按连接分流（四层），一条长连接把所有请求都钉在同一台后端上，扩容了也分不过去。</p>
+      </div>
+      <div class="stop" id="s-6" data-stop="6" data-role="bk">
+        <h3><span class="no">6</span>客户端 Netty：EventLoop 线程把字节写进 socket</h3>
+        <p>下单线程不自己写 socket。它把“发这两个帧”的任务交给这条连接绑定的 EventLoop 线程，然后阻塞等结果。EventLoop 依次经过 Pipeline 上的处理器：HTTP/2 编码器把帧变成字节，放进 ByteBuf（Netty 的字节缓冲，常用堆外内存、可以池化复用），最后一次 <code>write</code> 加 <code>flush</code> 交给内核。</p>
+        <p class="log"><span class="tag-real">实测</span> 帧日志每一行都出自 <code>grpc-default-worker-ELG-3-2</code>，不是调用方线程。名字里的 default 表示用的是 epoll 版（grpc-netty-shaded 自带 Linux 的 epoll 本地库），否则会叫 <code>grpc-nio-worker-ELG</code>。</p>
+        <p class="why"><b>为什么要它</b>一条连接只归一个 EventLoop 线程管，读写都在这个线程上，就不用加锁；几个 EventLoop 线程就能管成千上万条连接。</p>
+        <p class="down"><b>往下一层</b>Netty：EventLoop、Pipeline、ByteBuf <span class="todo-chip">待做</span> · <a href="../network/io-models.html">IO 模型与 Reactor</a></p>
+        <p class="risk"><b>常出的事</b>自己写 Netty 处理器时用完 ByteBuf 不 <code>release</code>，堆外内存慢慢漏光，堆的监控却一切正常（呼应 J03 第 10 站：容器只看进程总内存）。</p>
+      </div>
+      <div class="stop" id="s-7" data-stop="7" data-role="pd">
+        <h3><span class="no">7</span>TCP：可靠的字节流，没有“消息”这个概念</h3>
+        <p>内核把字节放进这条连接的发送缓冲区，切成 TCP 段发出去；对面收到后回 ACK，丢了就重传，乱了就排好序，最后放进对面的接收缓冲区。TCP 只保证字节按顺序、不丢、不重，<b>不管哪几个字节是一条消息</b>：两次写可能被对面一次读到（粘包），一次写也可能分两次才读完（拆包）。所以上层协议必须自己标边界，第 5 站的长度前缀就是干这个的。</p>
+        <p class="log"><span class="tag-real">实测</span> 对照组的 HTTP/1.1 服务端（JDK 的 HttpServer）默认不开 <code>TCP_NODELAY</code>，稳定后每次调用 p50 是 <b>41.2 ms</b>；打开以后是 0.84～0.91 ms。gRPC 的 Netty 默认就开着，不受影响。</p>
+        <p class="why"><b>为什么要它</b>网络会丢包、乱序，应用自己处理太难。TCP 把这些藏起来，代价是握手、慢启动，以及 Nagle 算法这类“攒一攒再发”的优化。</p>
+        <p class="down"><b>往下一层</b>TCP：握手、挥手、TIME_WAIT、粘包（第一圈在 <a href="../network/url-to-page.html">从 URL 到页面</a>，这一圈补粘包、Nagle 和长连接）</p>
+        <p class="risk"><b>常出的事</b>就是上面那 40 ms：Nagle 算法要等上一段的 ACK 才发下一小段，对面的延迟 ACK 又故意攒着不回，两边互等，等到对面的 ACK 定时器到点。请求响应式的小包协议都应该开 <code>TCP_NODELAY</code>。另一个常见坑是短连接调用量大时，主动关闭的一方堆满 TIME_WAIT。</p>
+      </div>
+      <div class="stop" id="s-8" data-stop="8" data-role="g2">
+        <h3><span class="no">8</span>服务端 Reactor：epoll 叫醒 EventLoop，切出一条消息</h3>
+        <p>库存服务的 EventLoop 线程平时睡在 <code>epoll_wait</code> 上，管着很多条连接。数据到了，内核把这条连接标成“可读”，线程醒来，一口气读出接收缓冲区里的字节，交给 Pipeline：HTTP/2 解码器认出 HEADERS 帧和 DATA 帧，gRPC 再按 5 字节前缀里的长度，从 DATA 里切出完整的 7 字节消息，凑不够就等下一次读。</p>
+        <p class="log"><span class="tag-real">实测</span> 服务端记下的连接由 <code>grpc-default-worker-ELG-3-1</code> 接手；50 个线程的并发全落在每台一条连接上，也就是一个 EventLoop 线程在读。</p>
+        <p class="why"><b>为什么要它</b>一个连接一个线程（BIO），一万条连接就是一万个线程，大部分时间在等数据。Reactor 让少数线程只在“有事”的时候干活，这就是 IO 多路复用。</p>
+        <p class="down"><b>往下一层</b><a href="../network/io-models.html">IO 模型与 Reactor</a> · Netty 线程模型 <span class="todo-chip">待做</span> · 同一个模型在 Redis 里：<a href="../redis/redis-threading-io.html">Redis 线程模型与 IO</a></p>
+        <p class="risk"><b>常出的事</b>在 EventLoop 线程上做了耗时的事（查库、同步调别的服务、大 JSON 解析），这个线程管的所有连接一起卡住，表现是“所有接口一起慢，CPU 却不高”。</p>
+      </div>
+      <div class="stop" id="s-9" data-stop="9" data-role="bk">
+        <h3><span class="no">9</span>业务线程池：反序列化，扣库存</h3>
+        <p>gRPC 把“执行 <code>reserve</code>”这个任务从 EventLoop 交给服务端配置的 executor，这里是一个 16 线程的 <code>inventory-biz</code> 池。业务线程把 7 字节解回 <code>ReserveRequest</code>，扣 88 号商品 2 件，生成 <code>ReserveReply</code> 交回给 EventLoop 去写。不配 executor 时，gRPC 用一个不限大小的缓存线程池。</p>
+        <p class="log"><span class="tag-real">实测</span> 业务代码跑在 <code>inventory-biz-15</code> 这类线程上，EventLoop 线程只管读写字节。</p>
+        <p class="why"><b>为什么要它</b>业务可能会阻塞（等行锁、查数据库），不能占着 EventLoop。IO 线程少而快，业务线程多而慢，两边分开，就是 Netty 常说的“IO 线程和业务线程分离”。</p>
+        <p class="down"><b>往下一层</b>Netty 线程模型 <span class="todo-chip">待做</span> · 线程池怎么配：<a href="pano-j02-order-in-threadpool.html">J02 全景：一个下单请求在线程池里</a></p>
+        <p class="risk"><b>常出的事</b>用默认的不限大小线程池，库存数据库一慢，请求越积越多，线程数涨到几千，最后 OOM 或者被上下文切换拖垮。业务池要有界，满了快速拒绝，让调用方降级。</p>
+      </div>
+      <div class="stop" id="s-10" data-stop="10" data-role="rn">
+        <h3><span class="no">10</span>回程与超时：结果回来，或者 300 ms 一到就放弃</h3>
+        <p>正常情况：库存服务回一个 HEADERS（<code>:status 200</code>）、一个 DATA（11 字节的 ReserveReply）、一个只有 <code>grpc-status: 0</code> 的 trailers 帧，沿第 8、7、6 站原路回来，下单线程被唤醒，拿到返回值。慢的情况：客户端的 deadline 到了，直接抛 <code>DEADLINE_EXCEEDED</code>，再给对面发一个 RST_STREAM 取消这个 stream。</p>
+        <p class="log"><span class="tag-real">实测</span> 订单 9528 在库存那边要等 500 ms：客户端 302 ms 后收到 <code>DEADLINE_EXCEEDED</code>。库存服务 500 ms 后醒来，<code>Context.isCancelled()</code> 已经是 true，但业务代码没看它，<b>库存照样扣了 2 件</b>。</p>
+        <p class="why"><b>为什么要它</b>没有 deadline，对面一卡，调用方的线程就跟着一直等，线程池被占满，故障从库存服务传染到订单服务。gRPC 默认没有 deadline，必须自己配。</p>
+        <p class="down"><b>往下一层</b>HTTP 客户端与连接池：超时怎么配（连接超时、读超时、整体 deadline、重试） · 第一圈在 <a href="../network/io-models.html">网络 IO 模型</a></p>
+        <p class="risk"><b>常出的事</b>“超时”不等于“没做”。客户端以为失败了，重试一次，库存就扣了 4 件。所以重试只能用在幂等的接口上：库存按 <code>order_id</code> 去重，同一个订单扣过就直接返回上次的结果。第二个坑是超时没有逐级变短：网关 1 s、订单 2 s、库存 3 s，上游早放弃了，下游还在白干。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 知识点地图 ============ -->
+<section id="nodes">
+  <h2>知识点地图</h2>
+  <p class="lead">知识点名照抄学习地图。前三个在第一圈（浏览器打开网页）里讲过，这一次是“下一圈”：同样的 TCP、HTTP、IO 模型，换成服务之间的长连接再看一遍。Netty 和 RPC 是新页。</p>
+  <div class="tbl">
+    <table class="nodes">
+      <thead><tr><th>站</th><th>知识点</th><th>状态</th><th>下钻顺序和理由</th></tr></thead>
+      <tbody>
+        <tr><td class="st">3、7</td><td><a href="../network/url-to-page.html">TCP：握手、挥手、TIME_WAIT、粘包</a> <span class="dp">懂机制</span></td><td>有页（第一圈） · 下一圈 <span class="todo-chip">待做</span></td><td class="ord"><b>1</b><span class="why">地基：第 5 站的长度前缀、第 7 站的 40 ms，都要先懂“TCP 是字节流”</span></td></tr>
+        <tr><td class="st">3、5</td><td><a href="../network/url-to-page.html">HTTP/1.1、HTTP/2 与 HTTPS</a> <span class="dp">懂机制</span></td><td>有页（第一圈）</td><td class="ord"><b>2</b><span class="why">stream 和帧是 gRPC 的骨架；也解释了为什么 HTTP/1.1 要连接池</span></td></tr>
+        <tr><td class="st">6、8</td><td><a href="../network/io-models.html">IO 模型与 Reactor</a> <span class="dp">懂设计</span></td><td>有页</td><td class="ord"><b>3</b><span class="why">先懂 epoll 和 Reactor，Netty 就只是它的一个实现</span></td></tr>
+        <tr><td class="st">6、8、9</td><td>Netty：EventLoop、Pipeline、ByteBuf <span class="dp">懂机制</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>4</b><span class="why">把 3 落到代码上：一条连接归一个线程、处理器链、池化的堆外缓冲</span></td></tr>
+        <tr><td class="st">1、2、4</td><td>RPC 原理：序列化、协议、服务发现、负载均衡 <span class="dp">懂机制</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>5</b><span class="why">站在 1～4 的肩膀上，把“像本地调用”拆开；gRPC 和 Dubbo 对照</span></td></tr>
+        <tr><td class="st">3、10</td><td><a href="../network/io-models.html">HTTP 客户端与连接池：超时怎么配</a> <span class="dp">会用</span></td><td>有页（第一圈）</td><td class="ord"><b>6</b><span class="why">放最后：要知道每一站会在哪里卡住，才配得对连接超时、读超时、deadline 和重试；靶场任务的收尾</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="aside-box">
+    <h3>这张全景没走到的</h3>
+    <ul>
+      <li><b>HTTPS / TLS</b>：内网的服务调用常用明文 HTTP/2（h2c），这个场景没加密。TLS 握手在第一圈<a href="../network/url-to-page.html">从 URL 到页面</a>里讲过；服务之间开 mTLS 是 J10 服务治理的事。</li>
+      <li><b>挥手和 TIME_WAIT</b>：这里是长连接，几乎不关。短连接的 HTTP 调用量一大，TIME_WAIT 才成问题，放在 TCP 那一页的“下一圈”里实测。</li>
+      <li><b>重试和熔断</b>：第 10 站只点到为止。超时后要不要重试、什么时候熔断降级，属于 J10 的 Sentinel 和 J09 的幂等。</li>
+    </ul>
+  </div>
+  <div class="aside-box">
+    <h3>补给站</h3>
+    <ul>
+      <li>第一圈全景：<a href="../network/url-to-page.html">从输入 URL 到页面展示</a>（DNS、TCP、TLS、HTTP、渲染）。</li>
+      <li>已有的相邻页面：<a href="../network/io-models.html">网络 IO 模型</a>、<a href="../redis/redis-threading-io.html">Redis 线程模型与 IO</a>、<a href="pano-j02-order-in-threadpool.html">J02 线程池全景</a>、<a href="../jvm/jvm-jit-escape.html">JIT 与预热</a>。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 回到全景 ============ -->
+<section id="back">
+  <h2>回到全景</h2>
+  <div class="two">
+    <div class="card">
+      <h3>复述练习</h3>
+      <ol class="retell">
+        <li>合上页面，画出 10 站，标出哪几站在订单服务里、哪一站在内核、哪几站在库存服务里。</li>
+        <li>每站用一句话讲它做了什么；再讲清楚那 7 个字节在第 4、5、7、8 站分别变成了什么样子。</li>
+        <li>挑 3 站往下讲两层。比如第 7 站：TCP 为什么会“粘包”？gRPC 怎么切出一条完整消息？Nagle 和延迟 ACK 为什么会凑出 40 ms？</li>
+      </ol>
+      <p>也可以直接讲给我听，说“回到全景”，我对照这张图帮你查漏。</p>
+    </div>
+    <div class="card">
+      <h3>动手：交易靶场这一站</h3>
+      <p>地图上 J04 给靶场的任务：把订单调库存从 HTTP 换成 RPC，比较延迟和连接数；把超时、重试、连接池配对。</p>
+      <ol class="mines">
+        <li>把 <code>OrderCallsInventory</code> 搬进靶场：同一个接口留 HTTP 和 gRPC 两种实现，压一次，记下 p50、p99 和连接数（第 3、5 站）。</li>
+        <li>埋雷：库存接口偶尔慢 500 ms。先不做幂等，开重试，数一数库存多扣了几件；再按 <code>order_id</code> 去重修好（第 10 站）。</li>
+        <li>埋雷：在 EventLoop 线程里直接查库，看所有调用怎么一起变慢（第 8 站）。</li>
+      </ol>
+    </div>
+  </div>
+
+  <h3>预测题</h3>
+  <div class="preds">
+    <details>
+      <summary>1. 库存实例 B 的机器突然断电（没来得及关连接），接下来几秒内订单服务会看到什么？</summary>
+      <p>已经发到 B、还在等的那些调用，要等到各自的 300 ms deadline 才失败，因为没有 FIN 也没有 RST，客户端不知道连接已经死了。新的调用继续被轮询分一半给 B，也是超时，直到 TCP 重传放弃、keepalive 探测失败，或者注册中心摘掉 B。如果开了客户端 keepalive，能更早发现。实例正常下线时不一样：它会发 GOAWAY，客户端立刻把新调用转去 A，一个都不丢。</p>
+      <p class="from">从第 2、3、7、10 站推出：轮询只看子通道状态，子通道靠连接状态，连接靠 TCP 和 keepalive 才知道对面没了。</p>
+    </details>
+    <details>
+      <summary>2. 把 50 个调用线程加到 500 个，gRPC 和 HTTP/1.1 的连接数各会怎样？</summary>
+      <p>gRPC 还是每台 1 条，多出来的只是 stream（服务端默认不限一条连接上的并发调用数）。HTTP/1.1 的连接数会涨到接近 500：JDK HttpClient 的连接池默认不设上限，一个请求占一条连接。所以 HTTP/1.1 一定要给池子设上限，而 gRPC 要担心的是那一条连接和它的 EventLoop 会不会成为瓶颈。</p>
+      <p class="from">从第 3、5、8 站推出：实测 50 线程时 27～46 条对每台 1 条。</p>
+    </details>
+    <details>
+      <summary>3. 慢订单超时后，订单服务自动重试一次，第二次很快成功。库存一共扣了几件？</summary>
+      <p>4 件。第一次调用客户端放弃了，但库存服务 500 ms 后照样扣了 2 件（实测）；重试又扣 2 件。要扣对，库存接口必须幂等：按 <code>order_id</code> 记下“这个订单已经扣过”，重复的请求直接返回上次的结果；或者业务代码在动手前检查 <code>Context.isCancelled()</code>，但这只能少做，不能保证不做。</p>
+      <p class="from">从第 9、10 站推出：deadline 只让客户端停止等待，不会撤销服务端已经开始的事。</p>
+    </details>
+    <details>
+      <summary>4. 订单服务刚发布完，前 10 秒的错误率很高，之后自己好了。最可能是哪一站？怎么验证？</summary>
+      <p>第 3 站的冷启动：第一次调用要加载类、建连接，实测要 312～329 ms，超过了 300 ms 的 deadline。验证：看错误码是不是 <code>DEADLINE_EXCEEDED</code>、是不是集中在每个实例启动后的头几次调用。修法：启动时先预热（自己调几次），连接建好以后再在注册中心上线。</p>
+      <p class="from">从第 3、10 站推出，和 J03 第 2 站（JIT 预热）是同一件事。</p>
+    </details>
+  </div>
+
+  <h3>下一圈</h3>
+  <div class="next">
+    <div class="card">
+      <h4>库存服务挂了一台，下单还要能下</h4>
+      <p>同样的十站，但对面有一台在超时、一台在拒绝。难在把超时、重试、熔断、降级配成一套：哪些错误能重试，重试会不会把对面打得更死，熔断后订单是排队还是直接失败。这是 J10 的全景。</p>
+    </div>
+    <div class="card">
+      <h4>跨机房调用：RTT 从 0.05 ms 变成 30 ms</h4>
+      <p>回环上看不见的东西全冒出来：每次握手多 30 ms，TCP 慢启动让大响应分好几个来回，丢包重传把一条 HTTP/2 连接上的所有请求一起拖慢（TCP 层的队头阻塞）。难在判断什么时候该用多条连接，什么时候该换 HTTP/3。</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>JDK 版本约定：交易靶场和 Java 地图的全景页用 JDK 21；单个知识点页的实验用 JDK 17。</p>
+  <p>档位：标准。做了一次真实链路实测：本机 2 核 ARM，JDK 21.0.12，gRPC 1.84.1（grpc-netty-shaded，epoll），protobuf 3.25.9。订单服务、两个库存实例和一个 HTTP/1.1 + JSON 的对照接口（JDK 的 HttpServer 和 HttpClient）都在同一个 JVM 里，走本机回环。程序 <code>OrderCallsInventory</code> 完整跑了 3 次，另用参数 <code>nagle</code> 跑了 1 次不开 <code>TCP_NODELAY</code> 的对照；稳定后的分位数取 3000 次交替调用的后一半。表里和各站的输出原样摘自这几次运行。</p>
+  <p>按源码：gRPC 1.84.1 的 epoll 版 EventLoop 线程名、服务端默认不限每条连接的并发调用数、客户端 keepalive 默认关闭（<code>NettyServerBuilder</code>、<code>NettyChannelBuilder</code>、<code>Utils</code>）；JDK 21 的 HttpServer 读 <code>sun.net.httpserver.nodelay</code>、默认 false，HttpClient 连接池 <code>jdk.httpclient.connectionPoolSize</code> 默认 0（不限）。按文档：gRPC 的消息前缀格式、<code>grpc-timeout</code> 头、默认没有 deadline、默认负载均衡策略是 pick_first。代码：<a href="https://github.com/archeu/study-labs/tree/main/java/java/pano-j04-order-calls-inventory">study-labs/java/java/pano-j04-order-calls-inventory</a>。</p>
+  <p>回到 <a href="roadmap.html#j04">Java 地图 J04</a> · 上一站全景 <a href="pano-j03-object-new-to-gc.html">一个对象从 new 到被回收</a> · <a href="../">返回目录</a></p>
+</footer>
+
+</main>
+
+<script>
+/*SIM-START*/
+const STOPS = 10;
+function clampStep(i) { return Math.min(STOPS, Math.max(1, i | 0)); }
+// 第 i 步时，每一站是 on（当前）、past（走过）还是 next（还没到）
+// 每一步点亮哪些箭头：进这一站的那条；第 2 步多点亮“查注册中心”，第 10 步点亮回程的两条虚线
+const EDGES = { 1: [], 2: ["1", "r"], 3: ["2"], 4: ["3"], 5: ["4"], 6: ["5"], 7: ["6"], 8: ["7"], 9: ["8"], 10: ["9", "10"] };
+function stepState(i) {
+  i = clampStep(i);
+  const stops = {};
+  for (let k = 1; k <= STOPS; k++) stops[k] = k === i ? "on" : (k < i ? "past" : "next");
+  return { step: i, stops, edges: EDGES[i] };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const walk = $(".walk");
+  const src = $("#map svg.pmap");
+  const fig = $("#w-fig");
+  const clone = src.cloneNode(true);
+  clone.querySelectorAll("[id]").forEach(el => { el.id = el.id.replace(/^pm-/, "pw-"); });
+  clone.querySelectorAll("[marker-end]").forEach(el => {
+    el.setAttribute("marker-end", el.getAttribute("marker-end").replace("#pm-", "#pw-"));
+  });
+  clone.setAttribute("aria-label", "分步演示用的全景图，当前一站高亮");
+  fig.append(clone);
+  walk.classList.add("js");
+
+  const panels = $$(".stop", walk);
+  const cnt = $("#w-cnt");
+  let cur = 1, timer = null;
+
+  function apply(i) {
+    const st = stepState(i);
+    cur = st.step;
+    $$(".box", clone).forEach(g => {
+      const k = +g.dataset.stop;
+      g.classList.remove("on", "past", "next");
+      g.classList.add(st.stops[k]);
+    });
+    $$(".ed", clone).forEach(e => e.classList.toggle("hot", st.edges.includes(e.dataset.edge)));
+    panels.forEach(p => p.classList.toggle("cur", +p.dataset.stop === cur));
+    const t = panels.find(p => +p.dataset.stop === cur).querySelector("h3").textContent.replace(/^\d+/, "");
+    cnt.textContent = `第 ${cur} / ${STOPS} 站 · ${t}`;
+    $("#w-prev").disabled = cur === 1;
+    $("#w-next").disabled = cur === STOPS;
+  }
+  function stopAuto() {
+    if (timer) { clearInterval(timer); timer = null; }
+    $("#w-auto").setAttribute("aria-pressed", "false");
+    $("#w-auto").textContent = "自动播放";
+  }
+  function show(i, scroll) {
+    apply(i);
+    if (scroll) walk.scrollIntoView({ block: "start" });
+  }
+
+  $("#w-prev").addEventListener("click", () => { stopAuto(); apply(cur - 1); });
+  $("#w-next").addEventListener("click", () => { stopAuto(); apply(cur + 1); });
+  $("#w-reset").addEventListener("click", () => { stopAuto(); apply(1); });
+  $("#w-auto").addEventListener("click", () => {
+    if (timer) { stopAuto(); return; }
+    if (cur === STOPS) apply(1);
+    $("#w-auto").setAttribute("aria-pressed", "true");
+    $("#w-auto").textContent = "暂停";
+    timer = setInterval(() => { if (cur >= STOPS) stopAuto(); else apply(cur + 1); }, 3600);
+  });
+  walk.addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") { stopAuto(); apply(cur + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { stopAuto(); apply(cur - 1); e.preventDefault(); }
+  });
+  clone.addEventListener("click", e => {
+    const g = e.target.closest(".box");
+    if (g) { stopAuto(); apply(+g.dataset.stop); }
+  });
+  $$(".box", src).forEach(g => {
+    g.setAttribute("tabindex", "0");
+    g.setAttribute("role", "link");
+    g.setAttribute("aria-label", "跳到第 " + g.dataset.stop + " 站的讲解");
+    const go = () => { stopAuto(); show(+g.dataset.stop, true); };
+    g.addEventListener("click", go);
+    g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
+  $$('.strip a[href^="#s-"]').forEach(a => a.addEventListener("click", e => {
+    e.preventDefault();
+    stopAuto();
+    show(+a.getAttribute("href").slice(3), true);
+  }));
+
+  const m = /^#s-(\d+)$/.exec(location.hash);
+  apply(m ? +m[1] : 1);
+  if (m) walk.scrollIntoView({ block: "start" });
+})();
+</script>
+
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
