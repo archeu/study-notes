@@ -1,0 +1,1536 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>HTTP 客户端与连接池：超时怎么配</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six steps for a tool topic (① 为什么学 ② 老办法 ③ 选谁 ④ 原理 ⑤ 跑起来 ⑥ 细节 ↺), J04 panorama stops 3 and 10. Roles: pd blue = order service (caller), g2 brown = inventory service (downstream), cg purple = connection pool / connectionRequestTimeout, bk teal = connect / connectTimeout, rn pink = read / responseTimeout (SO_TIMEOUT), of amber = total deadline; bad red, good green, neutral grey = old way. Interactions: one lab in ⑥ (which timeout fires first, guess before run). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+body{overflow-x:clip}
+.lab-h{font-family:var(--font-display);font-weight:400;font-size:20px}
+#eb-res p{margin:0 0 4px}
+#eb-res .note-p{font-size:13px;color:var(--muted)}
+#eb pre{white-space:pre;overflow-x:auto}
+
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2;fill:none}
+.e-warn{stroke:var(--warn);stroke-width:2.5;fill:none}
+.misj{border-collapse:collapse}
+.ev-card{font-family:var(--font-mono);font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--console-bg);color:var(--console-fg);border-radius:12px;padding:10px 12px;margin:0}
+.tr-nav{display:flex;flex-wrap:wrap;gap:6px}
+.tr-nav button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:var(--font-mono)}
+.tr-nav button[aria-current="true"]{border-color:var(--ink);background:var(--ink);color:var(--paper)}
+.tr-nav button.ok{border-color:var(--good)}
+.tr-nav button.ng{border-color:var(--bad)}
+.tr-score{font-size:13.5px;color:var(--muted)}
+
+/* page: budget bench */
+.bud{display:flex;flex-direction:column;gap:6px}
+.bud-bar{position:relative;display:flex;height:34px;border-radius:10px;overflow:hidden;border:1.5px solid var(--line-strong);background:var(--paper)}
+.bud-bar span{display:block;height:100%;min-width:0}
+.bud-bar .h{background:var(--pd)} .bud-bar .m{background:var(--warn);opacity:.55} .bud-bar .c{background:var(--warn);opacity:.7}
+.bud-bar .s{background:var(--warn);opacity:.85} .bud-bar .o{background:var(--neutral);opacity:.6} .bud-bar .d{background:var(--warn)}
+.bud-bar .d.over{background:var(--bad)}
+.bud-lim{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--ink)}
+.bud-cap{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);font-family:var(--font-mono)}
+.bud-lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.bud-lg i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.derive{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.derive > div{padding:8px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--card);font-size:13.5px;min-width:0}
+.derive b{display:block;font-size:12px;color:var(--muted);font-weight:500}
+.derive code{font-size:13px;overflow-wrap:anywhere}
+.ctl select{font:inherit;font-size:14px;padding:5px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:720px){.derive{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.derive{grid-template-columns:1fr}}
+
+/* page: tcp */
+.cap{font-size:13.5px;color:var(--muted);margin-top:8px;line-height:1.55}
+.seq{display:flex;flex-direction:column;gap:12px}
+.seq-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seq-ctl .seg{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;margin-left:auto}
+.seq-box{outline:none}
+.seq svg .msg{opacity:.13;transition:opacity .25s}
+.seq svg .msg.on{opacity:1}
+.seq svg .msg.cur .ln{stroke-width:4}
+.seq svg .msg.cur .lab{font-weight:700}
+.seq svg .lane{stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5}
+.st-chip{font-family:var(--font-mono);font-size:12.5px;font-weight:600}
+.seq-info{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.seq-info > div{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.seq-info .k{font-size:12.5px;color:var(--muted);display:block;margin-bottom:4px}
+.seq-info .sts{display:flex;flex-wrap:wrap;gap:8px 16px}
+.seq-info .sts span{display:inline-flex;gap:6px;align-items:baseline}
+.seq-info .sts b{font-family:var(--font-mono);font-size:14px;padding:1px 8px;border-radius:8px;background:var(--rt);border:1.5px solid var(--rc)}
+.seq-say{grid-column:1 / -1}
+.seq-say p + p{margin-top:6px}
+.seq-num{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.frames{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.frames > div{border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.frames h4{font-size:17px;color:var(--rc)}
+.frames pre{margin:0;font-family:var(--font-mono);font-size:12px;background:var(--code-bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+@media (max-width:760px){.way{overflow-x:auto}.way > svg{min-width:400px}.seq-info{grid-template-columns:minmax(0,1fr)}.frames{grid-template-columns:minmax(0,1fr)}.seq-ctl .seg{margin-left:0}}
+/* ---------- netty page ---------- */
+.lanes{display:flex;flex-direction:column;gap:6px}
+.lane{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.lane .nm{font-family:var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lane .tr{position:relative;height:18px;border-radius:6px;background:var(--neutral-tint)}
+.lane .tr i{position:absolute;top:0;bottom:0;background:var(--bad);border-radius:5px;opacity:.85}
+.lane .tr u{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--bk)}
+.lane .v{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right}
+.lane-axis{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;font-size:11.5px;color:var(--muted);font-family:var(--font-mono)}
+.lane-axis span{display:flex;justify-content:space-between}
+.lanes-more{font-size:12.5px;color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:760px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.ctl-grid{grid-template-columns:1fr}}
+.seg-mode{display:flex;flex-wrap:wrap;gap:6px}
+.seg-mode button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 10px;font-size:13.5px;cursor:pointer;color:var(--ink)}
+.seg-mode button[aria-pressed="true"]{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.verx{width:100%;border-collapse:collapse;font-size:14px}
+.verx th,.verx td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.verx th{font-size:13px;color:var(--muted);font-weight:600;background:var(--code-bg)}
+.verx code{overflow-wrap:anywhere}
+
+/* ---- 本页新增 ---- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2;fill:none}
+.bytes{display:flex;flex-direction:column;gap:10px}
+.brow{display:grid;grid-template-columns:8.5em minmax(0,1fr);gap:10px;align-items:start}
+.brow > b{font-size:14px;line-height:1.3}
+.brow > b small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:3px;min-width:0}
+.chips i{font-style:normal;font-family:var(--font-mono);font-size:11.5px;line-height:1;padding:4px 3px;border-radius:4px;background:var(--rt);border:1px solid var(--rc);min-width:2.1em;text-align:center}
+.chips i.k{background:var(--card);border-style:dashed;color:var(--muted)}
+.chips i.w{padding:4px 6px}
+@media (max-width:560px){.brow{grid-template-columns:minmax(0,1fr)}}
+.hdr{display:grid;grid-template-columns:repeat(17,minmax(0,1fr)) minmax(0,4fr);gap:2px;min-width:620px;font-family:var(--font-mono);font-size:11.5px}
+.hdr > div{border:1.5px solid var(--rc);background:var(--rt);border-radius:6px;padding:6px 4px;text-align:center;display:flex;flex-direction:column;gap:3px;min-width:0}
+.hdr > div small{font-family:var(--font-body);font-size:11.5px;color:var(--ink)}
+.hdr-wrap{overflow-x:auto;padding-bottom:4px}
+.lbt{display:flex;flex-direction:column;gap:10px}
+.lbrow{display:grid;grid-template-columns:6.5em minmax(0,1fr) 15em;gap:10px;align-items:center;font-size:13.5px}
+.lbrow > b{font-size:14px}
+.lbrow.best > b::after{content:" ✓";color:var(--good)}
+.stk{display:flex;height:22px;border-radius:6px;overflow:hidden;background:var(--neutral-tint);min-width:0}
+.stk i{display:block;height:100%;font-style:normal;font-family:var(--font-mono);font-size:10.5px;line-height:22px;text-align:center;overflow:hidden;white-space:nowrap;color:var(--ink);border-right:1.5px solid var(--card)}
+.stk i.n{background:var(--rn-tint)}
+.stk i.n2{background:var(--pd-tint)}
+.stk i.s{background:var(--warn-tint)}
+.stk i.x{background:var(--bad-tint);color:var(--bad)}
+.lbstat{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap}
+.lbstat .e{color:var(--bad);font-weight:600}
+.leg{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.leg span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-2px;background:var(--c)}
+.inst-cfg{display:flex;flex-wrap:wrap;gap:8px}
+.inst-cfg .ic{display:flex;flex-direction:column;gap:4px;border:1.5px solid var(--line-strong);border-radius:10px;padding:6px 8px;font-size:12.5px;background:var(--card);min-width:0}
+.inst-cfg .ic b{font-family:var(--font-mono);font-size:12.5px}
+.inst-cfg select{font:inherit;font-size:12.5px;padding:2px 4px;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){.lbrow{grid-template-columns:minmax(0,1fr)}.lbrow .stk{order:2}}
+
+/* 本页：超时实验台 */
+.hc-ctl{display:flex;flex-direction:column;gap:12px}
+.hc-leg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.hc-leg i{display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:6px;vertical-align:0}
+.hc-out{display:flex;flex-direction:column;gap:8px;min-height:30px}
+.hc-row{display:grid;grid-template-columns:4.2em minmax(0,1fr);gap:4px 10px;align-items:center}
+.hc-lb{font-size:13px;color:var(--muted)}
+.hc-track{height:20px;background:var(--neutral-tint);border-radius:6px;overflow:hidden}
+.hc-fill{display:flex;height:100%}
+.hc-fill i{display:block;height:100%}
+.hc-end{grid-column:2;font-size:13px;font-family:var(--font-mono)}
+.good-t{color:var(--good)}
+.dp-h{margin-top:18px}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>网络</span><span aria-hidden="true">/</span><span class="tb-here">HTTP 客户端与连接池：超时怎么配</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-of" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-g2" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-pd" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-mut" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+<header class="hero">
+  <p class="kicker">连接池 · 租借 · connectionRequestTimeout · connectTimeout · SO_TIMEOUT · responseTimeout · 总 deadline · Little 定律 · keep-alive · 空闲回收 · 重试 · 超时预算</p>
+  <h1>HTTP 客户端与连接池：超时怎么配。一次调用分四段，每段一个超时，外面再套一个总的</h1>
+  <p class="lead">一次 HTTP 调用的时间分成四段：<b>排队拿连接</b>、<b>建连接</b>、<b>等响应</b>、<b>读响应</b>，各有一个超时管着。精华在一个容易误会的地方：大家常说的“读超时”，底层是 socket 的 <code>SO_TIMEOUT</code>，管的是<b>两次读之间最多隔多久</b>，不是整次调用最多多久。对面每 400 ms 挤一个字节，读超时 1 s 的调用能跑 4 s（实测）。所以还要在外面套一个<b>总 deadline</b>，并且让整条链路的 deadline 一级比一级短。不懂这一点，就会只配一个 <code>readTimeout=3s</code>，以为调用最多 3 秒。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么学</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>老办法</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>选谁</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>跑起来</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j04-order-calls-inventory.html#s-3">订单服务调库存服务的一次 RPC · 第 3、10 站</a></span><span>地图：<a href="../java/roadmap.html#j04">J04 · HTTP 客户端与连接池：超时怎么配</a></span><span>前置：<a href="tcp-handshake-timewait-framing.html">TCP 握手</a> · <a href="io-models.html">网络 IO 模型</a> · <a href="rpc-serialization-discovery-lb.html">RPC 原理</a></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么学：库存服务卡了 3 秒，订单服务跟着挂了</h2>
+    <p class="lead">全景第 3 站要拿一条连接，第 10 站要在 300 ms 内拿到结果或者放弃。全景用的是 gRPC；大多数 Spring 服务之间还是 HTTP（<code>RestClient</code>、<code>RestTemplate</code>、OpenFeign），底下是一个 HTTP 客户端加一个连接池。假设场景：库存服务一次 GC 卡顿，3 秒才回。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="左边订单服务有 200 个 Tomcat 线程，中间是 HttpClient 连接池，每个地址默认 5 条连接，右边库存服务今天 3 秒才回。5 条连接被占满后，其余线程在池子外排队，订单服务的线程全被卡住。">
+  <rect class="b-pd" x="20" y="24" width="290" height="210" rx="16"/>
+  <text class="t-h" x="40" y="54">订单服务（调用方）</text>
+  <text class="t-s" x="40" y="76">下单接口：总预算 300 ms</text>
+  <g>
+    <rect class="b-cg" x="40" y="96" width="20" height="20" rx="5"/><rect class="b-cg" x="70" y="96" width="20" height="20" rx="5"/><rect class="b-cg" x="100" y="96" width="20" height="20" rx="5"/><rect class="b-cg" x="130" y="96" width="20" height="20" rx="5"/><rect class="b-cg" x="160" y="96" width="20" height="20" rx="5"/>
+    <rect class="b-bad" x="190" y="96" width="20" height="20" rx="5"/><rect class="b-bad" x="220" y="96" width="20" height="20" rx="5"/><rect class="b-bad" x="250" y="96" width="20" height="20" rx="5"/>
+    <rect class="b-bad" x="40" y="126" width="20" height="20" rx="5"/><rect class="b-bad" x="70" y="126" width="20" height="20" rx="5"/><rect class="b-bad" x="100" y="126" width="20" height="20" rx="5"/><rect class="b-bad" x="130" y="126" width="20" height="20" rx="5"/><rect class="b-bad" x="160" y="126" width="20" height="20" rx="5"/><rect class="b-bad" x="190" y="126" width="20" height="20" rx="5"/><rect class="b-bad" x="220" y="126" width="20" height="20" rx="5"/><rect class="b-bad" x="250" y="126" width="20" height="20" rx="5"/>
+    <rect class="b-bad" x="40" y="156" width="20" height="20" rx="5"/><rect class="b-bad" x="70" y="156" width="20" height="20" rx="5"/><rect class="b-bad" x="100" y="156" width="20" height="20" rx="5"/><rect class="b-bad" x="130" y="156" width="20" height="20" rx="5"/><rect class="b-bad" x="160" y="156" width="20" height="20" rx="5"/><rect class="b-bad" x="190" y="156" width="20" height="20" rx="5"/><rect class="b-bad" x="220" y="156" width="20" height="20" rx="5"/><rect class="b-bad" x="250" y="156" width="20" height="20" rx="5"/>
+  </g>
+  <text class="t-xs" x="40" y="200">紫色：拿到连接、在等库存</text>
+  <text class="t-xs" x="40" y="218">红色：连接都被占了，在池子外排队</text>
+  <path class="e-ink" d="M310 130 L352 130" marker-end="url(#ah-ink)"/>
+  <rect class="b-cg" x="360" y="24" width="260" height="210" rx="16" style="fill-opacity:.45"/>
+  <text class="t-h" x="380" y="54">HttpClient 连接池</text>
+  <text class="t-s" x="380" y="76">每个地址 5 条（HttpClient 5 默认）</text>
+  <rect class="b-cg" x="380" y="94" width="38" height="44" rx="6"/><rect class="b-cg" x="426" y="94" width="38" height="44" rx="6"/><rect class="b-cg" x="472" y="94" width="38" height="44" rx="6"/><rect class="b-cg" x="518" y="94" width="38" height="44" rx="6"/><rect class="b-cg" x="564" y="94" width="38" height="44" rx="6"/>
+  <text class="t-xs" x="380" y="156">5 条全被借走，一条都还不回来</text>
+  <text class="t-bad" x="380" y="186">195 个线程在排队拿连接</text>
+  <text class="t-monos" x="380" y="210">connectionRequestTimeout</text>
+  <text class="t-monos" x="380" y="225">默认 3 分钟</text>
+  <path class="e-g2" d="M620 116 L662 116" marker-end="url(#ah-g2)"/>
+  <rect class="b-g2" x="670" y="24" width="270" height="210" rx="16"/>
+  <text class="t-h" x="690" y="54">库存服务</text>
+  <text class="t-s" x="690" y="78">平时 p99 约 20 ms</text>
+  <text class="t-bad" x="690" y="104">今天 GC 卡顿，3 秒才回</text>
+  <text class="t-s" x="690" y="128">5 个请求都在里面等</text>
+  <text class="t-monos" x="690" y="210">responseTimeout</text>
+  <text class="t-monos" x="690" y="225">默认不设 = 一直等</text>
+  <text class="t-bad" x="480" y="266" text-anchor="middle">库存慢 → 5 条连接被占满 → 其余线程在池子外排队 → 200 个线程全卡住 → 订单服务也不响应了</text>
+  <text class="t-b" x="480" y="290" text-anchor="middle">要回答的问题：每一段最多等多久？等不到怎么办？</text>
+</svg>
+  </div>
+  <figcaption>下游慢一次，上游被拖死，这叫级联故障。挡住它靠两样东西：池子的大小限住同时压在下游上的请求数，每一段的超时让线程按时回来。这一页学怎么把它们配对。</figcaption>
+  </figure>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>老办法：JDK 自带的 HttpURLConnection</h2>
+    <p class="lead">JDK 1.1 就有的 <code>HttpURLConnection</code> 能发请求，也悄悄复用连接。能用，但上面那个问题它几乎一个都没回答。</p>
+  </div>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>老办法：new 一个 URLConnection</h4>
+<pre>HttpURLConnection c = (HttpURLConnection)
+    new URL("http://inventory:8080/reserve?order=9527")
+        .openConnection();
+c.setRequestMethod("POST");
+<span class="cm">// 没写 setConnectTimeout / setReadTimeout：都是 0 = 无限等</span>
+try (InputStream in = c.getInputStream()) { ... }
+<span class="cm">// 复用藏在 KeepAliveCache 里：每个地址最多留 5 条空闲连接</span>
+<span class="cm">// （系统属性 http.maxConnections）</span></pre>
+    </div>
+    <div class="way" data-role="bad">
+      <h4>疼在哪</h4>
+      <ul class="pains">
+        <li>两个超时默认都是 0，按 <code>URLConnection</code> 的文档就是无限等。对面不回，调用线程就一直挂着</li>
+        <li>只能配“连接”和“读”两个：没有“整次调用最多多久”，读超时还是每次读单独算（<a href="#m-read">④-1</a>）</li>
+        <li>没有真正的池子：只缓存<b>空闲</b>连接，并发多少就开多少条，没有上限、没有排队超时，也看不到池子里的状态</li>
+        <li>每个调用点自己配，漏一处就是一颗雷</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict" data-role="of"><b>缺的那一块：</b>把一次调用切成几段，每段有上限，整次也有上限；连接数有上限、排队有上限、看得见。这就是 HTTP 客户端加连接池要给的。<b>典型误用：</b>只配一个 <code>readTimeout = 3s</code>，以为“调用最多 3 秒”；池子用默认值，压测时 RT 莫名其妙翻倍。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>选谁：四个常用客户端，默认值差得很远</h2>
+    <p class="lead">下面是各自<b>不配任何参数</b>时的样子。看得出来，没有一个默认值能直接上生产。</p>
+  </div>
+  <div class="tbl-wrap">
+  <table class="verx">
+    <thead><tr><th></th><th>JDK HttpClient</th><th>Apache HttpClient 5.6</th><th>OkHttp</th><th>Reactor Netty（WebClient）</th></tr></thead>
+    <tbody>
+      <tr><td>最低 JDK</td><td>11</td><td>8</td><td>8</td><td>8</td></tr>
+      <tr><td>IO 模型</td><td>非阻塞，自带选择器线程</td><td>classic API 阻塞，一个线程一次调用（另有 async API）</td><td>同步调用阻塞</td><td>非阻塞，Netty EventLoop</td></tr>
+      <tr><td>连接池默认</td><td><b class="bad-t">不限条数</b>，空闲 30 s 关（源码）</td><td><b class="bad-t">每个地址 5 条</b>、总共 25 条（源码）</td><td>最多留 5 条空闲、5 分钟；同步调用不限并发（文档）</td><td>每个地址 max(2×核数, 16) 条，排队上限是它的 2 倍（文档）</td></tr>
+      <tr><td>默认超时</td><td><b class="bad-t">连接、请求都不设</b></td><td>连接 3 分钟、拿连接 3 分钟、<b class="bad-t">读不设</b></td><td>连接、读、写各 10 s</td><td>连接 30 s、拿连接 45 s、<b class="bad-t">读不设</b></td></tr>
+      <tr><td>整次调用的上限</td><td><code>HttpRequest.timeout()</code>，但只管到收到响应头，读 body 不算（JDK 21 源码）</td><td><b class="bad-t">classic 没有</b>，要自己加定时 cancel（⑤）</td><td><code>callTimeout</code>，包含读 body；默认不设</td><td>Reactor 的 <code>.timeout()</code> 算子</td></tr>
+      <tr><td>Spring Boot 3.5 的 <code>RestClient</code></td><td>第 4 顺位</td><td><b>第 1 顺位</b>：classpath 上有就用它</td><td>没有内置支持</td><td>第 3 顺位（Jetty 第 2）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="verdict" data-role="cg"><b>选择规则：</b>同步的 Spring MVC 服务，用 <code>RestClient</code> + Apache HttpClient 5（Boot 默认就选它）；不想加依赖，JDK 11+ 用 JDK HttpClient；WebFlux 用 Reactor Netty；Android、Kotlin 项目常用 OkHttp。<b>本页学 Apache HttpClient 5</b>：它是 Boot 的首选，参数分得最细，每一段超时都能单独看清；JDK 8 也能跑。四个客户端分段的思路是一样的，换哪个都用得上。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：一次调用的四段时间，各归谁管</h2>
+    <p class="lead">先看一次调用花的时间分成哪几段，再看三件最容易想错的事：读超时到底在量什么，池子满了会怎样，超时到了之后发生了什么。最后讲为什么同步客户端没有“总超时”。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>建连接要一次往返</b>：TCP 三次握手，客户端发 SYN 等 SYN-ACK；对面机器挂了，SYN 没人回，内核按 1、2、4…秒的间隔重发，Linux 默认重发 6 次，约 127 秒后才放弃。<a href="tcp-handshake-timewait-framing.html">TCP 那页</a>讲过握手。</li>
+      <li><b>阻塞读</b>：线程调 <code>socket.read()</code>，没有数据就停在内核里等。socket 上可以设一个 <code>SO_TIMEOUT</code>：<b>这一次</b> read 最多等多久，到点抛 <code>SocketTimeoutException</code>。</li>
+      <li><b>HTTP/1.1 一条连接同一时刻只跑一个请求</b>：发完请求要等响应读完，这条连接才能给下一个请求用。所以要并发，就得有多条连接，也就有了连接池。<a href="url-to-page.html">HTTP 那页</a>讲过 keep-alive。</li>
+      <li><b>Little 定律</b>：同时在路上的请求数 = 到达速率 × 每个请求停留的时间。<a href="io-models.html">网络 IO 模型</a>用它算过线程池。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-all">④-0 一次调用的四段，和管它们的超时</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="时间轴从左到右：排队拿连接，归 connectionRequestTimeout 管；DNS 和 TCP 握手，归 connectTimeout 管；发请求；等首字节和读 body，归 responseTimeout 管，它量的是每次读之间的间隔。整条下面是总 deadline，管整次调用。">
+  <path class="e-cg" d="M40 56 V48 H218 V56" style="stroke-width:1.5"/>
+  <text class="t-cg" x="129" y="40" text-anchor="middle">connectionRequestTimeout</text>
+  <path class="e-bk" d="M222 56 V48 H398 V56" style="stroke-width:1.5"/>
+  <text class="t-bk" x="310" y="40" text-anchor="middle">connectTimeout</text>
+  <path class="e-rn" d="M452 56 V48 H918 V56" style="stroke-width:1.5"/>
+  <text class="t-rn" x="685" y="40" text-anchor="middle">responseTimeout（底层是 SO_TIMEOUT：每次 read 单独计时）</text>
+  <rect class="b-cg" x="40" y="64" width="178" height="40" rx="8"/>
+  <text class="t-b" x="129" y="89" text-anchor="middle">① 排队拿连接</text>
+  <rect class="b-bk" x="222" y="64" width="176" height="40" rx="8"/>
+  <text class="t-b" x="310" y="89" text-anchor="middle">② DNS + 握手（+TLS）</text>
+  <rect class="b-neu" x="402" y="64" width="46" height="40" rx="8"/>
+  <text class="t-s" x="425" y="89" text-anchor="middle">发</text>
+  <rect class="b-rn" x="452" y="64" width="206" height="40" rx="8"/>
+  <text class="t-b" x="555" y="89" text-anchor="middle">③ 等首字节</text>
+  <rect class="b-rn" x="662" y="64" width="256" height="40" rx="8" style="fill-opacity:.5"/>
+  <text class="t-b" x="745" y="89" text-anchor="middle">④ 读 body</text>
+  <circle cx="815" cy="84" r="4" style="fill:var(--rn)"/><circle cx="845" cy="84" r="4" style="fill:var(--rn)"/><circle cx="875" cy="84" r="4" style="fill:var(--rn)"/><circle cx="902" cy="84" r="4" style="fill:var(--rn)"/>
+  <text class="t-xs" x="129" y="124" text-anchor="middle">池子有空位就是 0</text>
+  <text class="t-xs" x="310" y="124" text-anchor="middle">借到的是旧连接就跳过</text>
+  <text class="t-xs" x="555" y="124" text-anchor="middle">对面在算</text>
+  <text class="t-xs" x="790" y="124" text-anchor="middle">每读到一点数据，计时清零</text>
+  <path class="e-of" d="M40 142 V152 H918 V142"/>
+  <text class="t-of" x="480" y="176" text-anchor="middle">总 deadline：整次调用（含重试）最多多久。HttpClient 5 classic 没有这个参数，⑤ 用定时 cancel 补上</text>
+  <text class="t-xs" x="480" y="206" text-anchor="middle">同机房、下游 p99 约 50 ms 时 ⑤ 的配法：① 50 ms · ② 100 ms · ③④ 250 ms · 总 300 ms</text>
+  <text class="t-xs" x="480" y="228" text-anchor="middle">④ 之后连接还回池子，下一个请求借到它就跳过 ②；超时或出错的连接不还，直接关掉（④-3）</text>
+</svg>
+  </div>
+  <figcaption>四个参数各管一段，互相不重叠。最常见的误会是把 responseTimeout（在 Spring 里叫 read-timeout）当成整次调用的上限；它其实只管紫红色那两段里“每两次读之间”。</figcaption>
+  </figure>
+
+  <h3 id="m-read">④-1 读超时量的是“两次读之间”</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 260" role="img" aria-label="两行对比。上一行：对面一直不回，读超时 1000 ms 到点抛异常。下一行：对面每 400 ms 挤一个字节，每次读都在 1000 ms 内读到数据，计时一次次清零，整次调用跑了 4091 ms 才成功。1500 ms 处一条虚线是总 deadline，加了它，调用在 1500 ms 被取消。">
+  <text class="t-of" x="393" y="30" text-anchor="middle">总 deadline 1500 ms</text>
+  <path class="e-ofd" d="M393 38 V214"/>
+  <text class="t-b" x="20" y="76">对面不回</text>
+  <rect class="b-rn" x="140" y="62" width="169" height="22" rx="5"/>
+  <path class="e-bad" d="M303 65 L315 81 M315 65 L303 81"/>
+  <text class="t-bad" x="410" y="78">1000 ms：Read timed out</text>
+  <text class="t-b" x="20" y="140">慢慢挤</text>
+  <text class="t-xs" x="20" y="158">每 400 ms 1 字节</text>
+  <path class="e-rn" d="M140 146 H831"/>
+  <circle cx="208" cy="146" r="5" style="fill:var(--rn)"/><circle cx="275" cy="146" r="5" style="fill:var(--rn)"/><circle cx="343" cy="146" r="5" style="fill:var(--rn)"/><circle cx="410" cy="146" r="5" style="fill:var(--rn)"/><circle cx="478" cy="146" r="5" style="fill:var(--rn)"/><circle cx="545" cy="146" r="5" style="fill:var(--rn)"/><circle cx="613" cy="146" r="5" style="fill:var(--rn)"/><circle cx="680" cy="146" r="5" style="fill:var(--rn)"/><circle cx="748" cy="146" r="5" style="fill:var(--rn)"/><circle cx="816" cy="146" r="5" style="fill:var(--rn)"/>
+  <text class="t-xs" x="178" y="128">每次 400 ms &lt; 1000 ms，计时清零</text>
+  <text class="t-good" x="900" y="178" text-anchor="end">4091 ms 成功，读超时一次没触发（实测）</text>
+  <text class="t-of" x="403" y="204">加了 deadline：1500 ms 被 cancel（实测）</text>
+  <path class="e-axis" d="M140 226 H900"/>
+  <path class="e-axis" d="M140 222 V230 M309 222 V230 M478 222 V230 M647 222 V230 M816 222 V230"/>
+  <text class="t-xs" x="140" y="246" text-anchor="middle">0</text><text class="t-xs" x="309" y="246" text-anchor="middle">1 s</text><text class="t-xs" x="478" y="246" text-anchor="middle">2 s</text><text class="t-xs" x="647" y="246" text-anchor="middle">3 s</text><text class="t-xs" x="816" y="246" text-anchor="middle">4 s</text>
+</svg>
+  </div>
+  <figcaption>HttpClient 5 把 <code>responseTimeout</code> 设成 socket 的 <code>SO_TIMEOUT</code>（源码 <code>InternalExecRuntime</code>：<code>endpoint.setSocketTimeout(responseTimeout)</code>）。内核只认“这一次 read 最多阻塞多久”，读到任何一个字节，这次 read 就返回了，下一次重新计时。它的 Javadoc 也写明：response timeout 不是 deadline。慢慢挤的对面并不少见：大文件下载、流式接口、半死不活的下游、带宽被打满的网卡。</figcaption>
+  </figure>
+
+  <h3 id="m-pool">④-2 池子满了，请求在客户端排队</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="每个地址 5 条连接，20 个线程同时调一个要 500 ms 的接口。第一批 5 个 500 ms 完成，第二批先排队 500 ms，第三批排队 1000 ms，第四批排队 1500 ms，最后一批约 2100 到 2200 ms 才完成。下面一行：拿连接超时改成 300 ms 后，5 个成功，15 个在 300 ms 报 ConnectionRequestTimeoutException。">
+  <text class="t-s" x="20" y="48">第 1 批 5 个</text>
+  <rect class="b-g2" x="220" y="30" width="136" height="26" rx="5"/>
+  <text class="t-xs" x="364" y="48">500 ms</text>
+  <text class="t-s" x="20" y="84">第 2 批 5 个</text>
+  <rect class="b-cg" x="220" y="66" width="136" height="26" rx="5" style="fill-opacity:.4"/>
+  <rect class="b-g2" x="356" y="66" width="136" height="26" rx="5"/>
+  <text class="t-xs" x="500" y="84">约 1000 ms</text>
+  <text class="t-s" x="20" y="120">第 3 批 5 个</text>
+  <rect class="b-cg" x="220" y="102" width="272" height="26" rx="5" style="fill-opacity:.4"/>
+  <rect class="b-g2" x="492" y="102" width="136" height="26" rx="5"/>
+  <text class="t-xs" x="636" y="120">约 1600 ms</text>
+  <text class="t-s" x="20" y="156">第 4 批 5 个</text>
+  <rect class="b-cg" x="220" y="138" width="408" height="26" rx="5" style="fill-opacity:.4"/>
+  <rect class="b-g2" x="628" y="138" width="136" height="26" rx="5"/>
+  <text class="t-xs" x="772" y="156">约 2100～2200 ms</text>
+  <path class="e-axis" d="M220 178 H900"/>
+  <path class="e-axis" d="M220 174 V182 M356 174 V182 M492 174 V182 M628 174 V182 M764 174 V182 M900 174 V182"/>
+  <text class="t-xs" x="220" y="196" text-anchor="middle">0</text><text class="t-xs" x="356" y="196" text-anchor="middle">0.5 s</text><text class="t-xs" x="492" y="196" text-anchor="middle">1 s</text><text class="t-xs" x="628" y="196" text-anchor="middle">1.5 s</text><text class="t-xs" x="764" y="196" text-anchor="middle">2 s</text><text class="t-xs" x="900" y="196" text-anchor="middle">2.5 s</text>
+  <rect class="b-cg" x="220" y="210" width="16" height="12" rx="3" style="fill-opacity:.4"/><text class="t-xs" x="242" y="220">在客户端池子外排队</text>
+  <rect class="b-g2" x="400" y="210" width="16" height="12" rx="3"/><text class="t-xs" x="422" y="220">库存服务真正在处理（500 ms）</text>
+  <text class="t-b" x="20" y="250">拿连接最多等 300 ms</text>
+  <rect class="b-g2" x="220" y="238" width="136" height="16" rx="4"/>
+  <text class="t-xs" x="364" y="250">5 个成功</text>
+  <rect class="b-cg" x="220" y="262" width="82" height="16" rx="4" style="fill-opacity:.4"/>
+  <path class="e-bad" d="M298 262 L310 278 M310 262 L298 278"/>
+  <text class="t-bad" x="320" y="275">15 个在 300 ms 报 ConnectionRequestTimeoutException（实测）</text>
+</svg>
+  </div>
+  <figcaption>库存服务每次都只用 500 ms，调用方看到的 RT 却从 500 ms 一路涨到 2.2 s，多出来的全是在自己池子里排队。这就是 <a href="io-models.html#pit-pool">网络 IO 那页坑 2</a> 说的“下游正常、调用方 RT 很高”。</figcaption>
+  </figure>
+  <p class="verdict" data-role="cg"><b>池子要多大：</b>同时借出去的连接数 = 调用 QPS × 每次占用时间（Little 定律）。每秒 400 次、每次 50 ms，平均 20 条在用；留五成余量，每个地址配 30 条。池子也是一道闸：下游慢的时候，压在它身上的请求最多就这么多，多出来的在客户端排队，排队再用 <code>connectionRequestTimeout</code> 截断，调用线程就能按时回来。</p>
+
+  <h3 id="m-after">④-3 超时到了：客户端放手，对面不知道</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 260" role="img" aria-label="时序图：订单服务在 0 ms 发出预占请求；库存服务处理 500 ms。订单服务在 300 ms 读超时，抛异常并关掉这条连接。库存服务在 500 ms 扣完库存，响应写回去已经没人收。">
+  <text class="t-h" x="200" y="30" text-anchor="middle">订单服务</text>
+  <text class="t-h" x="760" y="30" text-anchor="middle">库存服务</text>
+  <path class="e-mut" d="M200 40 V246" style="stroke-dasharray:4 4"/>
+  <path class="e-mut" d="M760 40 V246" style="stroke-dasharray:4 4"/>
+  <path class="e-pd" d="M200 60 L748 72" marker-end="url(#ah-pd)"/>
+  <text class="t-pd" x="470" y="56" text-anchor="middle">0 ms：POST /reserve?order=9527</text>
+  <rect class="b-g2" x="752" y="72" width="16" height="140" rx="4"/>
+  <text class="t-g2" x="780" y="140">处理 500 ms</text>
+  <path class="e-bad" d="M190 150 L210 150"/>
+  <text class="t-bad" x="216" y="146">300 ms：读超时，抛异常，关掉这条连接</text>
+  <text class="t-xs" x="216" y="166">连接不还回池子：HTTP/1.1 没有请求编号，迟到的响应</text>
+  <text class="t-xs" x="216" y="182">会被下一个借到这条连接的请求读到</text>
+  <path class="e-badd" d="M748 212 L232 222"/>
+  <path class="e-bad" d="M220 214 L232 230 M232 214 L220 230"/>
+  <text class="t-xs" x="490" y="206" text-anchor="middle">500 ms：响应写回去，没人收</text>
+  <text class="t-g2" x="780" y="236">库存已经扣了（实测）</text>
+</svg>
+  </div>
+  <figcaption>超时是客户端单方面的决定。请求已经发出去了，库存服务照样扣；业务代码这时候再重试一次，同一个订单就扣两次（⑤ 和实验 C 都实测到了）。要重试，先让接口幂等。HTTP/2 和 gRPC 能只取消一个 stream（发 RST_STREAM）而不关整条连接，见 <a href="rpc-serialization-discovery-lb.html#p-retry">RPC 页坑 1</a>。</figcaption>
+  </figure>
+
+  <h3 id="m-why">为什么这样设计：同步客户端为什么没有“总超时”</h3>
+  <div class="design">
+    <div class="way" data-role="rn">
+      <h4>HttpClient 5 classic：阻塞读 + 每次读的超时</h4>
+      <ul class="pains">
+        <li class="ok">一个线程从头到尾做完一次调用，栈很直，出错一眼能看出卡在哪</li>
+        <li class="ok">不用额外的线程和定时器：超时交给内核，<code>SO_TIMEOUT</code> 到点让 read 返回</li>
+        <li>代价：内核只能给“这一次 read”计时。想要整次调用的上限，就得另起一个定时器，到点从外面把 socket 关掉（⑤ 的 <code>req::cancel</code> 就是这么做的）</li>
+      </ul>
+    </div>
+    <div class="way" data-role="of">
+      <h4>JDK HttpClient、gRPC、Reactor Netty：非阻塞 + 定时器</h4>
+      <ul class="pains">
+        <li class="ok">线程不停在 read 里，事件循环本来就有定时器，deadline 就是一个到点取消整个调用的定时任务</li>
+        <li class="ok">gRPC 的 deadline 还会写进请求头（<code>grpc-timeout</code>），下游知道还剩多少时间</li>
+        <li>代价：要有事件循环线程，回调和异步栈难读；而且“总”到哪一步各家不同，JDK HttpClient 的 <code>timeout()</code> 只管到响应头（JDK 21 源码：收到响应头就取消计时器）</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict" data-role="rn"><b>决定胜负的约束：</b>阻塞读的时候，线程停在内核里，它自己没法看表。能让它回来的只有两样：内核的 <code>SO_TIMEOUT</code>（只能按“这一次 read”算），或者别的线程把 socket 关掉。所以同步客户端天生只有分段超时，总 deadline 要用第二种办法自己加。</p>
+
+  <h3>最少的配置</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">Apache HttpClient 5.6：四段超时 + 池子</span><b>参数细节放到 ⑥</b></div>
+<pre><code>PoolingHttpClientConnectionManager pool = PoolingHttpClientConnectionManagerBuilder.create()
+    .setMaxConnPerRoute(30).setMaxConnTotal(100)                    <span class="cm">// 池子：默认 5 / 25</span>
+    .setDefaultConnectionConfig(ConnectionConfig.custom()
+        .setConnectTimeout(Timeout.ofMilliseconds(100))             <span class="cm">// ② 默认 3 分钟</span>
+        .build())
+    .build();
+CloseableHttpClient http = HttpClients.custom().setConnectionManager(pool)
+    .setDefaultRequestConfig(RequestConfig.custom()
+        .setConnectionRequestTimeout(Timeout.ofMilliseconds(50))    <span class="cm">// ① 默认 3 分钟</span>
+        .setResponseTimeout(Timeout.ofMilliseconds(250))            <span class="cm">// ③④ 默认不设</span>
+        .build())
+    .build();                                                       <span class="cm">// 一个进程一个，别每次 new</span></code></pre>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">Spring Boot 3.5：application.yml</span><b>只管 ② 和 ③④</b></div>
+<pre><code>spring.http.client:
+  connect-timeout: 100ms     <span class="cm"># ②</span>
+  read-timeout: 250ms        <span class="cm"># ③④，同样是“每次读”</span>
+<span class="cm"># 池子大小、拿连接超时、总 deadline 没有对应属性，要写代码配（⑥ 第二圈）</span></code></pre>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>跑起来：订单服务的库存客户端，四段 + 总 deadline</h2>
+    <p class="lead">一个假的库存服务（JDK 自带 <code>HttpServer</code>）加一个配好的客户端。三次调用分别撞上：正常、对面卡住、对面慢慢挤。依赖只有 <code>org.apache.httpcomponents.client5:httpclient5:5.6.5</code>，按 JDK 8 写法。</p>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">InventoryClient：构造器里配池子和超时</span><b>JDK 8+，HttpClient 5.6.5</b></div>
+<pre><code>pool = PoolingHttpClientConnectionManagerBuilder.create()
+        .setMaxConnPerRoute(30)                          <span class="cm">// 400 次/秒 × 0.05 秒 × 1.5</span>
+        .setMaxConnTotal(100)
+        .setDefaultConnectionConfig(ConnectionConfig.custom()
+                .setConnectTimeout(Timeout.ofMilliseconds(100))     <span class="cm">// ②</span>
+                .setSocketTimeout(Timeout.ofMilliseconds(250))      <span class="cm">// ③④ 的兜底</span>
+                .setValidateAfterInactivity(TimeValue.ofSeconds(2)) <span class="cm">// 空闲 2 秒以上，复用前先检查</span>
+                .setTimeToLive(TimeValue.ofMinutes(5))              <span class="cm">// 连接最多活 5 分钟</span>
+                .build())
+        .build();
+http = HttpClients.custom()
+        .setConnectionManager(pool)
+        .setDefaultRequestConfig(RequestConfig.custom()
+                .setConnectionRequestTimeout(Timeout.ofMilliseconds(50))  <span class="cm">// ①</span>
+                .setResponseTimeout(Timeout.ofMilliseconds(250))          <span class="cm">// ③④</span>
+                .build())
+        .evictIdleConnections(TimeValue.ofSeconds(30))   <span class="cm">// 比 Tomcat 的 60 秒空闲超时短</span>
+        .evictExpiredConnections()
+        .disableAutomaticRetries()                       <span class="cm">// 预占库存不能自动重试</span>
+        .build();</code></pre>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">InventoryClient.get：总 deadline，到点 cancel</span><b>④-0 的橙色那条</b></div>
+<pre><code>HttpGet req = new HttpGet(base + pathAndQuery);
+ScheduledFuture&lt;?&gt; killer = deadlineTimer.schedule(req::cancel, deadlineMs, MILLISECONDS);
+try {
+    return http.execute(req, resp -&gt; EntityUtils.toString(resp.getEntity()));
+} catch (IOException e) {
+    if (req.isCancelled()) {          <span class="cm">// cancel 抛的是 SocketException: Socket closed</span>
+        SocketTimeoutException te = new SocketTimeoutException("deadline " + deadlineMs + " ms exceeded");
+        te.initCause(e);
+        throw te;
+    }
+    throw e;
+} finally {
+    killer.cancel(false);             <span class="cm">// 按时回来了，撤掉定时器</span>
+}</code></pre>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">怎么跑</span><b>JDK 8+，Maven</b></div>
+<pre><code>git clone https://github.com/archeu/study-labs.git &amp;&amp; cd study-labs/java
+mvn -q -pl network/http-client-pool-timeouts compile exec:java \
+  -Dexec.mainClass=labs.network.http_client_pool_timeouts.InventoryClient</code></pre>
+  </div>
+<pre class="console">JDK 17.0.20.1，deadline 300 ms，读超时 250 ms
+正常：库存服务 5 ms 就回                        94 ms  成功 ok order=9527
+<span class="w">库存服务卡 1 秒才回                           251 ms  失败 SocketTimeoutException: Read timed out</span>
+<span class="w">响应头很快，body 每 100 ms 挤一个字节，挤 10 次     300 ms  失败 SocketTimeoutException: deadline 300 ms exceeded</span>
+池子：[leased: 0; pending: 0; available: 0; max: 100]
+<span class="r">服务端实际扣库存次数：2（9528 那次客户端已经放弃，服务端照样扣了）</span></pre>
+  <p class="tip"><span class="tag-real">实测</span> 本机 2 核 ARM，跑了 2 次，耗时差 1～8 ms。第一次 94 ms 是冷启动（类加载、第一次建连接）。第三行：每 100 ms 就有数据，250 ms 的读超时永远不触发，是总 deadline 在 300 ms 把它掐掉的。池子里一条可用连接都没剩：超时和 cancel 的连接都被关了（④-3）。<a href="https://github.com/archeu/study-labs/tree/main/java/network/http-client-pool-timeouts">完整代码 →</a></p>
+  <div class="two">
+    <div class="pit" style="border-left-color:var(--good)"><b><em>到这里</em>已经能交差了</b><p class="tip">四段都有上限，整次也有上限：库存服务怎么卡，订单线程最多 300 ms 就回来；池子按流量配了大小；客户端全局一个。</p></div>
+    <div class="pit" style="border-left-color:var(--warn)"><b><em>还没处理</em>的细节</b><p class="tip">超时后要不要重试（<a href="#p-retry">坑 4</a>）；300 ms 是怎么来的，上游给了多少（<a href="#p-chain">坑 5</a>）；夜里第一个请求报 reset（<a href="#p-stale">坑 6</a>）；超时一多，连接被反复关掉重建（<a href="#d-storm">第三圈</a>）。</p></div>
+  </div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：读超时不是总超时，超时不等于没做</h2>
+    <p class="lead">第一圈是不知道就会出事故的坑，第二圈是团队里该怎么配，第三圈是参数为什么这样定、版本之间差在哪。</p>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-read"><b><em>坑 1</em>只配了读超时，一次调用跑了好几倍<a class="root" href="#m-read">← ④-1 每次 read 单独计时</a><span class="seen">实测 + 按源码</span></b>
+      <dl><dt>现象</dt><dd>配了 <code>read-timeout: 1s</code>，监控上却有 4 秒、10 秒的调用；上游的超时先到，报错链路很乱。实验 A：读超时 1000 ms，对面每 400 ms 挤 1 字节，4091 ms 才成功。</dd>
+      <dt>根源</dt><dd><code>responseTimeout</code> 落到 socket 上就是 <code>SO_TIMEOUT</code>，读到任何数据都重新计时。HttpClient 5 的 Javadoc 原话：response timeout is not a deadline。</dd>
+      <dt>做法</dt><dd class="fix">在外面再套一个总 deadline：classic API 用定时 <code>cancel()</code>（⑤），OkHttp 用 <code>callTimeout</code>，WebClient 用 <code>.timeout()</code>，gRPC 用 <code>withDeadlineAfter</code>。</dd></dl>
+    </div>
+    <div class="pit" id="p-pool"><b><em>坑 2</em>池子用默认值，压测时 RT 翻了几倍<a class="root" href="#m-pool">← ④-2 Little 定律</a><span class="seen">实测 + 按源码</span></b>
+      <dl><dt>现象</dt><dd>下游自己的耗时稳定，调用方的 RT 随并发线性上涨；线程 dump 里一排线程停在 <code>PoolingHttpClientConnectionManager.lease</code>。实验 B：每地址 5 条，20 个并发，最后一批 2.2 s。</dd>
+      <dt>根源</dt><dd>HttpClient 5 默认每个地址 5 条、总共 25 条（4.x 是 2 条、20 条）；Boot 的 <code>spring.http.client.*</code> 属性不改池子大小。</dd>
+      <dt>做法</dt><dd class="fix">每个地址按 QPS × p99 RT × 1.5 配，总数 ≥ 各下游之和；同时设拿连接超时。</dd></dl>
+    </div>
+    <div class="pit" id="p-lease"><b><em>坑 3</em>没设拿连接超时，下游一慢，上游线程全卡在池子外<a class="root" href="#m-pool">← ④-2 排队没有上限</a><span class="seen">按源码</span></b>
+      <dl><dt>现象</dt><dd>①的场景：库存卡 3 秒，订单服务 200 个 Tomcat 线程全部停在拿连接上，订单服务的健康检查也超时，被摘掉。</dd>
+      <dt>根源</dt><dd><code>connectionRequestTimeout</code> 默认 3 分钟（<code>RequestConfig</code> 源码）。读超时管不到这一段：请求还没拿到连接，根本没开始读。</dd>
+      <dt>做法</dt><dd class="fix">设成几十毫秒：拿不到连接说明下游已经饱和，快速失败比排队更好。实验 B：设成 300 ms 后，15 个请求 300 ms 就回来了。</dd></dl>
+    </div>
+    <div class="pit" id="p-retry"><b><em>坑 4</em>超时后重试，同一个订单扣了两次<a class="root" href="#m-after">← ④-3 对面不知道你放弃了</a><span class="seen">实测 + 按源码</span></b>
+      <dl><dt>现象</dt><dd>实验 C：读超时 300 ms，库存要 500 ms；业务代码超时后重试一次。客户端两次都算失败，库存扣了 2 次。</dd>
+      <dt>根源</dt><dd>请求已经发出去了，超时只是客户端不等了。HttpClient 5 默认的重试策略比较克制：只重试 1 次，只重试 GET、PUT、DELETE 这类幂等方法，读超时和连不上（<code>InterruptedIOException</code>、<code>ConnectException</code>）不重试（<code>DefaultHttpRequestRetryStrategy</code> 源码）。闯祸的通常是业务层自己写的重试、Feign 的 <code>Retryer</code>、Spring Retry。</dd>
+      <dt>做法</dt><dd class="fix">写操作先幂等再重试：库存按 <code>order_id</code> 去重，同一订单扣过就返回上次的结果。重试要算进总 deadline，并加退避。</dd></dl>
+    </div>
+    <div class="pit" id="p-chain"><b><em>坑 5</em>超时没有一级比一级短，上游放弃了下游还在白干<a class="root" href="#m-all">← ④-0 总 deadline</a><span class="seen">推理</span></b>
+      <dl><dt>现象</dt><dd>网关 1 s，订单调库存配 2 s，库存调数据库配 3 s。网关早就给用户返回 504 了，订单和库存还在跑，跑完的结果没人要，却占着线程和连接。</dd>
+      <dt>根源</dt><dd>每一级的超时只管自己这一跳。重试还会放大：读超时 250 ms、重试 2 次，最坏要 750 ms。</dd>
+      <dt>做法</dt><dd class="fix">从入口的预算往下分：下游的 (超时 × 尝试次数) 要小于上游剩下的时间。能传的就把剩余时间传下去（gRPC 自动传 <code>grpc-timeout</code>；HTTP 可以约定一个请求头）。</dd></dl>
+    </div>
+    <div class="pit" id="p-stale"><b><em>坑 6</em>低峰后的第一个请求报 reset，或者干脆挂住<a class="root" href="#m-all">← ④-0 连接是复用的</a><span class="seen">按文档</span></b>
+      <dl><dt>现象</dt><dd>夜里过后第一批请求报 <code>NoHttpResponseException</code> 或 <code>Connection reset</code>；更糟的是没有报错，一直挂着。</dd>
+      <dt>根源</dt><dd>池子里的空闲连接已经被对面关了（Tomcat 默认空闲 60 秒），或者被中间的防火墙、NAT 静默丢弃（不发 RST）。后一种情况客户端发出请求后收不到任何东西，读超时没配的话，要等内核重传放弃：Linux <code>tcp_retries2 = 15</code>，内核文档给的是约 924.6 秒。</dd>
+      <dt>做法</dt><dd class="fix">空闲回收时间短于服务端和中间设备的空闲超时；空闲一段时间的连接复用前先校验（<code>validateAfterInactivity</code>）；读超时一定要设。细节见 <a href="io-models.html#pit-reset">网络 IO 页坑 3</a>。</dd></dl>
+    </div>
+  </div>
+
+  <h3 id="lab">实验台：哪个超时先到</h3>
+  <div class="lab" data-role="of" id="hl">
+    <p class="tip">模型：一次调用按 ④-0 分段，按 HttpClient 5 的语义算每段谁先到点。几个固定假设：池子满时要排队 800 ms；对面宕机时 SYN 没人回，Linux 约 127 s 放弃；连接被防火墙静默丢弃时，没有读超时就要等约 924.6 s；超时的连接会被关掉，所以重试一定拿新连接（握手按 1 ms 算）。总 deadline 从第一次尝试开始算，包住重试。</p>
+    <div class="guess" id="hl-guess">
+      <p>先猜：库存服务响应头 20 ms 就回了，之后每 150 ms 挤 1 个字节，一共 20 个。客户端配了读超时 250 ms，<b>没配总 deadline</b>。这次调用多久结束？</p>
+      <div class="opts">
+        <button type="button" data-g="read" aria-pressed="false">约 250 ms，读超时触发</button>
+        <button type="button" data-g="ok" aria-pressed="false">约 3 s，成功</button>
+        <button type="button" data-g="never" aria-pressed="false">一直挂着，不会结束</button>
+      </div>
+      <p class="res" id="hl-gres" hidden></p>
+    </div>
+    <div class="hc-ctl">
+      <div class="ctl"><span class="lbl">下游这次怎么了</span>
+        <div class="seg-mode" role="group" aria-label="场景" data-k="scn">
+          <button type="button" data-v="normal" aria-pressed="false">正常，40 ms</button>
+          <button type="button" data-v="slow" aria-pressed="false">卡住，1.2 s 才回</button>
+          <button type="button" data-v="trickle" aria-pressed="true">慢慢挤，150 ms 一字节</button>
+          <button type="button" data-v="pool" aria-pressed="false">池子满，要排 800 ms</button>
+          <button type="button" data-v="dead" aria-pressed="false">机器宕机，SYN 没人回</button>
+          <button type="button" data-v="stale" aria-pressed="false">复用的连接已被防火墙丢弃</button>
+        </div>
+      </div>
+      <div class="ctl"><span class="lbl">① 拿连接超时</span>
+        <div class="seg-mode" role="group" aria-label="拿连接超时" data-k="lease">
+          <button type="button" data-v="180000" aria-pressed="false">默认 3 分钟</button>
+          <button type="button" data-v="1000" aria-pressed="false">1000 ms</button>
+          <button type="button" data-v="50" aria-pressed="true">50 ms</button>
+        </div>
+      </div>
+      <div class="ctl"><span class="lbl">② 连接超时</span>
+        <div class="seg-mode" role="group" aria-label="连接超时" data-k="connect">
+          <button type="button" data-v="180000" aria-pressed="false">默认 3 分钟</button>
+          <button type="button" data-v="1000" aria-pressed="false">1000 ms</button>
+          <button type="button" data-v="100" aria-pressed="true">100 ms</button>
+        </div>
+      </div>
+      <div class="ctl"><span class="lbl">③④ 读超时</span>
+        <div class="seg-mode" role="group" aria-label="读超时" data-k="read">
+          <button type="button" data-v="0" aria-pressed="false">不设（默认）</button>
+          <button type="button" data-v="1000" aria-pressed="false">1000 ms</button>
+          <button type="button" data-v="250" aria-pressed="true">250 ms</button>
+        </div>
+      </div>
+      <div class="ctl"><span class="lbl">总 deadline</span>
+        <div class="seg-mode" role="group" aria-label="总 deadline" data-k="deadline">
+          <button type="button" data-v="0" aria-pressed="true">不设</button>
+          <button type="button" data-v="1000" aria-pressed="false">1000 ms</button>
+          <button type="button" data-v="300" aria-pressed="false">300 ms</button>
+        </div>
+      </div>
+      <div class="ctl"><span class="lbl">超时后业务重试几次</span>
+        <div class="seg-mode" role="group" aria-label="重试次数" data-k="retries">
+          <button type="button" data-v="0" aria-pressed="true">0</button>
+          <button type="button" data-v="1" aria-pressed="false">1</button>
+          <button type="button" data-v="2" aria-pressed="false">2</button>
+        </div>
+      </div>
+    </div>
+    <div class="run-row"><button class="btn primary" type="button" id="hl-run">运行</button><button class="btn" type="button" id="hl-def">换成 HttpClient 5 默认值</button><button class="btn" type="button" id="hl-mine">换成 ⑤ 的配置</button></div>
+    <div class="hc-leg"><span><i style="background:var(--cg)"></i>排队拿连接</span><span><i style="background:var(--bk)"></i>建连接</span><span><i style="background:var(--rn)"></i>等首字节</span><span><i style="background:var(--rn);opacity:.5"></i>读 body</span></div>
+    <div class="hc-out" id="hl-out" aria-live="polite"></div>
+    <p class="lab-res" id="hl-res" data-role="of"></p>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>一个进程一个客户端，按下游分池子；池子大小按 QPS × p99 RT × 1.5 算</b><p class="guard">每次 new 客户端：每次握手、TIME_WAIT 堆满端口（<a href="io-models.html#pit-tw">网络 IO 页坑 4</a>）；池子太小，RT 翻倍（坑 2）</p></div>
+    <div class="rl"><b>四个都配，再套一个总 deadline：拿连接几十毫秒，连接按网络往返（同机房 100 ms 左右），读超时按下游 p99 的 1.5～2 倍</b><p class="guard">默认值是 3 分钟和无限，一个下游卡住就拖死上游（坑 1、3）</p></div>
+    <div class="rl"><b>超时一级比一级短；下游的 (超时 × 尝试次数) 小于上游剩下的时间</b><p class="guard">上游放弃了，下游还在白干（坑 5）</p></div>
+    <div class="rl"><b>写操作不自动重试；要重试先做幂等，重试算进总 deadline，并加退避</b><p class="guard">同一个订单扣两次（坑 4）；重试风暴把下游打死</p></div>
+    <div class="rl"><b>空闲回收 &lt; 服务端 keep-alive 超时 &lt; 负载均衡和防火墙的空闲超时</b><p class="guard">低峰后第一个请求报 reset 或挂住（坑 6）</p></div>
+    <div class="rl"><b>在 Spring Boot 3.5 里，池子和拿连接超时用 <code>HttpComponentsClientHttpRequestFactoryBuilder</code> 的 <code>withConnectionManagerCustomizer</code>、<code>withDefaultRequestConfigCustomizer</code> 配</b><p class="guard"><code>spring.http.client.*</code> 只有连接超时和读超时，池子还是 5 条（坑 2）</p></div>
+    <div class="rl"><b>把池子状态做成指标：<code>getTotalStats()</code> 的 leased、pending、available；pending 持续大于 0 就告警</b><p class="guard">RT 上涨时分不清是下游慢，还是自己在排队</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>优化和深处</h3></div>
+  <div class="deep">
+    <div class="two">
+      <div class="dp" data-role="rn">
+        <h4>读超时定多少：看 p99，不看平均</h4>
+        <p>读超时是一道截断线：线以外的请求被判失败。定在平均值附近，正常的慢请求也被误杀；定得太长，卡住时线程回来得太晚。常用做法是取下游 p99（或 p99.9）的 1.5～2 倍，再检查它放不放得进上游给的预算：放不进，说明这一跳本身就慢，该改的是调用方式（批量、缓存、异步），而不是超时。</p>
+        <p>截断线以外的那一小撮，可以发“对冲请求”：等到 p95 还没回，就向另一台再发一份，谁先回用谁。它只适合幂等的读请求，代价是多出几个百分点的流量。</p>
+      </div>
+      <div class="dp" data-role="bad" id="d-storm">
+        <h4>超时风暴会变成握手风暴</h4>
+        <p>⑤ 的输出里，三次调用之后池子里一条可用连接都没有（<code>available: 0</code>，实测）：超时和 cancel 的连接都被关掉了，下一个请求要重新握手（④-3）。下游一抖，超时一多，客户端就在不停地建新连接、关旧连接，主动关的一方还要背 60 秒的 TIME_WAIT。</p>
+        <p>所以下游抖动时，单靠超时不够，还要熔断：错误率过线就先不调，给下游喘口气，也保住自己的连接（J10 的 Sentinel）。HTTP/2 和 gRPC 可以只取消一个 stream，连接留着，这个问题小得多。</p>
+      </div>
+    </div>
+    <h4 class="dp-h">版本差异：同一件事，各家默认值</h4>
+    <div class="tbl-wrap">
+    <table class="verx">
+      <thead><tr><th></th><th>拿连接超时</th><th>连接超时</th><th>读超时</th><th>池子</th><th>出处</th></tr></thead>
+      <tbody>
+        <tr><td><code>HttpURLConnection</code>（JDK 8 / 17 / 21）</td><td>没有这一段</td><td>0 = 无限</td><td>0 = 无限</td><td>只缓存空闲连接，每地址 5 条</td><td>JDK 21 源码 <code>URLConnection</code>、<code>KeepAliveCache</code></td></tr>
+        <tr><td>JDK HttpClient（11+）</td><td>没有这一段（池子不限）</td><td>不设 = 无限</td><td><code>timeout()</code> 不设 = 无限，只管到响应头</td><td>不限条数，空闲 30 s 关</td><td>JDK 21 源码 <code>MultiExchange</code>、<code>ConnectionPool</code>、<code>HttpClientImpl</code></td></tr>
+        <tr><td>Apache HttpClient 4.5</td><td>-1 = 无限</td><td>-1 = 系统默认</td><td>-1 = 系统默认（无限）</td><td>每地址 2、总 20</td><td>按文档；池子数字源码核对过</td></tr>
+        <tr><td>Apache HttpClient 5.6</td><td>3 分钟</td><td>3 分钟</td><td>不设 = 无限</td><td>每地址 5、总 25</td><td>5.6.5 源码 <code>RequestConfig</code>、<code>ConnectionConfig</code>、<code>PoolingHttpClientConnectionManager</code></td></tr>
+        <tr><td>Spring Boot 3.5 <code>RestClient</code></td><td>不改</td><td><code>spring.http.client.connect-timeout</code></td><td><code>spring.http.client.read-timeout</code></td><td>不改</td><td>3.5.16 配置元数据</td></tr>
+        <tr><td>gRPC Java</td><td>—（每地址一条 HTTP/2 连接）</td><td>不单独配，受 deadline 管</td><td>默认没有 deadline</td><td>不用池子</td><td>按文档，见 <a href="../java/pano-j04-order-calls-inventory.html#s-10">全景第 10 站</a></td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span><h3>这一页没展开的</h3></div>
+  <ul class="next">
+    <li>熔断、限流、舱壁：超时只能让线程按时回来，挡不住下游一直坏（J10 的 Sentinel / Resilience4j）</li>
+    <li>自适应超时：按最近的 RT 分布动态调整截断线，以及对冲请求在 gRPC 里的实现（<code>hedgingPolicy</code>）</li>
+    <li>HttpClient 5 的 async API 和 HTTP/2：一条连接多路复用后，池子和超时怎么变</li>
+    <li>虚拟线程下的 HTTP 客户端：线程不再是瓶颈，池子和超时变成唯一的闸</li>
+    <li>OpenFeign 的超时和重试：<code>Request.Options</code>、<code>Retryer</code> 与底层客户端的超时谁说了算</li>
+    <li>DNS 缓存：JVM 的 <code>networkaddress.cache.ttl</code> 和连接的 <code>timeToLive</code>，为什么扩容后新实例分不到流量</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到 ⑤：带着 ⑥ 改一遍</h2>
+    <p class="lead">每个练习都先猜结果再运行。代码和练习都在 <a href="https://github.com/archeu/study-labs/tree/main/java/network/http-client-pool-timeouts">study-labs</a> 里。</p>
+  </div>
+  <div class="rules-list">
+    <div class="rl"><b>1. 池子调大</b><p>把 <code>TimeoutLab.experimentB</code> 的每地址连接数从 5 改成 20，两组结果各变成什么样？再改成 10，最后一批大约多少毫秒（坑 2）？</p></div>
+    <div class="rl"><b>2. 先幂等，再重试</b><p>给 <code>FakeInventoryServer.reserve</code> 加按 <code>order</code> 去重：同一订单第二次直接返回上次的结果。再跑实验 C，扣库存次数应该是 1（坑 4）。</p></div>
+    <div class="rl"><b>3. deadline 比读超时还短</b><p>把 <code>InventoryClient</code> 的 deadline 改成 200 ms、读超时保持 250 ms。第二个调用在多少毫秒失败，抛的是哪个异常？说明读超时这时还有没有用（坑 1、坑 6）。</p></div>
+    <div class="rl"><b>4. 把剩余时间传下去</b><p>在 <code>InventoryClient.get</code> 里加一个请求头 <code>X-Deadline-Ms</code>，写上还剩多少毫秒；让 <code>FakeInventoryServer</code> 读到它，剩余时间不够处理就直接返回 503，不再扣库存（坑 5）。</p></div>
+  </div>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>一次调用分四段（拿连接、建连接、等响应、读响应），每段一个超时；读超时只管两次读之间的间隔，所以外面还要套一个总 deadline，并且整条链路一级比一级短。</p></details>
+    <details><summary>2. 只用 <code>HttpURLConnection</code>，痛点在哪？</summary><p>两个超时默认都是 0（无限）；没有整次调用的上限；没有真正的池子，并发多少就开多少条连接，没有排队上限，也看不到状态；每个调用点都要自己配。</p></details>
+    <details><summary>3. “配了读超时 1 秒，调用却跑了 4 秒”，根源是哪条原理？</summary><p>④-1：<code>responseTimeout</code> 落到 socket 上是 <code>SO_TIMEOUT</code>，内核只给“这一次 read”计时，读到任何数据就重新开始。对面每 400 ms 挤一点，每次都在 1 秒内，读超时永远不触发。</p></details>
+    <details><summary>4. 预测：拿连接超时 50 ms、读超时 250 ms、总 deadline 不设、业务重试 2 次，库存服务这次卡住 1.2 s。订单线程多久回来？库存服务执行了几次？</summary><p>约 752 ms（250 + 1 + 250 + 1 + 250），库存执行了 3 次。每次都是读超时（④-1），超时的连接被关掉，重试要重新握手（④-3）；请求每次都送到了对面，对面不知道客户端放弃了，所以三次都执行。把总 deadline 设成 300 ms，就只有约 300 ms、执行 2 次。可以在实验台上验证。</p></details>
+    <details><summary>5. 预测：库存服务所在的机器断电了（不是进程退出）。连接超时和读超时都用 HttpClient 5 的默认值，第一次调用多久才失败？</summary><p>如果借到的是池子里的旧连接：请求发出去后没有任何回应（机器断电，不会回 RST），读超时默认无限，要等内核重传放弃，Linux 默认约 924.6 秒。如果要新建连接：SYN 没人回，连接超时默认 3 分钟，比内核放弃握手的约 127 秒还长，所以约 127 秒后报连接超时。两种都远超任何业务预算，所以连接超时和读超时都必须显式配（④-0、坑 6）。</p></details>
+    <details><summary>6. 预测：把每地址连接数从 5 调到 500，坑 3 那种“库存卡 3 秒”的事故会变好还是变坏？</summary><p>多半变坏。池子是一道闸（④-2）：5 条时最多 5 个请求压在库存上，其余的被拿连接超时快速打回。500 条时 200 个 Tomcat 线程全部拿到连接，全部卡在读上，直到读超时；库存服务同时也多扛了 40 倍的请求，恢复得更慢。池子要按 QPS × RT 配，而不是越大越好。</p></details>
+    <details><summary>7. 放回全景：第 3 站和第 10 站前后各发生了什么？这一页的东西配错了，整条链路会怎样？</summary><p>第 2 站负载均衡挑好了一台库存实例；第 3 站从池子里借一条到它的连接（没有就握手）；接着第 4～9 站编码、发帧、过 TCP、在库存那边被叫醒、扣库存；第 10 站等结果回来，或者 300 ms 到点放弃。拿连接和读超时用默认值，库存一卡，订单服务的线程全部卡在第 3 站或第 10 站，订单服务自己也不响应了，再往上把网关拖住；超时后无脑重试，第 9 站同一个订单扣两次。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机实测：2 核 ARM Linux，OpenJDK 17.0.20.1，Apache HttpClient 5.6.5（代码按 <code>--release 8</code> 编译），走本机回环。⑤ 的输出和实验 A、B、C 的数字原样摘自 <code>InventoryClient</code>、<code>TimeoutLab</code>，各跑了 2 次，耗时差在 10 ms 以内。<a href="https://github.com/archeu/study-labs/tree/main/java/network/http-client-pool-timeouts">完整代码</a>。</p>
+  <p>按源码：HttpClient 5.6.5 的 <code>RequestConfig</code>（拿连接 3 分钟，response timeout 不是 deadline）、<code>ConnectionConfig</code>（连接 3 分钟、socket timeout 不设）、<code>PoolingHttpClientConnectionManager</code>（5 / 25，空闲 2 秒后复用前校验）、<code>InternalExecRuntime</code>（response timeout 设成 socket timeout）、<code>DefaultHttpRequestRetryStrategy</code>（重试 1 次，只重试幂等方法，超时不重试）；JDK 21 的 <code>URLConnection</code>、<code>KeepAliveCache</code>（每地址 5 条）、<code>MultiExchange</code>（收到响应头就取消计时器）、<code>ConnectionPool</code>（不限）、<code>HttpClientImpl</code>（空闲 30 秒）；Spring Boot 3.5.16 的配置元数据和 <code>ClientHttpRequestFactoryBuilder.detect</code> 顺序。按文档：OkHttp、Reactor Netty 的默认值，HttpClient 4.5 的超时默认值，Linux <code>tcp_syn_retries</code>、<code>tcp_retries2</code>。实验台是按这些语义写的模型，不是实测。</p>
+  <p>相关：<a href="../java/pano-j04-order-calls-inventory.html">全景：订单服务调库存服务的一次 RPC</a> · <a href="rpc-serialization-discovery-lb.html">RPC 原理</a> · <a href="io-models.html">网络 IO 模型</a> · <a href="tcp-handshake-timewait-framing.html">TCP：握手、挥手、TIME_WAIT 与粘包</a> · <a href="url-to-page.html">从输入 URL 到页面展示</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 一次 HTTP 调用（HttpClient 5 classic 的语义）在几种故障下怎么结束。
+// 段：lease 排队拿连接 → connect 建连接 → wait 等首字节 → body 读响应体。
+// lease 受 connectionRequestTimeout 管；connect 受 connectTimeout 管；
+// wait 和 body 里“每两次读之间”受 responseTimeout 管（SO_TIMEOUT，每读到一个字节重新计时）；
+// deadline 管整次调用（含重试），到点就 cancel。0 或 Infinity 表示不设。
+// 超时的连接会被关掉，所以重试一定拿一条新连接（要握手），不会再碰到同一条坏连接。
+var OS_CONNECT = 127000;  // Linux tcp_syn_retries=6：1+2+4+8+16+32+64 s 后放弃
+var OS_RETRANS = 924600;  // Linux tcp_retries2=15：内核文档给的约 924.6 s
+var HANDSHAKE = 1;        // 同机房新建一条连接，约 1 ms
+var SCN = {
+  normal:  { W: 0,   conn: 'reuse', S: 40,   n: 1,  g: 0 },
+  slow:    { W: 0,   conn: 'reuse', S: 1200, n: 1,  g: 0 },
+  trickle: { W: 0,   conn: 'reuse', S: 20,   n: 20, g: 150 },
+  pool:    { W: 800, conn: 'reuse', S: 40,   n: 1,  g: 0 },
+  dead:    { W: 0,   conn: 'dead',  S: 40,   n: 1,  g: 0 },
+  stale:   { W: 0,   conn: 'stale', S: 40,   n: 1,  g: 0 }
+};
+function lim(v) { return v > 0 ? v : Infinity; }
+function simCall(p) {
+  var s = SCN[p.scn];
+  var L = lim(p.lease), C = lim(p.connect), R = lim(p.read), D = lim(p.deadline);
+  var t = 0, runs = 0, attempts = [], fired = null;
+  for (var a = 0; a <= p.retries; a++) {
+    var segs = [], end = null, reach = false;
+    var mode = a > 0 && s.conn !== 'dead' ? 'fresh' : s.conn;
+    if (L < s.W) { segs.push(['lease', L]); end = 'lease'; }
+    else {
+      if (s.W > 0) segs.push(['lease', s.W]);
+      if (mode === 'dead') {
+        if (C < OS_CONNECT) { segs.push(['connect', C]); end = 'connect'; }
+        else { segs.push(['connect', OS_CONNECT]); end = 'os-connect'; }
+      } else {
+        if (mode === 'fresh') segs.push(['connect', HANDSHAKE]);
+        if (mode === 'stale') {
+          if (R < OS_RETRANS) { segs.push(['wait', R]); end = 'read'; }
+          else { segs.push(['wait', OS_RETRANS]); end = 'os-retrans'; }
+        } else {
+          reach = true;
+          if (R < s.S) { segs.push(['wait', R]); end = 'read'; }
+          else {
+            segs.push(['wait', s.S]);
+            if (s.n > 1 && R < s.g) { segs.push(['body', R]); end = 'read'; }
+            else { if (s.n * s.g > 0) segs.push(['body', s.n * s.g]); end = 'ok'; }
+          }
+        }
+      }
+    }
+    // 总 deadline：从第一次尝试开始算，到点切断
+    var cut = [], tt = t, reachedServer = false;
+    for (var i = 0; i < segs.length; i++) {
+      var k = segs[i][0], ms = segs[i][1];
+      if (k === 'wait' && reach && tt < D) reachedServer = true;
+      if (tt + ms > D) { if (D - tt > 0) cut.push([k, D - tt]); tt = D; end = 'deadline'; break; }
+      cut.push([k, ms]); tt += ms;
+    }
+    if (reachedServer) runs++;
+    attempts.push({ start: t, segs: cut, end: end, ms: tt - t });
+    t = tt;
+    fired = end;
+    if (end === 'ok' || end === 'deadline') break;
+  }
+  return { attempts: attempts, total: t, ok: fired === 'ok', end: fired, runs: runs };
+}
+/*SIM-END*/
+(function () {
+  var lab = document.getElementById('hl');
+  if (!lab) return;
+  var out = document.getElementById('hl-out'), res = document.getElementById('hl-res');
+  var gres = document.getElementById('hl-gres'), guessed = null;
+  var GUESS_CFG = { scn: 'trickle', lease: 50, connect: 100, read: 250, deadline: 0, retries: 0 };
+  var END = {
+    ok: '成功', lease: '拿连接超时（connectionRequestTimeout）', connect: '连接超时（connectTimeout）',
+    read: '读超时（responseTimeout）', deadline: '总 deadline 到点，cancel',
+    'os-connect': '内核放弃握手（SYN 重发 6 次）', 'os-retrans': '内核放弃重传（tcp_retries2 = 15）'
+  };
+  var COLOR = { lease: 'var(--cg)', connect: 'var(--bk)', wait: 'var(--rn)', body: 'var(--rn)' };
+  function fmt(ms) {
+    if (ms < 1000) return Math.round(ms) + ' ms';
+    var s = ms / 1000;
+    return (s >= 100 ? s.toFixed(s % 1 ? 1 : 0) : s.toFixed(s % 1 ? 2 : 0).replace(/0$/, '')) + ' s';
+  }
+  function cfg() {
+    var c = {};
+    lab.querySelectorAll('.seg-mode[data-k]').forEach(function (g) {
+      var b = g.querySelector('[aria-pressed="true"]');
+      var v = b.getAttribute('data-v');
+      c[g.getAttribute('data-k')] = g.getAttribute('data-k') === 'scn' ? v : Number(v);
+    });
+    return c;
+  }
+  function set(c) {
+    lab.querySelectorAll('.seg-mode[data-k]').forEach(function (g) {
+      var k = g.getAttribute('data-k');
+      g.querySelectorAll('button').forEach(function (b) {
+        b.setAttribute('aria-pressed', String(b.getAttribute('data-v') === String(c[k])));
+      });
+    });
+    changed();
+  }
+  function same(a, b) { for (var k in b) if (a[k] !== b[k]) return false; return true; }
+  function changed() { gres.hidden = true; lab.querySelectorAll('.guess .opts button').forEach(function (b) { b.classList.remove('right', 'wrong'); }); }
+  function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+  function run() {
+    var c = cfg(), r = simCall(c);
+    var html = '';
+    r.attempts.forEach(function (a, i) {
+      var segs = a.segs.map(function (s) {
+        var w = Math.max(0.6, s[1] / r.total * 100);
+        return '<i style="width:' + w + '%;background:' + COLOR[s[0]] + (s[0] === 'body' ? ';opacity:.5' : '') + '" title="' + s[0] + ' ' + fmt(s[1]) + '"></i>';
+      }).join('');
+      var bad = a.end !== 'ok';
+      html += '<div class="hc-row"><span class="hc-lb">第 ' + (i + 1) + ' 次</span><div class="hc-track"><div class="hc-fill" style="margin-left:' + (a.start / r.total * 100) + '%">' + segs + '</div></div>' +
+        '<span class="hc-end ' + (bad ? 'bad-t' : 'good-t') + '">' + fmt(a.ms) + ' · ' + esc(END[a.end]) + '</span></div>';
+    });
+    out.innerHTML = html;
+    var lines = [];
+    lines.push((r.ok ? '<b>' + fmt(r.total) + ' 后成功。</b>' : '<b>' + fmt(r.total) + ' 后失败</b>，最后是' + END[r.end] + '。'));
+    if (r.total > 300) lines.push('上游只给了 300 ms，这次多等了 ' + fmt(r.total - 300) + '。');
+    else lines.push('守住了上游的 300 ms 预算。');
+    if (r.end === 'os-connect' || r.end === 'os-retrans') lines.push('配的超时一个都没管到这一段，只能等内核兜底（④-0、坑 6）。');
+    if (c.scn === 'trickle' && c.read > 0 && r.attempts.some(function (a) { return a.segs.some(function (s) { return s[0] === 'body' && s[1] > c.read; }); }))
+      lines.push('读 body 用了远超读超时的时间，读超时却没触发：每 150 ms 就读到 1 字节，计时一次次清零（④-1）。');
+    if (r.runs > 1) lines.push('库存服务执行了 ' + r.runs + ' 次：每次超时对面都已经在做了，同一个订单被扣了 ' + r.runs + ' 次（④-3、坑 4）。');
+    else if (r.runs === 1 && !r.ok) lines.push('客户端算失败，可库存服务已经收到请求，照样会扣（④-3）。');
+    if (r.attempts.length > 1 && r.ok) lines.push('重试拿的是新连接，绕开了坏连接，所以第 ' + r.attempts.length + ' 次成功了。');
+    res.innerHTML = lines.join(' ');
+    if (guessed && same(c, GUESS_CFG)) {
+      var right = 'ok';
+      lab.querySelectorAll('.guess .opts button').forEach(function (b) {
+        var g = b.getAttribute('data-g');
+        b.classList.toggle('right', g === right);
+        b.classList.toggle('wrong', g === guessed && g !== right);
+      });
+      gres.hidden = false;
+      gres.innerHTML = (guessed === right ? '猜对了。' : '猜错了。') + '跑了 ' + fmt(r.total) + '，成功。读超时 250 ms 量的是两次读之间：每 150 ms 就读到 1 字节，计时一次次清零，20 个字节读完一共 3 s 多（④-1）。想让它 300 ms 就回来，要加总 deadline。';
+    }
+  }
+  lab.querySelectorAll('.seg-mode[data-k]').forEach(function (g) {
+    g.addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b) return;
+      g.querySelectorAll('button').forEach(function (x) { x.setAttribute('aria-pressed', String(x === b)); });
+      changed();
+    });
+  });
+  lab.querySelectorAll('.guess .opts button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      guessed = b.getAttribute('data-g');
+      lab.querySelectorAll('.guess .opts button').forEach(function (x) { x.setAttribute('aria-pressed', String(x === b)); x.classList.remove('right', 'wrong'); });
+      gres.hidden = true;
+    });
+  });
+  document.getElementById('hl-run').addEventListener('click', run);
+  document.getElementById('hl-def').addEventListener('click', function () { var c = cfg(); set({ scn: c.scn, lease: 180000, connect: 180000, read: 0, deadline: 0, retries: 0 }); run(); });
+  document.getElementById('hl-mine').addEventListener('click', function () { var c = cfg(); set({ scn: c.scn, lease: 50, connect: 100, read: 250, deadline: 300, retries: 0 }); run(); });
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

@@ -123,6 +123,7 @@
 | 03 | [TCP：握手、挥手、TIME_WAIT 与粘包](https://archeu.github.io/study-notes/network/tcp-handshake-timewait-framing.html) | 连接是两端内核的两本账、三次握手为什么是三次、四次挥手和 CLOSE_WAIT、TIME_WAIT 为什么在先关的一方、字节流与长度前缀、Nagle × 延迟 ACK 的 40 ms、accept 队列，真实抓包逐段演示 |
 | 04 | [Netty：EventLoop、Pipeline、ByteBuf](https://archeu.github.io/study-notes/network/netty-eventloop-pipeline-bytebuf.html) | EventLoop 终身绑定连接、Pipeline 入站出站方向、ByteBuf 双下标与引用计数、慢请求拖慢一个线程和漏 release 的实测、4.1→4.2 差异，EventLoop 阻塞实验台 |
 | 05 | [RPC 原理：序列化、协议、服务发现、负载均衡](https://archeu.github.io/study-notes/network/rpc-serialization-discovery-lb.html) | 一次调用的八步、动态代理 Stub、自描述和约定结构的序列化、帧头与请求 id 多路复用、客户端发现与负载均衡、为什么这样设计，纯 JDK 迷你 RPC 实测（慢实例、坏实例、超时），负载均衡实验台 |
+| 06 | [HTTP 客户端与连接池：超时怎么配](https://archeu.github.io/study-notes/network/http-client-pool-timeouts.html) | 一次调用的四段超时（拿连接、建连接、等响应、读响应）和总 deadline、读超时为什么不是总超时、池子满了在客户端排队、超时后对面照样做完、各客户端默认值对照，“哪个超时先到”实验台 |
 
 ## 架构
 
