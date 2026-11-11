@@ -1,0 +1,1531 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>Netty：EventLoop、Pipeline、ByteBuf</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six steps for a tool topic (① 为什么学 ② 老办法 ③ 选谁 ④ 原理 ⑤ 跑起来 ⑥ 细节 ↺), J04 panorama stops 6, 8, 9. Roles: bk teal = Netty / EventLoop (the chosen tool, same colour as the panorama), cg purple = Pipeline and handlers, of amber = ByteBuf, g2 brown = business threads, pd blue = order service (client); bad red = blocked / leaked, good green = correct, neutral grey = the old way (hand-written JDK NIO). Interaction: one EventLoop bench in ⑥ (guess first, then run a pure simulation of slow vs fast requests sharing threads, three placements of the business handler). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+body{overflow-x:clip}
+.lab-h{font-family:var(--font-display);font-weight:400;font-size:20px}
+#eb-res p{margin:0 0 4px}
+#eb-res .note-p{font-size:13px;color:var(--muted)}
+#eb pre{white-space:pre;overflow-x:auto}
+
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2;fill:none}
+.e-warn{stroke:var(--warn);stroke-width:2.5;fill:none}
+.misj{border-collapse:collapse}
+.ev-card{font-family:var(--font-mono);font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--console-bg);color:var(--console-fg);border-radius:12px;padding:10px 12px;margin:0}
+.tr-nav{display:flex;flex-wrap:wrap;gap:6px}
+.tr-nav button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:var(--font-mono)}
+.tr-nav button[aria-current="true"]{border-color:var(--ink);background:var(--ink);color:var(--paper)}
+.tr-nav button.ok{border-color:var(--good)}
+.tr-nav button.ng{border-color:var(--bad)}
+.tr-score{font-size:13.5px;color:var(--muted)}
+
+/* page: budget bench */
+.bud{display:flex;flex-direction:column;gap:6px}
+.bud-bar{position:relative;display:flex;height:34px;border-radius:10px;overflow:hidden;border:1.5px solid var(--line-strong);background:var(--paper)}
+.bud-bar span{display:block;height:100%;min-width:0}
+.bud-bar .h{background:var(--pd)} .bud-bar .m{background:var(--warn);opacity:.55} .bud-bar .c{background:var(--warn);opacity:.7}
+.bud-bar .s{background:var(--warn);opacity:.85} .bud-bar .o{background:var(--neutral);opacity:.6} .bud-bar .d{background:var(--warn)}
+.bud-bar .d.over{background:var(--bad)}
+.bud-lim{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--ink)}
+.bud-cap{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);font-family:var(--font-mono)}
+.bud-lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.bud-lg i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.derive{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.derive > div{padding:8px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--card);font-size:13.5px;min-width:0}
+.derive b{display:block;font-size:12px;color:var(--muted);font-weight:500}
+.derive code{font-size:13px;overflow-wrap:anywhere}
+.ctl select{font:inherit;font-size:14px;padding:5px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:720px){.derive{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.derive{grid-template-columns:1fr}}
+
+/* page: tcp */
+.cap{font-size:13.5px;color:var(--muted);margin-top:8px;line-height:1.55}
+.seq{display:flex;flex-direction:column;gap:12px}
+.seq-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seq-ctl .seg{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;margin-left:auto}
+.seq-box{outline:none}
+.seq svg .msg{opacity:.13;transition:opacity .25s}
+.seq svg .msg.on{opacity:1}
+.seq svg .msg.cur .ln{stroke-width:4}
+.seq svg .msg.cur .lab{font-weight:700}
+.seq svg .lane{stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5}
+.st-chip{font-family:var(--font-mono);font-size:12.5px;font-weight:600}
+.seq-info{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.seq-info > div{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.seq-info .k{font-size:12.5px;color:var(--muted);display:block;margin-bottom:4px}
+.seq-info .sts{display:flex;flex-wrap:wrap;gap:8px 16px}
+.seq-info .sts span{display:inline-flex;gap:6px;align-items:baseline}
+.seq-info .sts b{font-family:var(--font-mono);font-size:14px;padding:1px 8px;border-radius:8px;background:var(--rt);border:1.5px solid var(--rc)}
+.seq-say{grid-column:1 / -1}
+.seq-say p + p{margin-top:6px}
+.seq-num{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.frames{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.frames > div{border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.frames h4{font-size:17px;color:var(--rc)}
+.frames pre{margin:0;font-family:var(--font-mono);font-size:12px;background:var(--code-bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+@media (max-width:760px){.way{overflow-x:auto}.way > svg{min-width:400px}.seq-info{grid-template-columns:minmax(0,1fr)}.frames{grid-template-columns:minmax(0,1fr)}.seq-ctl .seg{margin-left:0}}
+/* ---------- netty page ---------- */
+.lanes{display:flex;flex-direction:column;gap:6px}
+.lane{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.lane .nm{font-family:var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lane .tr{position:relative;height:18px;border-radius:6px;background:var(--neutral-tint)}
+.lane .tr i{position:absolute;top:0;bottom:0;background:var(--bad);border-radius:5px;opacity:.85}
+.lane .tr u{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--bk)}
+.lane .v{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right}
+.lane-axis{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;font-size:11.5px;color:var(--muted);font-family:var(--font-mono)}
+.lane-axis span{display:flex;justify-content:space-between}
+.lanes-more{font-size:12.5px;color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:760px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.ctl-grid{grid-template-columns:1fr}}
+.seg-mode{display:flex;flex-wrap:wrap;gap:6px}
+.seg-mode button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 10px;font-size:13.5px;cursor:pointer;color:var(--ink)}
+.seg-mode button[aria-pressed="true"]{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.verx{width:100%;border-collapse:collapse;font-size:14px}
+.verx th,.verx td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.verx th{font-size:13px;color:var(--muted);font-weight:600;background:var(--code-bg)}
+.verx code{overflow-wrap:anywhere}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>网络</span><span aria-hidden="true">/</span><span class="tb-here">Netty：EventLoop、Pipeline、ByteBuf</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bk" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-cg" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-of" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-g2" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-pd" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-mut" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+
+<header class="hero">
+  <p class="kicker">EventLoopGroup · EventLoop · Channel · Selector · 任务队列 · ChannelPipeline · ChannelHandler · ChannelHandlerContext · 入站 / 出站 · ByteBuf · readerIndex / writerIndex · 引用计数 · 池化 · 堆外内存 · LengthFieldBasedFrameDecoder</p>
+  <h1>Netty：EventLoop、Pipeline、ByteBuf。一条连接一辈子归一个线程，字节沿一串处理器流过，缓冲区用完要自己还</h1>
+  <p class="lead">Netty 把 JDK NIO 里最容易写错的三件事做成了固定结构：<b>EventLoop</b> 是一个线程守着一个 Selector，连接一建好就终身绑在某个 EventLoop 上，所以一条连接上的事件不用加锁、天然有序；<b>Pipeline</b> 是每条连接一串处理器，入站从头走到尾，出站从尾走回头，拆帧、解码、业务、编码各占一格；<b>ByteBuf</b> 是读写两个下标的字节缓冲，默认在堆外、从池子里借，用引用计数决定什么时候还。精华是一句话：<b>EventLoop 线程只做快的事</b>。在它上面做一次 200 ms 的查库，同一个线程上的所有连接都陪着等 200 ms；借了 ByteBuf 不还，堆外内存一点点漏光，堆的监控却看不出来。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么学</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>老办法</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>选谁</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>跑起来</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j04-order-calls-inventory.html#s-6">订单服务调库存服务的一次 RPC · 第 6、8、9 站</a></span><span>地图：<a href="../java/roadmap.html#j04">J04 · Netty：EventLoop、Pipeline、ByteBuf</a></span><span>前置：<a href="io-models.html">网络 IO 模型</a>（Reactor）· <a href="tcp-handshake-timewait-framing.html">TCP 与粘包</a></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么学：gRPC 底下那一层，出事时你得看得懂</h2>
+    <p class="lead">在全景第 6 站，订单服务的下单线程不自己写 socket，而是把两个 HTTP/2 帧交给一个叫 <code>grpc-default-worker-ELG-3-2</code> 的线程；第 8 站，库存服务那边也是这样一个线程被 epoll 叫醒，拆帧、解码，第 9 站再切到业务线程扣库存。这些线程、这串处理器、装字节的缓冲区，都是 Netty。<b>gRPC Java、Dubbo、Spring WebFlux、Lettuce 和 Redisson（Redis 客户端），传输层都是它</b>。线上那几类怪问题：一个慢接口拖慢所有接口、堆外内存涨到被容器杀掉、偶发解析乱码，根子都在这三样东西上。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="左边订单服务：下单线程调用 stub.reserve，把要发的帧交给第 6 站的 EventLoop 线程，它编码进 ByteBuf，write 加 flush 交给内核。中间第 7 站 TCP 送过去一串没有边界的字节。右边库存服务：第 8 站 EventLoop 线程被 epoll 叫醒，沿 Pipeline 拆帧、解码，第 9 站交给业务线程池扣库存。">
+  <rect class="b-pd" x="20" y="30" width="300" height="250" rx="16" style="fill-opacity:.35"/>
+  <text class="t-h" x="40" y="58">订单服务</text>
+  <rect class="b-card" x="40" y="76" width="260" height="56" rx="10"/>
+  <text class="t-s" x="56" y="100">下单线程</text>
+  <text class="t-mono" x="56" y="120">stub.reserve(req)  阻塞等结果</text>
+  <line class="e-pd" x1="170" y1="132" x2="170" y2="170" marker-end="url(#ah-pd)"/>
+  <text class="t-xs" x="180" y="156">交出任务，不碰 socket</text>
+  <rect class="b-bk" x="40" y="176" width="260" height="84" rx="10"/>
+  <text class="t-bk" x="56" y="200">⑥ EventLoop 线程</text>
+  <text class="t-s" x="56" y="222">Pipeline 出站：编码成帧</text>
+  <text class="t-s" x="56" y="244">→ 放进 ByteBuf → write + flush</text>
+
+  <rect class="b-g2" x="640" y="30" width="300" height="250" rx="16" style="fill-opacity:.35"/>
+  <text class="t-h" x="660" y="58">库存服务</text>
+  <rect class="b-card" x="660" y="76" width="260" height="56" rx="10"/>
+  <text class="t-s" x="676" y="100">⑨ 业务线程池</text>
+  <text class="t-mono" x="676" y="120">扣库存（可能等行锁）</text>
+  <line class="e-g2" x1="790" y1="176" x2="790" y2="138" marker-end="url(#ah-g2)"/>
+  <text class="t-xs" x="800" y="160">慢活儿交出去</text>
+  <rect class="b-bk" x="660" y="176" width="260" height="84" rx="10"/>
+  <text class="t-bk" x="676" y="200">⑧ EventLoop 线程</text>
+  <text class="t-s" x="676" y="222">epoll 叫醒 → 读进 ByteBuf</text>
+  <text class="t-s" x="676" y="244">→ Pipeline 入站：拆帧、解码</text>
+
+  <line class="e-ink" x1="300" y1="218" x2="652" y2="218" marker-end="url(#ah-ink)"/>
+  <text class="t-s" x="476" y="206" text-anchor="middle">⑦ TCP：一串没有边界的字节</text>
+  <text class="t-monos" x="476" y="240" text-anchor="middle">…0000000c 08b74a 1058 1802 0000000c…</text>
+  <text class="t-cg" x="476" y="92" text-anchor="middle">谁来等 IO？→ EventLoop</text>
+  <text class="t-cg" x="476" y="116" text-anchor="middle">字节怎么变成一条条消息？→ Pipeline</text>
+  <text class="t-cg" x="476" y="140" text-anchor="middle">字节放在哪、谁来回收？→ ByteBuf</text>
+</svg>
+  </div>
+  <figcaption>全景第 6～9 站放大：两端各有 EventLoop 线程负责所有 IO，业务线程只在边上交接。中间三行就是这一页要回答的三个问题。</figcaption>
+  </figure>
+  <p class="tip">需求（假设场景，和全景一致）：工作里用 gRPC 调服务，平时不直接写 Netty；但要能看懂线程名、调对线程池、排查堆外内存，偶尔要给内部协议写一个 Netty 服务端。所以⑤给一个能抄的最小服务，⑥先讲最容易踩的两个坑。</p>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>老办法：BIO 撑不住连接数，手写 NIO 又处处是坑</h2>
+    <p class="lead"><a href="io-models.html">网络 IO 模型</a>那页已经推出来：连接多、大多在发呆时，该让一个线程用 epoll 守着成千上万条连接（Reactor）。JDK 从 1.4 就有 <code>Selector</code>，那为什么还要 Netty？把⑤那个“库存预占”服务用 JDK NIO 手写一遍就知道了。</p>
+  </div>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>老办法 A：一条连接一个线程（BIO）</h4>
+<pre>ServerSocket ss = new ServerSocket(9090);
+while (true) {
+  Socket s = ss.accept();
+  pool.submit(() -&gt; serve(s));   // 读、算、写都在这个线程
+}</pre>
+      <ul class="pains">
+        <li>写起来最简单，<code>readInt</code> + <code>readFully</code> 就把帧拆好了</li>
+        <li>线程大多数时间在等对方发数据。1 万条长连接就要 1 万个线程，每个栈 1 MB 起，切换也贵</li>
+        <li>gRPC、HTTP/2 都是长连接 + 多路复用，连接常驻，正好撞在这个短板上</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>老办法 B：直接用 JDK NIO 的 Selector</h4>
+<pre>while (true) {
+  sel.select();
+  Iterator&lt;SelectionKey&gt; it = sel.selectedKeys().iterator();
+  while (it.hasNext()) {
+    SelectionKey k = it.next(); it.remove();  // 忘了 remove 就重复处理
+    ByteBuffer buf = (ByteBuffer) k.attachment();
+    int n = ((SocketChannel) k.channel()).read(buf);
+    buf.flip();                      // 忘了 flip，一个字节都读不到
+    while (buf.remaining() &gt;= 4) { … 自己拼帧、处理半条 … }
+    buf.compact();
+    reserve(…);                      // 慢的业务也在这？整个 selector 停住
+    // 一次没写完：挂 OP_WRITE、自己排队，下次接着写
+  }
+}</pre>
+      <ul class="pains">
+        <li>粘包拆包自己拼，<code>ByteBuffer</code> 只有一个 <code>position</code>，读写切换靠 <code>flip</code> / <code>compact</code>，一错就是乱码</li>
+        <li>写不完要自己注册 <code>OP_WRITE</code>、维护待写队列；对方读得慢时这个队列还会无限长</li>
+        <li>线程怎么分：几个 Selector？业务放哪个线程？别的线程想往连接里写怎么办？全靠自己设计</li>
+        <li>还有 JDK 自己的坑：Linux 上 <code>select()</code> 偶尔没有事件也立刻返回（著名的 epoll 空轮询），CPU 打满。Netty 数到连续 512 次空转就重建 Selector 绕开它</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict" data-role="bad"><b>不懂精华时的典型误用：</b>把 Netty 当成“更快的 Socket”，在 <code>channelRead</code> 里直接查库、调别的服务、加锁等待。单测一条连接毫无问题，上线后一个慢请求就让同一个 EventLoop 上的几十条连接一起变慢。⑥ 坑 1 实测：一个 200 ms 的慢请求，把另一条连接上 0.1 ms 的快请求拖成了 <b>191 ms</b>。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>选谁：大多数时候你用的是“建在 Netty 上的东西”</h2>
+    <p class="lead">同样是“少量线程守很多连接”，Java 里有四条路。它们不是互相替代，而是一层叠一层。</p>
+  </div>
+  <div class="choose">
+    <div class="ch" data-role="other"><h4>手写 JDK NIO</h4><p>只有 <code>Selector</code>、<code>ByteBuffer</code>、<code>SocketChannel</code>，其余全自己写。</p><p class="use">适合：学原理、极简的单一用途工具。生产协议别这么干。</p></div>
+    <div class="ch pick" data-role="bk"><h4>Netty</h4><p>线程模型、处理器链、池化缓冲、几十种现成编解码器（长度帧、HTTP/1/2、WebSocket……），Linux 上还能换 epoll 本地传输。</p><p class="use">适合：自定义协议、网关、IM、写中间件的客户端或服务端。</p></div>
+    <div class="ch" data-role="other"><h4>Reactor Netty · Vert.x</h4><p>在 Netty 外面再包一层响应式或事件总线的编程模型。Spring WebFlux、Spring Cloud Gateway 用的是前者。</p><p class="use">适合：整个应用都愿意写成非阻塞风格。</p></div>
+    <div class="ch" data-role="other"><h4>gRPC · Dubbo · Tomcat NIO</h4><p>直接给你 RPC 或 Servlet。gRPC Java 和 Dubbo 的默认传输就是 Netty；Tomcat 的 NIO 连接器是自己写的同类结构。</p><p class="use">适合：写业务服务。出事时看到的线程和内存，仍是下面那层的。</p></div>
+  </div>
+  <p class="tip"><b>选择规则：</b>写业务调用，用 gRPC 或 Dubbo，不要自己拿 Netty 造 RPC；要做的东西本身就是“协议”或“网络组件”，用 Netty。无论哪种，都要懂 Netty 的三样东西，因为 gRPC 的线程名、慢调用、堆外内存问题，全是 Netty 层的现象。</p>
+  <p class="pick-line"><b>本页学 Netty 4.2</b>（4.2.19.Final，当前主线，最低 JDK 8）。和 4.1 的差别放到 ⑥ 第三圈，API 绝大部分相同。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：三样东西，各管一件事</h2>
+    <p class="lead">EventLoop 管“哪个线程干活”，Pipeline 管“字节经过哪些步骤”，ByteBuf 管“字节放在哪、什么时候还”。先看各自怎么工作，再看为什么非这样设计不可。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>Selector / epoll</b>：一个线程向内核登记“这些连接有数据了叫我”，然后一次等很多条连接。这就是 Reactor，<a href="io-models.html">网络 IO 模型</a>讲过。</li>
+      <li><b>TCP 是字节流</b>：一次 read 可能拿到半条或三条消息，要靠长度前缀切开。<a href="tcp-handshake-timewait-framing.html">TCP 与粘包</a>讲过。</li>
+      <li><b>堆外内存（direct memory）</b>：不在 Java 堆里、GC 不会挪动的内存。JDK 的 <code>ByteBuffer.allocateDirect</code> 就是它，上限由 <code>-XX:MaxDirectMemorySize</code> 管，不算进 <code>-Xmx</code>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-loop">④-1 EventLoop：一个线程、一个 Selector、一个任务队列，连接终身绑定</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 350" role="img" aria-label="bossGroup 的一个线程 accept 新连接，按轮询注册到 workerGroup 里的某个 EventLoop。每个 EventLoop 是一个线程加一个 Selector 加一个任务队列，循环做三件事：select 等事件，处理就绪连接的读写，跑任务队列。连接 A、B、C 终身归 EventLoop-1。业务线程调用 writeAndFlush 时，发现自己不是这条连接的 EventLoop 线程，就把写操作包成任务放进队列。">
+  <rect class="b-bk" x="20" y="50" width="180" height="96" rx="12"/>
+  <text class="t-bk" x="36" y="76">bossGroup（1 线程）</text>
+  <text class="t-s" x="36" y="100">只做 accept</text>
+  <text class="t-s" x="36" y="122">新连接交给 worker</text>
+  <path class="e-bk" d="M110 146 V296 H284" marker-end="url(#ah-bk)"/>
+  <text class="t-xs" x="34" y="186">注册：</text>
+  <text class="t-xs" x="34" y="202">group.next() 轮询</text>
+  <text class="t-xs" x="34" y="218">挑一个 EventLoop</text>
+
+  <rect class="b-dash" x="236" y="14" width="708" height="326" rx="16"/>
+  <text class="t-xs" x="256" y="34">workerGroup：默认 2 × CPU 核数 个 EventLoop（-Dio.netty.eventLoopThreads 可改）</text>
+
+  <rect class="b-bk" x="256" y="46" width="340" height="282" rx="14"/>
+  <text class="t-bk" x="276" y="72">EventLoop-1 = 1 个线程</text>
+  <text class="t-xs" x="276" y="90">+ 1 个 Selector + 1 个任务队列，永远在转这个圈</text>
+  <rect class="b-card" x="292" y="104" width="284" height="44" rx="8"/>
+  <text class="t-s" x="304" y="124">① select：等 IO 事件</text>
+  <text class="t-xs" x="304" y="140">有任务排着时不睡</text>
+  <rect class="b-card" x="292" y="160" width="284" height="44" rx="8"/>
+  <text class="t-s" x="304" y="180">② 处理就绪的连接</text>
+  <text class="t-xs" x="304" y="196">读进 ByteBuf，沿 Pipeline 跑处理器</text>
+  <rect class="b-card" x="292" y="216" width="284" height="44" rx="8"/>
+  <text class="t-s" x="304" y="236">③ 跑任务队列</text>
+  <text class="t-xs" x="304" y="252">别的线程交来的 write、定时任务</text>
+  <path class="e-bk" d="M292 238 H274 V126 H288" marker-end="url(#ah-bk)"/>
+  <rect class="b-card" x="292" y="280" width="84" height="28" rx="14"/>
+  <text class="t-s" x="334" y="299" text-anchor="middle">连接 A</text>
+  <rect class="b-card" x="384" y="280" width="84" height="28" rx="14"/>
+  <text class="t-s" x="426" y="299" text-anchor="middle">连接 B</text>
+  <rect class="b-card" x="476" y="280" width="84" height="28" rx="14"/>
+  <text class="t-s" x="518" y="299" text-anchor="middle">连接 C</text>
+  <text class="t-xs" x="292" y="322">这三条连接的所有事件，一辈子只由这个线程处理</text>
+
+  <rect class="b-bk" x="616" y="46" width="310" height="150" rx="14"/>
+  <text class="t-bk" x="636" y="72">EventLoop-2</text>
+  <text class="t-xs" x="636" y="90">另一个线程，同样的圈，管另一批连接</text>
+  <rect class="b-card" x="636" y="140" width="84" height="28" rx="14"/>
+  <text class="t-s" x="678" y="159" text-anchor="middle">连接 D</text>
+  <rect class="b-card" x="728" y="140" width="84" height="28" rx="14"/>
+  <text class="t-s" x="770" y="159" text-anchor="middle">连接 E</text>
+
+  <rect class="b-card" x="616" y="222" width="310" height="96" rx="12"/>
+  <text class="t-s" x="632" y="246">下单线程（不是 EventLoop）</text>
+  <text class="t-mono" x="632" y="268">chA.writeAndFlush(req)</text>
+  <text class="t-xs" x="632" y="290">inEventLoop()？否 → 包成任务，</text>
+  <text class="t-xs" x="632" y="306">放进 EventLoop-1 的队列，立刻返回 Future</text>
+  <path class="e-pd" d="M616 250 H582" marker-end="url(#ah-pd)"/>
+</svg>
+  </div>
+  <figcaption>连接一建好就注册到某个 EventLoop，之后读、写、关闭、定时任务全在这个线程上发生。别的线程想写，只能“投递”一个任务，由它在第 ③ 步顺手执行。这就是全景第 6 站看到的：帧日志每一行都出自 <code>grpc-default-worker-ELG-3-2</code>，不是下单线程。</figcaption>
+  </figure>
+
+  <h3 id="m-pipe">④-2 Pipeline：每条连接一串处理器，入站往尾走，出站往头走</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 310" role="img" aria-label="⑤ 里库存服务的 Pipeline：head、frame（入站，拆帧）、prepender（出站，补长度）、reserve（入站，业务）、tail。入站事件从 head 往 tail 走，只经过入站处理器，跳过 prepender。reserve 调 ctx.writeAndFlush，出站事件从 reserve 所在位置往 head 走，只经过出站处理器 prepender，最后 head 调 socket 写。如果调 channel.writeAndFlush，则从 tail 开始往 head 走。">
+  <text class="t-cg" x="40" y="40">入站 channelRead：head → tail，只停在入站处理器上</text>
+  <path class="e-cg" d="M80 92 H246" marker-end="url(#ah-cg)"/>
+  <path class="e-cg" d="M262 92 C 380 54, 560 54, 664 92" marker-end="url(#ah-cg)"/>
+  <text class="t-xs" x="465" y="68" text-anchor="middle">跳过出站处理器</text>
+  <path class="e-cg" d="M680 92 H862" marker-end="url(#ah-cg)" style="stroke-dasharray:6 4"/>
+  <text class="t-xs" x="772" y="84" text-anchor="middle">没人接的消息</text>
+
+  <rect class="b-neu" x="20" y="106" width="120" height="76" rx="12"/>
+  <text class="t-h" x="80" y="136" text-anchor="middle">head</text>
+  <text class="t-xs" x="80" y="156" text-anchor="middle">连着 socket</text>
+  <text class="t-xs" x="80" y="171" text-anchor="middle">读进来、写出去</text>
+
+  <rect class="b-cg" x="170" y="106" width="180" height="76" rx="12"/>
+  <text class="t-cg" x="186" y="130">入站 · frame</text>
+  <text class="t-monos" x="186" y="150">LengthFieldBased-</text>
+  <text class="t-monos" x="186" y="166">FrameDecoder：切出整帧</text>
+
+  <rect class="b-cg" x="380" y="106" width="180" height="76" rx="12" style="stroke-dasharray:6 4"/>
+  <text class="t-cg" x="396" y="130">出站 · prepender</text>
+  <text class="t-monos" x="396" y="150">LengthFieldPrepender</text>
+  <text class="t-monos" x="396" y="166">补上 4 字节长度</text>
+
+  <rect class="b-cg" x="590" y="106" width="180" height="76" rx="12"/>
+  <text class="t-cg" x="606" y="130">入站 · reserve</text>
+  <text class="t-monos" x="606" y="150">ReserveHandler</text>
+  <text class="t-monos" x="606" y="166">扣库存，写响应</text>
+
+  <rect class="b-neu" x="800" y="106" width="140" height="76" rx="12"/>
+  <text class="t-h" x="870" y="136" text-anchor="middle">tail</text>
+  <text class="t-xs" x="870" y="156" text-anchor="middle">释放没人处理的</text>
+  <text class="t-xs" x="870" y="171" text-anchor="middle">消息，打 debug 日志</text>
+
+  <path class="e-of" d="M680 182 V214 H470 V198" />
+  <path class="e-of" d="M470 214 H80 V192" marker-end="url(#ah-of)"/>
+  <circle class="f-of" cx="470" cy="214" r="5"/>
+  <text class="t-of" x="690" y="208">ctx.writeAndFlush(resp)</text>
+  <text class="t-xs" x="480" y="234">出站：从 reserve 当前位置往 head 走，只停在出站处理器上</text>
+
+  <path class="e-mut" d="M870 182 V266 H80 V196" style="stroke-dasharray:6 4" marker-end="url(#ah-mut)"/>
+  <text class="t-xs" x="880" y="262" text-anchor="end">ch.writeAndFlush(x)：从 tail 开始，经过全部出站处理器</text>
+  <text class="t-s" x="20" y="296">每条连接在 initChannel 里 new 出自己的一串处理器；处理器之间用 ctx.fireXxx（入站）和 ctx.write（出站）把事件交给下一个。</text>
+</svg>
+  </div>
+  <figcaption>这就是 ⑤ 里库存服务的那条 Pipeline。处理器分两种：入站的（<code>ChannelInboundHandler</code>）处理“读到了、连上了、断开了”，出站的（<code>ChannelOutboundHandler</code>）处理“要写、要关”。位置决定谁能看到谁：<code>prepender</code> 必须放在 <code>reserve</code> 前面（更靠 head），因为 <code>ctx.write</code> 只往 head 方向找。</figcaption>
+  </figure>
+
+  <h3 id="m-buf">④-3 ByteBuf：两个下标，引用计数，从池子借</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="ByteBuf 有两个下标：readerIndex 和 writerIndex，把缓冲分成已读可丢弃、可读、可写三段，读和写各推各的下标，不用像 ByteBuffer 那样 flip。下面是引用计数的一生：从池子借出时 refCnt 是 1，retain 加一，release 减一，减到 0 时还回池子；如果没人 release，GC 只回收外面的壳，池里那块内存永远借出不还。">
+  <text class="t-of" x="40" y="30">readXxx() 推 readerIndex →</text>
+  <text class="t-of" x="560" y="30">writeXxx() 推 writerIndex →</text>
+  <rect class="b-neu" x="40" y="44" width="200" height="46" rx="6"/>
+  <text class="t-s" x="140" y="72" text-anchor="middle">已读，可丢弃</text>
+  <rect class="b-of" x="240" y="44" width="380" height="46" rx="0"/>
+  <text class="t-s" x="430" y="66" text-anchor="middle">可读 readableBytes()</text>
+  <text class="t-monos" x="430" y="82" text-anchor="middle">⑤ 的一帧：readLong(sku) + readInt(count)</text>
+  <rect class="b-card" x="620" y="44" width="300" height="46" rx="6"/>
+  <text class="t-s" x="770" y="72" text-anchor="middle">可写 writableBytes()</text>
+  <g class="t-monos">
+    <text x="40" y="108" text-anchor="middle">0</text>
+    <text x="240" y="108" text-anchor="middle">readerIndex</text>
+    <text x="620" y="108" text-anchor="middle">writerIndex</text>
+    <text x="920" y="108" text-anchor="middle">capacity</text>
+  </g>
+  <text class="t-xs" x="40" y="134">对比 JDK 的 ByteBuffer：只有一个 position，写完要 flip() 才能读、读完要 compact() 才能接着写，忘一次就读错。</text>
+
+  <rect class="b-of" x="20" y="160" width="200" height="66" rx="10"/>
+  <text class="t-s" x="34" y="184">alloc.buffer()</text>
+  <text class="t-xs" x="34" y="204">从池子借一块</text>
+  <text class="t-of" x="34" y="220">refCnt = 1</text>
+  <rect class="b-of" x="260" y="160" width="200" height="66" rx="10"/>
+  <text class="t-s" x="274" y="184">retain()</text>
+  <text class="t-xs" x="274" y="204">多一个持有者</text>
+  <text class="t-of" x="274" y="220">refCnt = 2</text>
+  <rect class="b-of" x="500" y="160" width="200" height="66" rx="10"/>
+  <text class="t-s" x="514" y="184">release()</text>
+  <text class="t-xs" x="514" y="204">一个持有者用完</text>
+  <text class="t-of" x="514" y="220">refCnt = 1</text>
+  <rect class="b-good" x="740" y="160" width="200" height="66" rx="10"/>
+  <text class="t-s" x="754" y="184">release()</text>
+  <text class="t-xs" x="754" y="204">最后一个用完</text>
+  <text class="t-good" x="754" y="220">refCnt = 0 → 还回池子</text>
+  <line class="e-of" x1="220" y1="193" x2="256" y2="193" marker-end="url(#ah-of)"/>
+  <line class="e-of" x1="460" y1="193" x2="496" y2="193" marker-end="url(#ah-of)"/>
+  <line class="e-of" x1="700" y1="193" x2="736" y2="193" marker-end="url(#ah-of)"/>
+  <rect class="b-bad" x="260" y="242" width="680" height="44" rx="10"/>
+  <text class="t-bad" x="276" y="262">没人 release：GC 回收的只是 Java 里那个小对象，池子里那块堆外内存永远“借出中”</text>
+  <text class="t-xs" x="276" y="279">堆的监控一切正常，进程的总内存一直涨（⑥ 坑 2 实测：每 2000 条 1 KB 消息涨 2 MB）</text>
+</svg>
+  </div>
+  <figcaption>规则只有一句：<b>最后一个用它的人负责 release</b>。入站消息交给下一个处理器（<code>ctx.fireChannelRead(msg)</code>），责任就跟着交出去；自己消化了，就自己 release。<code>SimpleChannelInboundHandler</code> 在 <code>channelRead0</code> 返回后替你 release；走到 tail 都没人处理的消息，tail 也会 release。出站时把 ByteBuf 交给 <code>write</code>，写完由 Netty release。</figcaption>
+  </figure>
+
+  <h3 id="m-why">④-4 为什么这样设计</h3>
+  <div class="design">
+    <div class="way" data-role="bk">
+      <h4>选中：一条连接终身一个线程</h4>
+      <ul class="pains">
+        <li class="ok">解码器要在两次读之间记住“半条消息”。只有一个线程碰它，不用加锁</li>
+        <li class="ok">同一条连接上的事件严格按到达顺序处理，响应不会乱序</li>
+        <li class="ok">线程数固定（2 × 核），不随连接数涨；数据一直在同一个核的缓存里</li>
+        <li>代价：这个线程上任何一次慢操作，同一线程上的所有连接一起等。所以“EventLoop 只做快的事”是这个设计的使用条件</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>放弃：每个 IO 事件扔进一个线程池</h4>
+      <ul class="pains">
+        <li>连接 A 的第 1 次读和第 2 次读可能落在两个线程上，同时改同一份半包缓存，必须加锁</li>
+        <li>第 2 个帧可能比第 1 个先处理完，响应顺序乱掉，协议得自己再排序</li>
+        <li>每个事件都要跨线程交接一次，锁竞争和上下文切换吃掉大部分收益</li>
+        <li>好处只有一个：慢处理器不会挡住别人。Netty 让你按需把“慢的那一格”单独挪走（⑥ 坑 1），而不是让所有处理器都付这个代价</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict" data-role="bk"><b>决定胜负的约束：</b>协议解码是<b>有状态</b>的（半包），而且<b>要有序</b>。有状态加有序，最便宜的做法就是同一时刻只有一个线程碰它，于是一条连接归一个线程。</p>
+  <div class="design">
+    <div class="way" data-role="of">
+      <h4>选中：池化的堆外缓冲 + 引用计数</h4>
+      <ul class="pains">
+        <li class="ok">内核读写 socket 要一个不会被 GC 挪动的地址。堆外内存直接给它，省掉一次拷贝</li>
+        <li class="ok">堆外内存申请、释放都慢，所以从池子里借、用完还，热路径上几乎不分配</li>
+        <li class="ok">还的时机由 release 精确决定，不等 GC。高吞吐下 GC 什么时候来根本没法指望</li>
+        <li>代价：内存管理回到了“手动”时代，漏一次 release 就漏一块（⑥ 坑 2）</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>放弃：每次 new byte[]，交给 GC</h4>
+      <ul class="pains">
+        <li>JDK 往 socket 写堆内数组时，要先把它拷进一块临时的堆外缓冲（GC 随时可能挪动堆对象）</li>
+        <li>每秒几十万条消息，就是每秒几十万个短命数组，年轻代 GC 更频繁</li>
+        <li>好处是不会漏。Netty 也保留了这条路：<code>-Dio.netty.allocator.type=unpooled</code>、或 <code>Unpooled.buffer()</code> 分配堆内缓冲</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 id="m-api">④-5 最少的 API</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">Netty 4.2 服务端骨架</span><b>JDK 8+</b><span class="tip" style="margin-left:auto">线程数、水位线、分配器放到 ⑥</span></div>
+<pre><code>EventLoopGroup boss    = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+EventLoopGroup workers = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory()); <span class="cm">// 默认 2 × 核</span>
+new ServerBootstrap()
+    .group(boss, workers)
+    .channel(NioServerSocketChannel.class)
+    .childHandler(new ChannelInitializer&lt;SocketChannel&gt;() {   <span class="cm">// 每条新连接调一次</span>
+        protected void initChannel(SocketChannel ch) {
+            ch.pipeline()
+              .addLast(new LengthFieldBasedFrameDecoder(1024, 0, 4, 0, 4)) <span class="cm">// 入站：拆帧</span>
+              .addLast(new LengthFieldPrepender(4))                       <span class="cm">// 出站：补长度</span>
+              .addLast(new ReserveHandler());                             <span class="cm">// 入站：业务</span>
+        }
+    })
+    .bind(9090).sync();
+<span class="cm">// 处理器：继承 SimpleChannelInboundHandler&lt;ByteBuf&gt;，实现 channelRead0，读完自动 release</span>
+<span class="cm">// 写响应：ctx.writeAndFlush(ctx.alloc().buffer().writeByte(1).writeInt(left));</span></code></pre>
+  </div>
+  <p class="tip">4.1 的写法是 <code>new NioEventLoopGroup()</code>，在 4.2 里还能用，只是标了 <code>@Deprecated</code>；网上大多数例子还是这种写法，看到别慌。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>跑起来：一个能用的库存预占服务</h2>
+    <p class="lead">协议照着全景里 gRPC 的思路简化：每帧 4 字节长度 + 内容；请求是 <code>skuId(long) + count(int)</code>，响应是 <code>ok(byte) + 剩余库存(int)</code>。客户端<b>故意把 3 个请求塞进一次 write</b>，看服务端能不能切开；顺便把每一行是哪个线程打的印出来。</p>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">pom.xml</span><b>Netty 4.2.19 · JDK 8+</b></div>
+<pre><code>&lt;dependency&gt;
+  &lt;groupId&gt;io.netty&lt;/groupId&gt;
+  &lt;artifactId&gt;netty-codec-base&lt;/artifactId&gt;   <span class="cm">&lt;!-- 带上 transport、buffer、common；长度帧编解码器在这里 --&gt;</span>
+  &lt;version&gt;4.2.19.Final&lt;/version&gt;
+&lt;/dependency&gt;</code></pre>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">InventoryNetty.java（节选：服务端处理器 + 客户端发请求）</span><a href="https://github.com/archeu/study-labs/tree/main/java/network/netty-eventloop-pipeline-bytebuf" style="margin-left:auto">完整代码 →</a></div>
+<pre><code><span class="cm">// 服务端 Pipeline 见 ④-5：frame → prepender → reserve。worker 线程 2 个。</span>
+static class ReserveHandler extends SimpleChannelInboundHandler&lt;ByteBuf&gt; {
+    public void channelActive(ChannelHandlerContext ctx) {
+        log("reserve", "新连接 " + ctx.channel().remoteAddress() + " 绑定到这个线程");
+    }
+    protected void channelRead0(ChannelHandlerContext ctx, ByteBuf frame) {  <span class="cm">// frame 已去掉长度头</span>
+        log("reserve", "readerIndex=" + frame.readerIndex() + " writerIndex=" + frame.writerIndex());
+        long sku = frame.readLong();
+        int count = frame.readInt();
+        boolean[] hit = {false};                     <span class="cm">// 多条连接可能在不同 worker 上，扣减要原子</span>
+        int left = STOCK.compute(sku, (k, v) -&gt; {
+            int cur = v == null ? 0 : v;
+            if (cur &gt;= count) { hit[0] = true; return cur - count; }
+            return cur;
+        });
+        log("reserve", "预占 sku=" + sku + " x" + count + " → " + (hit[0] ? "成功" : "库存不够"));
+        ctx.writeAndFlush(ctx.alloc().buffer(5).writeByte(hit[0] ? 1 : 0).writeInt(left));
+    }                                                <span class="cm">// 返回后父类 release(frame)</span>
+}
+
+<span class="cm">// 客户端（订单服务）：库存 5 件，连发 3 个“预占 2 件”，塞进同一个 ByteBuf 一次写出</span>
+ByteBuf out = ch.alloc().buffer();
+for (int count : new int[]{2, 2, 2}) out.writeInt(12).writeLong(88L).writeInt(count);
+ch.writeAndFlush(out);    <span class="cm">// main 线程调用 → 变成任务交给这条连接的 EventLoop</span></code></pre>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">运行</span><b>JDK 17（按 JDK 8 编译）</b></div>
+<pre><code>cd study-labs/java
+mvn -q -pl network/netty-eventloop-pipeline-bytebuf compile exec:java \
+  -Dexec.mainClass=labs.network.netty_eventloop_pipeline_bytebuf.InventoryNetty</code></pre>
+  </div>
+  <p class="tip"><span class="tag-real">实测</span> 本机 2 核 ARM，JDK 17.0.20，Netty 4.2.19，原样输出（第一列是线程名）：</p>
+<pre class="console">main                       main     库存服务监听 9090，worker 线程数 2
+<b>multiThreadIoEventLoopGroup-3-1</b> reserve  新连接 /127.0.0.1:47758 绑定到这个线程
+main                       main     一次写出 <b>48 字节（3 个请求）</b>，AdaptiveByteBuf direct=true
+<b>multiThreadIoEventLoopGroup-3-1</b> reserve  readerIndex=0 writerIndex=<b>12</b>
+<b>multiThreadIoEventLoopGroup-3-1</b> reserve  预占 sku=88 x2 → 成功
+<b>multiThreadIoEventLoopGroup-3-1</b> reserve  readerIndex=0 writerIndex=<b>12</b>
+<b>multiThreadIoEventLoopGroup-3-1</b> reserve  预占 sku=88 x2 → 成功
+<b>multiThreadIoEventLoopGroup-3-1</b> reserve  readerIndex=0 writerIndex=<b>12</b>
+<span class="w">multiThreadIoEventLoopGroup-4-1 client   收到响应 ok=true 剩余=3</span>
+<span class="w">multiThreadIoEventLoopGroup-4-1 client   收到响应 ok=true 剩余=1</span>
+<b>multiThreadIoEventLoopGroup-3-1</b> reserve  预占 sku=88 x2 → <span class="r">库存不够</span>
+<span class="w">multiThreadIoEventLoopGroup-4-1 client   收到响应 ok=false 剩余=1</span></pre>
+  <p class="tip"><b>看三件事。</b>① 线程：这条连接的所有事件都在 <code>-3-1</code> 上（④-1 终身绑定），客户端的回调全在自己的 <code>-4-1</code> 上，main 线程只负责交任务。② 拆帧：48 字节一次到达，<code>LengthFieldBasedFrameDecoder</code> 切成 3 帧，每帧去掉长度头后正好 12 字节（④-2）。③ ByteBuf：默认分配器在 4.2 是 <code>AdaptiveByteBufAllocator</code>，给的是堆外缓冲（④-3）。</p>
+  <div class="two">
+    <div class="pit" style="border-left-color:var(--good)"><b><em>到这里</em>已经能交差了</b><p class="tip">一个能处理粘包、能并发接多条连接、内存会自动归还的 TCP 服务。内部协议的小服务，照这个骨架换掉 <code>ReserveHandler</code> 就能用。</p></div>
+    <div class="pit" style="border-left-color:var(--warn)"><b><em>还没处理</em>的细节</b><p class="tip">扣库存要是改成查数据库，会卡住 EventLoop（<a href="#p-block">坑 1</a>）；自己继承 <code>ChannelInboundHandlerAdapter</code> 时谁来 release（<a href="#p-leak">坑 2</a>）；对方读得慢时写出去的数据堆在哪（<a href="#p-water">坑 5</a>）；连接空闲多久算死（<a href="#p-idle">坑 6</a>）；进程退出时怎么关（规范）。</p></div>
+  </div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：线程别堵、内存要还、帧要切</h2>
+    <p class="lead">每个坑旁边的徽标指回 ④ 里推出它的那条原理。标“实测”的是本机跑过的，代码在 study-labs 同一个目录里。</p>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-block"><b><em>坑 1</em>一个慢接口，把同一台机器上的其他接口全拖慢<a class="root" href="#m-loop">← ④-1 连接终身绑一个线程</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>监控里某个接口慢（查库 200 ms），奇怪的是几个本该 1 ms 的接口也时不时 200 ms，而且只有部分连接受影响。<code>BlockingEventLoop</code>：1 个 worker，A 连接发慢请求、10 ms 后 B 连接发快请求，B 的往返中位数 <b>191 ms</b>。</dd>
+      <dt>根源</dt><dd>处理器默认跑在 EventLoop 线程上。它在 sleep、等锁、查库时，这个线程上所有连接的读写都停着。</dd>
+      <dt>做法</dt><dd class="fix">慢的处理器单独放到业务线程上：<code>pipeline.addLast(bizGroup, "biz", handler)</code>（<code>bizGroup = new DefaultEventExecutorGroup(16)</code>），或在 <code>channelRead0</code> 里 <code>pool.submit(...)</code>，做完在业务线程直接 <code>ctx.writeAndFlush</code>（Netty 会转交回 EventLoop）。同一实验改成 <code>offload</code>：B 的中位数 <b>1 ms</b>。gRPC 默认就把服务方法放到另一个线程池里跑，这就是全景第 9 站。</dd></dl></div>
+    <div class="pit" id="p-leak"><b><em>坑 2</em>堆监控很平，进程内存一直涨，最后被容器杀掉<a class="root" href="#m-buf">← ④-3 引用计数</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd><code>LeakDemo leak</code>：处理器继承 <code>ChannelInboundHandlerAdapter</code>，读完不 release。每收 2000 条 1 KB 消息，分配器的堆外用量涨 2 MB（2,048 → 10,112 KB）；GC 之后日志里出现 <code>LEAK: ByteBuf.release() was not called before it's garbage-collected</code>，带最后几次访问的调用栈。</dd>
+      <dt>根源</dt><dd>池化的堆外缓冲靠 refCnt 归零才还回池子。GC 只回收外面的小对象，池里那块一直“借出中”；它也不在堆里，堆的监控看不见。</dd>
+      <dt>做法</dt><dd class="fix">入站处理器继承 <code>SimpleChannelInboundHandler</code>（<code>fixed</code> 模式：一直是 128 KB），或在 <code>finally</code> 里 <code>ReferenceCountUtil.release(msg)</code>；要往后传就 <code>ctx.fireChannelRead(msg)</code>，两者只能选一个。测试环境开 <code>-Dio.netty.leakDetection.level=paranoid</code>；生产默认 <code>SIMPLE</code>，每 128 个缓冲抽 1 个跟踪，漏得多迟早会报。容器内存为什么只看进程总数，见 <a href="../jvm/jvm-container.html">JVM 在容器里</a>。</dd></dl></div>
+    <div class="pit" id="p-frame"><b><em>坑 3</em>压测时偶发解析乱码，或者一个请求让服务端分配几百 MB<a class="root" href="#m-pipe">← ④-2 第一格是拆帧</a><span class="seen">按源码</span></b>
+      <dl><dt>现象</dt><dd>本地一切正常，压测时业务处理器偶尔拿到半条或两条拼在一起的数据；或者对端发错一个长度字段，服务端尝试攒满 2 GB。</dd>
+      <dt>根源</dt><dd>EventLoop 每次 read 拿到的只是 TCP 字节流的一段（<a href="tcp-handshake-timewait-framing.html#p-stick">TCP 坑 1</a>）。Pipeline 第一格不是拆帧器，后面每一格都在处理“随机切开的字节”。</dd>
+      <dt>做法</dt><dd class="fix">第一格放 <code>LengthFieldBasedFrameDecoder</code>（或行分隔、HTTP/2 等现成解码器），<code>maxFrameLength</code> 按协议上限设小，超了它会抛 <code>TooLongFrameException</code> 并丢弃这一帧。⑤ 里设的是 1024。</dd></dl></div>
+    <div class="pit" id="p-order"><b><em>坑 4</em>写了响应，对面什么都没收到，日志里也没有异常<a class="root" href="#m-pipe">← ④-2 出站只往 head 走</a><span class="seen">按源码</span></b>
+      <dl><dt>现象</dt><dd>在业务处理器里 <code>ctx.write(pojo)</code>，客户端一直等到超时；服务端没有任何报错。</dd>
+      <dt>根源</dt><dd><code>ctx.write</code> 只经过当前位置到 head 之间的出站处理器。编码器排在业务处理器后面（更靠 tail），就根本没经过它；对象一路到 head，被拒成 <code>unsupported message type</code>。这个失败记在返回的 <code>ChannelFuture</code> 上，没人看就没人知道。</dd>
+      <dt>做法</dt><dd class="fix">编码器放在业务处理器前面；不确定时用 <code>ctx.channel().writeAndFlush</code>（从 tail 走全程）。开发期给写操作挂 <code>addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE)</code>，让失败进入 <code>exceptionCaught</code>。</dd></dl></div>
+    <div class="pit" id="p-water"><b><em>坑 5</em>对方读得慢，这边的堆外内存被写出缓冲撑爆<a class="root" href="#m-loop">← ④-1 write 只是入队</a><span class="seen">按源码</span></b>
+      <dl><dt>现象</dt><dd>推送、下载、网关这类“写多读少”的服务，某个慢客户端连上来后内存直线上涨。</dd>
+      <dt>根源</dt><dd><code>write</code> 只是把 ByteBuf 放进这条连接的出站缓冲（<code>ChannelOutboundBuffer</code>），内核发送缓冲满了就一直堆在 Netty 这边，没有上限。</dd>
+      <dt>做法</dt><dd class="fix">写之前看 <code>channel.isWritable()</code>；出站缓冲超过高水位（默认 64 KB）它变成 false，降到低水位（32 KB）以下变回 true 并触发 <code>channelWritabilityChanged</code>，在那里继续写。水位线用 <code>WRITE_BUFFER_WATER_MARK</code> 调。</dd></dl></div>
+    <div class="pit" id="p-idle"><b><em>坑 6</em>长连接放了一夜，第二天第一个请求卡到超时<a class="root env" href="tcp-handshake-timewait-framing.html#p-dead">← TCP 坑 5</a><span class="seen">按文档</span></b>
+      <dl><dt>现象</dt><dd>中间的 NAT、负载均衡器悄悄清掉了空闲连接，两端的 EventLoop 都没收到任何事件。</dd>
+      <dt>根源</dt><dd>不是 Netty 的机制问题：连接只是两端内核的账，没有包就没有事件，EventLoop 也就不会被叫醒。</dd>
+      <dt>做法</dt><dd class="fix">Pipeline 里加 <code>IdleStateHandler(读空闲, 写空闲, 全空闲)</code>（在 <code>netty-handler</code> 里），在 <code>userEventTriggered</code> 收到空闲事件时发心跳或关掉连接。gRPC 对应的是 keepalive 参数，全景第 3 站讲过默认是关的。</dd></dl></div>
+  </div>
+
+  <h3 id="lab">实验台：慢请求到底堵住了谁</h3>
+  <div class="lab" data-role="bk" id="eb">
+    <p class="tip">模型：<code>C</code> 条连接按轮询绑到 <code>E</code> 个 EventLoop；前 <code>k</code> 条连接在 0 ms 各发一个慢请求（处理器阻塞 <code>S</code> ms），其余每条在 10 ms 发一个 0.1 ms 的快请求，另加 0.5 ms 往返。业务处理器放在哪，有三种选法。数字是模拟，第一个预设对上了坑 1 的实测（191 ms / 1 ms）。</p>
+    <div class="presets" role="group" aria-label="预设">
+      <button type="button" data-p="real" aria-pressed="false"><b>实测复现</b><span>1 个 EventLoop，A 慢 B 快</span></button>
+      <button type="button" data-p="one" aria-pressed="true"><b>一个慢连接</b><span>4 个 EventLoop，100 条连接</span></button>
+      <button type="button" data-p="many" aria-pressed="false"><b>慢连接变多</b><span>20 条慢，业务组 16 线程</span></button>
+      <button type="button" data-p="pool" aria-pressed="false"><b>换成线程池</b><span>同上，共享 16 线程的池</span></button>
+    </div>
+    <div class="guess" id="eb-guess">
+      <p>先猜：4 个 EventLoop、100 条连接，只有 1 条连接发了 200 ms 的慢请求，业务直接跑在 EventLoop 上。另外 99 个快请求里，有多少个被拖到 50 ms 以上？</p>
+      <div class="opts">
+        <button type="button" data-g="0" aria-pressed="false">0 个，慢的只是那一条</button>
+        <button type="button" data-g="24" aria-pressed="false">约 1/4，二十几个</button>
+        <button type="button" data-g="99" aria-pressed="false">全部 99 个</button>
+      </div>
+      <p class="res" id="eb-gres" hidden></p>
+    </div>
+    <div class="ctl-grid">
+      <label class="ctl"><span class="lbl">EventLoop 数 E<output id="o-E">4</output></span><input type="range" id="i-E" min="1" max="16" value="4"></label>
+      <label class="ctl"><span class="lbl">连接数 C<output id="o-C">100</output></span><input type="range" id="i-C" min="2" max="200" value="100"></label>
+      <label class="ctl"><span class="lbl">慢连接数 k<output id="o-k">1</output></span><input type="range" id="i-k" min="0" max="50" value="1"></label>
+      <label class="ctl"><span class="lbl">慢请求耗时 S（ms）<output id="o-S">200</output></span><input type="range" id="i-S" min="10" max="1000" step="10" value="200"></label>
+      <label class="ctl"><span class="lbl">业务线程数 B<output id="o-B">16</output></span><input type="range" id="i-B" min="1" max="64" value="16"></label>
+      <div class="ctl"><span class="lbl">业务处理器放在哪</span>
+        <div class="seg-mode" role="group" aria-label="业务处理器放在哪">
+          <button type="button" data-m="inline" aria-pressed="true">EventLoop 上</button>
+          <button type="button" data-m="group" aria-pressed="false">addLast(组, h)</button>
+          <button type="button" data-m="pool" aria-pressed="false">自己的线程池</button>
+        </div>
+      </div>
+    </div>
+    <div class="run-row"><button class="btn primary" type="button" id="eb-run">运行</button><p class="tip" id="eb-hint">先选一个答案再运行，也可以直接改参数。</p></div>
+    <div class="tiles">
+      <div class="tile" data-role="bk"><small>快请求 p50</small><b id="t-p50">–</b><span id="t-n"></span></div>
+      <div class="tile" data-role="bk"><small>最慢的快请求</small><b id="t-max">–</b><span>被谁挡住就等多久</span></div>
+      <div class="tile" data-role="bad"><small>被拖到 50 ms 以上</small><b id="t-hurt">–</b><span id="t-hurtp"></span></div>
+      <div class="tile" data-role="other"><small>车道（线程）</small><b id="t-lanes">–</b><span id="t-lanek"></span></div>
+    </div>
+    <div class="lanes" id="eb-lanes" aria-label="每个线程的忙碌时段：红色是慢请求占着的时间，绿色竖线是快请求到达的 10 ms"></div>
+    <p class="lab-res" id="eb-res" data-role="bk"></p>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>Pipeline 第一格永远是拆帧器，并设 <code>maxFrameLength</code></b><p class="guard">粘包拆包，以及一个错长度字段让服务端攒几百 MB（坑 3）</p></div>
+    <div class="rl"><b>入站处理器默认继承 <code>SimpleChannelInboundHandler</code>；要往后传就 <code>fireChannelRead</code>，不传就 release，二选一</b><p class="guard">堆外内存泄漏（坑 2），以及 release 两次的 <code>IllegalReferenceCountException</code></p></div>
+    <div class="rl"><b>查库、调别的服务、等锁、同步写日志，都不进 EventLoop；业务线程写回时直接 <code>ctx.writeAndFlush</code></b><p class="guard">一个慢请求拖慢一个线程上的所有连接（坑 1）</p></div>
+    <div class="rl"><b>不在 EventLoop 线程里调 <code>sync()</code> / <code>await()</code></b><p class="guard">自己等自己：Netty 直接抛 <code>BlockingOperationException</code>，否则就是死锁</p></div>
+    <div class="rl"><b>处理器每条连接 <code>new</code> 一个；要共享同一个实例，必须无状态并标 <code>@Sharable</code></b><p class="guard">多条连接串用同一份半包状态；没标就复用会报 <code>is not a @Sharable handler</code></p></div>
+    <div class="rl"><b>给线程组起名：<code>new MultiThreadIoEventLoopGroup(0, new DefaultThreadFactory("inv-io"), …)</code></b><p class="guard">线程 dump 里一屏 <code>multiThreadIoEventLoopGroup-3-1</code>，分不清是哪个组件的</p></div>
+    <div class="rl"><b>测试和预发环境开 <code>-Dio.netty.leakDetection.level=paranoid</code></b><p class="guard">泄漏在上线前就被 LEAK 日志抓到，而不是靠容器 OOM 发现</p></div>
+    <div class="rl"><b>进程退出时对每个 group 调 <code>shutdownGracefully()</code>（默认静默 2 s、最多等 15 s）</b><p class="guard">在途的请求和还没写出去的响应被直接丢掉</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>优化和深处</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="bk">
+      <h4>线程数为什么默认 2 × 核，连接为什么会“偏科”</h4>
+      <ul>
+        <li>EventLoop 本该几乎不阻塞，理论上核数个就够；默认翻倍（<code>MultithreadEventLoopGroup</code>，可用 <code>-Dio.netty.eventLoopThreads</code> 改）是给偶发的短停顿留余量。</li>
+        <li>新连接靠 <code>group.next()</code> 分配：线程数是 2 的幂时用位与（<code>idx &amp; (n-1)</code>），否则取模，都是<b>注册时的轮询</b>，不看负载。</li>
+        <li>所以长连接少、流量不均时（比如只有 3 条 gRPC 连接，其中一条特别忙），可能出现一个 EventLoop 打满、其他空闲，而且之后不会自动迁移。解决办法在上层：多建几条连接，或让客户端做连接级负载均衡。</li>
+      </ul>
+    </div>
+    <div class="dp" data-role="of">
+      <h4>4.1 → 4.2 改了什么</h4>
+      <div class="tbl-wrap">
+      <table class="verx">
+        <thead><tr><th>项</th><th>4.1</th><th>4.2</th></tr></thead>
+        <tbody>
+          <tr><td>建线程组</td><td><code>NioEventLoopGroup</code></td><td><code>MultiThreadIoEventLoopGroup</code> + <code>NioIoHandler</code>；旧类还在，标 <code>@Deprecated</code></td></tr>
+          <tr><td>默认分配器</td><td><code>pooled</code>（PooledByteBufAllocator）</td><td><code>adaptive</code>（AdaptiveByteBufAllocator）；<code>-Dio.netty.allocator.type=pooled</code> 换回</td></tr>
+          <tr><td>编解码模块</td><td>一个 <code>netty-codec</code></td><td>拆成 <code>netty-codec-base</code>、<code>-compression</code>、<code>-protobuf</code> 等；<code>netty-codec</code> 仍在，依赖这些子模块</td></tr>
+          <tr><td>io_uring</td><td>孵化项目 <code>io.netty.incubator</code></td><td>正式模块 <code>netty-transport-native-io_uring</code></td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p class="tip">依据：4.2.19 源码 <code>ByteBufUtil</code>（默认 <code>"adaptive"</code>）、<code>NioEventLoopGroup</code>（<code>@Deprecated</code>）、Maven Central 上 4.2.19 的 pom。</p>
+    </div>
+    <div class="dp" data-role="cg">
+      <h4>epoll 本地传输：gRPC 默认用的那个</h4>
+      <ul>
+        <li>把 <code>NioIoHandler</code> 换成 <code>EpollIoHandler</code>、channel 换成 <code>EpollSocketChannel</code>，就绕过 JDK 的 Selector，直接用 JNI 调 epoll，默认边缘触发，每次唤醒产生的垃圾更少，还能设 <code>TCP_QUICKACK</code>、<code>SO_REUSEPORT</code> 这类 JDK 不暴露的选项。</li>
+        <li>全景里的线程名 <code>grpc-default-worker-ELG</code> 就是 grpc-netty-shaded 自带的 epoll 版；拿不到本地库时退回 NIO，线程名会变成 <code>grpc-nio-worker-ELG</code>。</li>
+        <li>线程模型、Pipeline、ByteBuf 完全不变，这一页讲的都照样成立。</li>
+      </ul>
+    </div>
+    <div class="dp" data-role="of">
+      <h4>少拷贝：slice、CompositeByteBuf、FileRegion</h4>
+      <ul>
+        <li><code>LengthFieldBasedFrameDecoder</code> 切出来的帧默认是从累积缓冲里 <code>retainedSlice</code> 出来的：共享底层内存，各有自己的下标和 refCnt 归属，不拷贝。</li>
+        <li><code>CompositeByteBuf</code> 把“头 + 体”两个缓冲拼成逻辑上的一个，不用先 new 一个大数组再拷进去。</li>
+        <li>发文件用 <code>DefaultFileRegion</code>，底层是 <code>FileChannel.transferTo</code>（Linux 上是 sendfile），数据不经过用户态。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span><h3>这一页没展开的</h3></div>
+  <ul class="next">
+    <li>EventLoop 的 run 循环源码：IO 与任务的时间配比、定时任务队列、<code>wakeup</code> 的处理</li>
+    <li>PooledByteBufAllocator 的 jemalloc 式结构（Arena、Chunk、Page、线程缓存）和 4.2 的 Adaptive 分配器差在哪</li>
+    <li>HTTP/2 在 Netty 里的样子：<code>Http2FrameCodec</code>、流到子 Channel 的映射（gRPC 第 5 站）</li>
+    <li>gRPC 服务端的线程三层：boss、worker EventLoop、业务 executor，各自该怎么配（J04 第 9 站）</li>
+    <li>背压：<code>autoRead</code> 关掉读、配合水位线做端到端限流</li>
+    <li>用 Netty 写一个最小 RPC：序列化、请求 ID、超时（J04 知识点 5 的动手版）</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到 ⑤：带着 ⑥ 改一遍</h2>
+    <p class="lead">三道改造都在 ⑤ 的 <code>InventoryNetty</code> 上做，study-labs 里同目录的 <code>BlockingEventLoop</code>、<code>LeakDemo</code> 就是前两道的参考答案。</p>
+  </div>
+  <div class="rules-list">
+    <div class="rl"><b>1. 把扣库存改成“查库”：在 <code>channelRead0</code> 里 <code>Thread.sleep(200)</code></b><p>worker 改成 1 个线程，再开第二个客户端同时发。先猜第二个客户端多慢，再用 <code>addLast(bizGroup, "reserve", …)</code> 修好，比较前后（坑 1）。</p></div>
+    <div class="rl"><b>2. 把 <code>ReserveHandler</code> 改成继承 <code>ChannelInboundHandlerAdapter</code></b><p>开 <code>-Dio.netty.leakDetection.level=paranoid</code> 发 1 万个请求，在日志里找 LEAK 和它指向的那一行；再补上 <code>finally</code> 里的 release（坑 2）。</p></div>
+    <div class="rl"><b>3. 客户端发一帧长度写成 100000 的请求</b><p>先猜服务端打印什么、连接会不会断；再把 <code>maxFrameLength</code> 改成 <code>Integer.MAX_VALUE</code> 想想会发生什么（坑 3）。</p></div>
+  </div>
+  <div class="faq">
+    <details><summary>1. 用一句话说出 Netty 这三样东西的精华。</summary><p>一条连接终身归一个 EventLoop 线程，所以不用锁、天然有序，但这个线程只能做快的事；字节沿 Pipeline 按“入站往尾、出站往头”流过一串处理器；ByteBuf 是池化的堆外缓冲，靠引用计数精确归还，谁最后用谁 release。</p></details>
+    <details><summary>2. 已经有 JDK 的 Selector，为什么还需要 Netty？</summary><p>Selector 只解决“一个线程等很多连接”。拆帧、读写指针、写不完的排队、线程怎么分工、跨线程写、epoll 空轮询，全要自己写，而且每一项都容易错（②）。Netty 把它们做成了固定结构：EventLoop、Pipeline、ByteBuf，再配上现成的编解码器。</p></details>
+    <details><summary>3. “一个慢接口把别的接口也拖慢”，根源是哪条原理？为什么只有一部分连接受影响？</summary><p>④-1：连接终身绑定一个 EventLoop，处理器默认就跑在这个线程上。慢处理器占着线程，同一个 EventLoop 上的连接都等；别的 EventLoop 上的连接不受影响，所以是“一部分”。4 个 EventLoop 时大约是 1/4（实验台第二个预设：24 个）。</p></details>
+    <details><summary>4. 预测：把 ⑤ 里的 addLast 顺序改成 frame → reserve → prepender，客户端会看到什么？</summary><p>reserve 用的是 <code>ctx.writeAndFlush</code>，只往 head 方向找出站处理器，而 prepender 现在在它后面，经过不到（④-2）。响应 5 字节 <code>01 00 00 00 03</code> 不带长度头直接发出。客户端的拆帧器把前 4 字节 <code>01 00 00 00</code> 当成长度，等于 16777216，超过 1024 的上限，抛 <code>TooLongFrameException</code>，客户端一直等不到响应。把 reserve 里改成 <code>ctx.channel().writeAndFlush</code> 就又好了，因为它从 tail 走全程。</p></details>
+    <details><summary>5. 预测：⑤ 的 worker 从 2 个线程改成 1 个，输出会变吗？改成 8 个、同时开 4 个客户端呢？</summary><p>1 个时不变：⑤ 只有一条连接，本来就只用了 <code>-3-1</code> 一个线程。8 个线程、4 条连接时，按注册轮询，4 条连接分别落在 <code>-3-1</code> 到 <code>-3-4</code> 上，每条连接自己的日志仍然只出自一个线程（④-1）。扣库存因此会真的并发，这也是 ⑤ 里用 <code>compute</code> 做原子扣减的原因。</p></details>
+    <details><summary>6. 预测：在 <code>channelRead0</code> 里写 <code>ctx.writeAndFlush(resp).sync()</code>，想等响应真的写出去再继续，会怎样？</summary><p>当前线程就是 EventLoop，而“写出去”这件事要由同一个线程在后面完成，自己等自己。Netty 检查到在 EventLoop 里阻塞等待，直接抛 <code>BlockingOperationException</code>（<code>DefaultPromise.checkDeadLock</code>）。要知道写完没有，用 <code>addListener</code>。</p></details>
+    <details><summary>7. 放回全景：第 6、8、9 站前后各发生了什么？这一层出问题，整条链路会怎样？</summary><p>第 6 站前是第 5 站：gRPC 把请求装成 HEADERS 和 DATA 两个 HTTP/2 帧；第 6 站下单线程把它们交给连接所属的 EventLoop，经 Pipeline 编码进 ByteBuf，write + flush 给内核（第 7 站 TCP）。第 8 站库存服务的 EventLoop 被 epoll 叫醒，读进 ByteBuf，拆出 HTTP/2 帧和 gRPC 消息；第 9 站交给业务线程池扣库存，响应再由 EventLoop 写回。这一层出事：库存服务若把扣库存直接放在 EventLoop 上做，一个等行锁的请求就让同一线程上所有调用卡住，订单服务那边是成片的 300 ms deadline 超时；自己写的处理器漏 release，库存服务堆外内存慢慢涨到被容器杀掉，订单服务看到的是连接突然断开、重连、一批调用失败。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机实测：2 核 ARM，JDK 17.0.20（代码按 <code>--release 8</code> 编译），Netty 4.2.19.Final，NIO 传输，走本机回环。⑤ 的输出原样摘自 <code>InventoryNetty</code>；坑 1 的 191 ms / 1 ms 来自 <code>BlockingEventLoop inline / offload</code> 各 7 轮的中位数（第 1 轮含预热，是 296 ms / 98 ms）；坑 2 的内存数字和 LEAK 日志来自 <code>LeakDemo leak / fixed</code>。代码：<a href="https://github.com/archeu/study-labs/tree/main/java/network/netty-eventloop-pipeline-bytebuf">study-labs/java/network/netty-eventloop-pipeline-bytebuf</a>。</p>
+  <p>按 4.2.19 源码：默认 EventLoop 数 2 × 核（<code>MultithreadEventLoopGroup</code>）、轮询选择器（<code>DefaultEventExecutorChooserFactory</code>）、默认分配器 adaptive（<code>ByteBufUtil</code>）、泄漏检测默认 SIMPLE 和 1/128 抽样（<code>ResourceLeakDetector</code>）、水位线 32 / 64 KB（<code>WriteBufferWaterMark</code>）、tail 释放未处理消息（<code>DefaultChannelPipeline</code>）、<code>addLast(group, …)</code> 每条连接固定一个执行器、空轮询重建阈值 512（<code>NioIoHandler</code>）、<code>BlockingOperationException</code>（<code>DefaultPromise</code>）、优雅关闭默认 2 s / 15 s（<code>AbstractEventExecutor</code>）。实验台的数字是模拟。</p>
+  <p>相关：<a href="../java/pano-j04-order-calls-inventory.html">全景：订单服务调库存服务的一次 RPC</a> · <a href="io-models.html">网络 IO 模型</a> · <a href="tcp-handshake-timewait-framing.html">TCP：握手、挥手、TIME_WAIT 与粘包</a> · <a href="../redis/redis-threading-io.html">Redis 线程模型与 IO</a> · <a href="../jvm/jvm-container.html">JVM 在容器里</a> · <a href="../java/roadmap.html#j04">Java 地图 J04</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 模型：C 条连接，前 k 条在 t=0 各发一个慢请求（处理器阻塞 S ms），其余每条在 t=10 ms 发一个快请求（0.1 ms）。
+// 连接 i 按轮询绑定：EventLoop i % E；addLast(group) 时业务执行器 i % B（每条连接固定一个，单线程、按序）。
+// mode: inline = 处理器跑在 EventLoop 上；group = addLast(DefaultEventExecutorGroup(B), h)；pool = 自己的 ThreadPoolExecutor(B 线程, FIFO 队列)。
+// 每个快请求另加 0.5 ms 的回环往返和编解码。返回快请求的延迟分布和每条“车道”的忙碌时段。
+function simEventLoop(p) {
+  var E = p.E, C = p.C, k = Math.min(p.k, p.C), S = p.S, B = p.B, mode = p.mode;
+  var FAST = 0.1, ARR = 10, BASE = 0.5;
+  var tasks = [];
+  for (var i = 0; i < C; i++) {
+    var slow = i < k;
+    tasks.push({ conn: i, slow: slow, t: slow ? 0 : ARR, cost: slow ? S : FAST });
+  }
+  var nLanes, laneOf;
+  if (mode === 'inline') { nLanes = E; laneOf = function (t) { return t.conn % E; }; }
+  else if (mode === 'group') { nLanes = B; laneOf = function (t) { return t.conn % B; }; }
+  else { nLanes = B; laneOf = null; }
+  var lanes = [];
+  for (var j = 0; j < nLanes; j++) lanes.push({ free: 0, spans: [] });
+  // 按到达时间、再按连接号排队（FIFO）
+  var order = tasks.slice().sort(function (a, b) { return a.t - b.t || a.conn - b.conn; });
+  order.forEach(function (t) {
+    var lane;
+    if (laneOf) lane = lanes[laneOf(t)];
+    else { // 共享队列：交给最早空出来的线程
+      lane = lanes.reduce(function (m, l) { return l.free < m.free ? l : m; }, lanes[0]);
+    }
+    var start = Math.max(t.t, lane.free);
+    var end = start + t.cost;
+    lane.free = end;
+    if (t.slow) lane.spans.push([start, end]);
+    t.lat = end - t.t + BASE;
+  });
+  var fast = tasks.filter(function (t) { return !t.slow; }).map(function (t) { return t.lat; }).sort(function (a, b) { return a - b; });
+  function q(arr, f) { if (!arr.length) return 0; return arr[Math.min(arr.length - 1, Math.floor(f * arr.length))]; }
+  var hurt = fast.filter(function (x) { return x > 50; }).length;
+  return {
+    nFast: fast.length,
+    p50: q(fast, 0.5),
+    max: fast.length ? fast[fast.length - 1] : 0,
+    hurt: hurt,
+    hurtPct: fast.length ? Math.round(hurt * 100 / fast.length) : 0,
+    lanes: lanes.map(function (l) { return { busyUntil: l.free, spans: l.spans }; })
+  };
+}
+/*SIM-END*/
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var lab = $('eb'); if (!lab) return;
+  var state = { mode: 'inline', guess: null, ran: false };
+  var ids = ['E', 'C', 'k', 'S', 'B'];
+  var presets = {
+    real: { E: 1, C: 2, k: 1, S: 200, B: 4, mode: 'inline' },
+    one:  { E: 4, C: 100, k: 1, S: 200, B: 16, mode: 'inline' },
+    many: { E: 4, C: 100, k: 20, S: 200, B: 16, mode: 'group' },
+    pool: { E: 4, C: 100, k: 20, S: 200, B: 16, mode: 'pool' }
+  };
+  var modeName = { inline: 'EventLoop 上', group: 'addLast(组, h)', pool: '自己的线程池' };
+  function read() {
+    var p = {}; ids.forEach(function (k) { p[k] = +$('i-' + k).value; $('o-' + k).textContent = p[k]; });
+    p.mode = state.mode; return p;
+  }
+  function setMode(m) {
+    state.mode = m;
+    lab.querySelectorAll('.seg-mode button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.m === m ? 'true' : 'false'); });
+  }
+  function fmt(x) { return x >= 100 ? Math.round(x) + ' ms' : x.toFixed(1) + ' ms'; }
+  function run() {
+    var p = read(), r = simEventLoop(p);
+    state.ran = true;
+    $('t-p50').textContent = r.nFast ? fmt(r.p50) : '–';
+    $('t-n').textContent = r.nFast + ' 个快请求';
+    $('t-max').textContent = r.nFast ? fmt(r.max) : '–';
+    $('t-hurt').textContent = r.nFast ? r.hurt + ' 个' : '–';
+    $('t-hurtp').textContent = r.nFast ? '占 ' + r.hurtPct + '%' : '没有快请求';
+    var busy = r.lanes.filter(function (l) { return l.spans.length; }).length;
+    $('t-lanes').textContent = busy + ' / ' + r.lanes.length;
+    $('t-lanek').textContent = '被慢请求占住的' + (p.mode === 'inline' ? ' EventLoop' : '业务线程');
+    // lanes
+    var maxT = Math.max(20, r.lanes.reduce(function (m, l) { return Math.max(m, l.busyUntil); }, 0));
+    var box = $('eb-lanes'); box.textContent = '';
+    var axis = document.createElement('div'); axis.className = 'lane-axis';
+    axis.innerHTML = '<span></span><span><i>0</i><i>' + Math.round(maxT / 2) + ' ms</i><i>' + Math.round(maxT) + ' ms</i></span><span></span>';
+    box.appendChild(axis);
+    var show = Math.min(r.lanes.length, 16);
+    var label = p.mode === 'inline' ? 'EL-' : (p.mode === 'group' ? 'biz-' : 'pool-');
+    for (var j = 0; j < show; j++) {
+      var l = r.lanes[j], row = document.createElement('div'); row.className = 'lane';
+      var nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = label + (j + 1);
+      var tr = document.createElement('span'); tr.className = 'tr';
+      l.spans.forEach(function (s) {
+        var i = document.createElement('i');
+        i.style.left = (s[0] / maxT * 100) + '%'; i.style.width = Math.max(0.6, (s[1] - s[0]) / maxT * 100) + '%';
+        tr.appendChild(i);
+      });
+      var u = document.createElement('u'); u.style.left = (10 / maxT * 100) + '%'; tr.appendChild(u);
+      var v = document.createElement('span'); v.className = 'v'; v.textContent = l.spans.length ? '慢 ×' + l.spans.length : '空闲';
+      row.appendChild(nm); row.appendChild(tr); row.appendChild(v); box.appendChild(row);
+    }
+    if (r.lanes.length > show) {
+      var more = document.createElement('p'); more.className = 'lanes-more';
+      more.textContent = '另有 ' + (r.lanes.length - show) + ' 条车道未画出。'; box.appendChild(more);
+    }
+    // verdict
+    var msg;
+    if (!r.nFast) msg = '所有连接都在发慢请求，没有快请求可比。把慢连接数调小一点。';
+    else if (r.hurt === 0) msg = '没有快请求被拖慢：慢请求占住的' + (p.mode === 'inline' ? ' EventLoop' : '线程') + '上没有排着快请求，或者还有空闲线程可用。';
+    else if (p.mode === 'inline') msg = r.hurt + ' 个快请求被拖慢，正好是和慢连接落在同一个 EventLoop 上的那些（连接按轮询绑定，' + p.E + ' 个 EventLoop 时约 1/' + p.E + '）。慢请求占着线程，这些连接连读都读不到。';
+    else if (p.mode === 'group') msg = r.hurt + ' 个快请求被拖慢。addLast(组, h) 让每条连接固定用组里的一个执行器，和慢连接分到同一个执行器的连接仍要排队；EventLoop 本身已经不堵了，连接的读写照常进行。';
+    else msg = r.hurt + ' 个快请求被拖慢。共享线程池里谁空谁接，慢请求只要不多于 ' + p.B + ' 个就不会挡住别人；慢请求多于线程数时，快请求排在队列里，所有人一起等。代价是同一条连接的请求可能乱序。';
+    $('eb-res').textContent = '模式：' + modeName[p.mode] + '。' + msg;
+    // guess check
+    if (state.guess !== null) {
+      var truth = simEventLoop(presets.one).hurt; // 24
+      var pick = +state.guess, right = (pick === 24);
+      lab.querySelectorAll('.guess .opts button').forEach(function (b) {
+        b.classList.remove('right', 'wrong');
+        if (+b.dataset.g === 24) b.classList.add('right');
+        else if (b.dataset.g === state.guess) b.classList.add('wrong');
+      });
+      var g = $('eb-gres'); g.hidden = false;
+      g.textContent = (right ? '猜对了。' : '猜错了。') + '这个场景里是 ' + truth + ' 个：100 条连接轮询分到 4 个 EventLoop，和慢连接同一个线程的有 24 条快连接，它们全部等到慢请求做完；其他 3 个线程上的 75 条毫无影响（④-1 连接终身绑定一个线程）。';
+    }
+  }
+  function applyPreset(name) {
+    var p = presets[name];
+    ids.forEach(function (k) { $('i-' + k).value = p[k]; });
+    setMode(p.mode);
+    lab.querySelectorAll('.presets button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.p === name ? 'true' : 'false'); });
+    read();
+  }
+  lab.querySelectorAll('.presets button').forEach(function (b) { b.addEventListener('click', function () { applyPreset(b.dataset.p); run(); }); });
+  lab.querySelectorAll('.seg-mode button').forEach(function (b) { b.addEventListener('click', function () { setMode(b.dataset.m); if (state.ran) run(); }); });
+  ids.forEach(function (k) { $('i-' + k).addEventListener('input', function () { read(); if (state.ran) run(); }); });
+  lab.querySelectorAll('.guess .opts button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      state.guess = b.dataset.g;
+      lab.querySelectorAll('.guess .opts button').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+      $('eb-hint').textContent = '已选，点“运行”看结果。';
+    });
+  });
+  $('eb-run').addEventListener('click', function () {
+    if (state.guess !== null && !state.revealed) { applyPreset('one'); state.revealed = true; }
+    run();
+  });
+  applyPreset('one');
+  // 静止时也给出一个可读的初始画面（不揭晓答案：只画参数，不出结果）
+  $('eb-res').textContent = '选好答案后点“运行”。默认参数就是题目里的场景。';
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
