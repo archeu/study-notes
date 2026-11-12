@@ -1,0 +1,1612 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>MyBatis 结果映射与流式查询</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six steps for a mechanism topic (① 为什么需要 ② 没有它会怎样 ③ 相邻方案 ④ 原理 ⑤ 亲眼看到 ⑥ 细节 ↺), next round of J05 knowledge point 7 (MyBatis: result mapping, N+1, lazy loading, streaming), panorama stops 8 and 9. Roles: cg = MyBatis result mapping (DefaultResultSetHandler, rowKey map), g2 = the lazy-loading proxy and ResultLoader, bk = SqlSession / transaction lifetime, pd = the JDBC driver layer, of = accent for choices, neutral = the hand-written JDBC way; bad/good fixed. Interaction: one row-by-row fold stepper (#fd) with three modes (collapse by id, JOIN then LIMIT 4, resultOrdered); its SIM block follows handleRowValuesForNestedResultMap in MyBatis 3.5.19 and was checked in node against the measured LIMIT and collapse results. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+body{overflow-x:clip}
+.lab-h{font-family:var(--font-display);font-weight:400;font-size:20px}
+#eb-res p{margin:0 0 4px}
+#eb-res .note-p{font-size:13px;color:var(--muted)}
+#eb pre{white-space:pre;overflow-x:auto}
+
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2;fill:none}
+.e-warn{stroke:var(--warn);stroke-width:2.5;fill:none}
+.misj{border-collapse:collapse}
+.ev-card{font-family:var(--font-mono);font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--console-bg);color:var(--console-fg);border-radius:12px;padding:10px 12px;margin:0}
+.tr-nav{display:flex;flex-wrap:wrap;gap:6px}
+.tr-nav button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:var(--font-mono)}
+.tr-nav button[aria-current="true"]{border-color:var(--ink);background:var(--ink);color:var(--paper)}
+.tr-nav button.ok{border-color:var(--good)}
+.tr-nav button.ng{border-color:var(--bad)}
+.tr-score{font-size:13.5px;color:var(--muted)}
+
+/* page: budget bench */
+.bud{display:flex;flex-direction:column;gap:6px}
+.bud-bar{position:relative;display:flex;height:34px;border-radius:10px;overflow:hidden;border:1.5px solid var(--line-strong);background:var(--paper)}
+.bud-bar span{display:block;height:100%;min-width:0}
+.bud-bar .h{background:var(--pd)} .bud-bar .m{background:var(--warn);opacity:.55} .bud-bar .c{background:var(--warn);opacity:.7}
+.bud-bar .s{background:var(--warn);opacity:.85} .bud-bar .o{background:var(--neutral);opacity:.6} .bud-bar .d{background:var(--warn)}
+.bud-bar .d.over{background:var(--bad)}
+.bud-lim{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--ink)}
+.bud-cap{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);font-family:var(--font-mono)}
+.bud-lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.bud-lg i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.derive{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.derive > div{padding:8px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--card);font-size:13.5px;min-width:0}
+.derive b{display:block;font-size:12px;color:var(--muted);font-weight:500}
+.derive code{font-size:13px;overflow-wrap:anywhere}
+.ctl select{font:inherit;font-size:14px;padding:5px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:720px){.derive{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.derive{grid-template-columns:1fr}}
+
+/* page: tcp */
+.cap{font-size:13.5px;color:var(--muted);margin-top:8px;line-height:1.55}
+.seq{display:flex;flex-direction:column;gap:12px}
+.seq-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seq-ctl .seg{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;margin-left:auto}
+.seq-box{outline:none}
+.seq svg .msg{opacity:.13;transition:opacity .25s}
+.seq svg .msg.on{opacity:1}
+.seq svg .msg.cur .ln{stroke-width:4}
+.seq svg .msg.cur .lab{font-weight:700}
+.seq svg .lane{stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5}
+.st-chip{font-family:var(--font-mono);font-size:12.5px;font-weight:600}
+.seq-info{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.seq-info > div{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.seq-info .k{font-size:12.5px;color:var(--muted);display:block;margin-bottom:4px}
+.seq-info .sts{display:flex;flex-wrap:wrap;gap:8px 16px}
+.seq-info .sts span{display:inline-flex;gap:6px;align-items:baseline}
+.seq-info .sts b{font-family:var(--font-mono);font-size:14px;padding:1px 8px;border-radius:8px;background:var(--rt);border:1.5px solid var(--rc)}
+.seq-say{grid-column:1 / -1}
+.seq-say p + p{margin-top:6px}
+.seq-num{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.frames{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.frames > div{border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.frames h4{font-size:17px;color:var(--rc)}
+.frames pre{margin:0;font-family:var(--font-mono);font-size:12px;background:var(--code-bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+@media (max-width:760px){.way{overflow-x:auto}.way > svg{min-width:400px}.seq-info{grid-template-columns:minmax(0,1fr)}.frames{grid-template-columns:minmax(0,1fr)}.seq-ctl .seg{margin-left:0}}
+/* ---------- netty page ---------- */
+.lanes{display:flex;flex-direction:column;gap:6px}
+.lane{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.lane .nm{font-family:var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lane .tr{position:relative;height:18px;border-radius:6px;background:var(--neutral-tint)}
+.lane .tr i{position:absolute;top:0;bottom:0;background:var(--bad);border-radius:5px;opacity:.85}
+.lane .tr u{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--bk)}
+.lane .v{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right}
+.lane-axis{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;font-size:11.5px;color:var(--muted);font-family:var(--font-mono)}
+.lane-axis span{display:flex;justify-content:space-between}
+.lanes-more{font-size:12.5px;color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:760px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.ctl-grid{grid-template-columns:1fr}}
+.seg-mode{display:flex;flex-wrap:wrap;gap:6px}
+.seg-mode button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 10px;font-size:13.5px;cursor:pointer;color:var(--ink)}
+.seg-mode button[aria-pressed="true"]{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.verx{width:100%;border-collapse:collapse;font-size:14px}
+.verx th,.verx td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.verx th{font-size:13px;color:var(--muted);font-weight:600;background:var(--code-bg)}
+.verx code{overflow-wrap:anywhere}
+
+/* ---- 本页新增 ---- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2;fill:none}
+.bytes{display:flex;flex-direction:column;gap:10px}
+.brow{display:grid;grid-template-columns:8.5em minmax(0,1fr);gap:10px;align-items:start}
+.brow > b{font-size:14px;line-height:1.3}
+.brow > b small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:3px;min-width:0}
+.chips i{font-style:normal;font-family:var(--font-mono);font-size:11.5px;line-height:1;padding:4px 3px;border-radius:4px;background:var(--rt);border:1px solid var(--rc);min-width:2.1em;text-align:center}
+.chips i.k{background:var(--card);border-style:dashed;color:var(--muted)}
+.chips i.w{padding:4px 6px}
+@media (max-width:560px){.brow{grid-template-columns:minmax(0,1fr)}}
+.hdr{display:grid;grid-template-columns:repeat(17,minmax(0,1fr)) minmax(0,4fr);gap:2px;min-width:620px;font-family:var(--font-mono);font-size:11.5px}
+.hdr > div{border:1.5px solid var(--rc);background:var(--rt);border-radius:6px;padding:6px 4px;text-align:center;display:flex;flex-direction:column;gap:3px;min-width:0}
+.hdr > div small{font-family:var(--font-body);font-size:11.5px;color:var(--ink)}
+.hdr-wrap{overflow-x:auto;padding-bottom:4px}
+.lbt{display:flex;flex-direction:column;gap:10px}
+.lbrow{display:grid;grid-template-columns:6.5em minmax(0,1fr) 15em;gap:10px;align-items:center;font-size:13.5px}
+.lbrow > b{font-size:14px}
+.lbrow.best > b::after{content:" ✓";color:var(--good)}
+.stk{display:flex;height:22px;border-radius:6px;overflow:hidden;background:var(--neutral-tint);min-width:0}
+.stk i{display:block;height:100%;font-style:normal;font-family:var(--font-mono);font-size:10.5px;line-height:22px;text-align:center;overflow:hidden;white-space:nowrap;color:var(--ink);border-right:1.5px solid var(--card)}
+.stk i.n{background:var(--rn-tint)}
+.stk i.n2{background:var(--pd-tint)}
+.stk i.s{background:var(--warn-tint)}
+.stk i.x{background:var(--bad-tint);color:var(--bad)}
+.lbstat{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap}
+.lbstat .e{color:var(--bad);font-weight:600}
+.leg{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.leg span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-2px;background:var(--c)}
+.inst-cfg{display:flex;flex-wrap:wrap;gap:8px}
+.inst-cfg .ic{display:flex;flex-direction:column;gap:4px;border:1.5px solid var(--line-strong);border-radius:10px;padding:6px 8px;font-size:12.5px;background:var(--card);min-width:0}
+.inst-cfg .ic b{font-family:var(--font-mono);font-size:12.5px}
+.inst-cfg select{font:inherit;font-size:12.5px;padding:2px 4px;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){.lbrow{grid-template-columns:minmax(0,1fr)}.lbrow .stk{order:2}}
+
+/* 本页：超时实验台 */
+.hc-ctl{display:flex;flex-direction:column;gap:12px}
+.hc-leg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.hc-leg i{display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:6px;vertical-align:0}
+.hc-out{display:flex;flex-direction:column;gap:8px;min-height:30px}
+.hc-row{display:grid;grid-template-columns:4.2em minmax(0,1fr);gap:4px 10px;align-items:center}
+.hc-lb{font-size:13px;color:var(--muted)}
+.hc-track{height:20px;background:var(--neutral-tint);border-radius:6px;overflow:hidden}
+.hc-fill{display:flex;height:100%}
+.hc-fill i{display:block;height:100%}
+.hc-end{grid-column:2;font-size:13px;font-family:var(--font-mono);min-width:0;overflow-wrap:anywhere}
+.lead code{overflow-wrap:anywhere}
+.good-t{color:var(--good)}
+.dp-h{margin-top:18px}
+
+/* page-specific */
+.esteps{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.esteps code{overflow-wrap:anywhere}
+.code-s{margin:0;padding:10px 12px;background:var(--code-bg);border-radius:10px;font-family:var(--font-mono);font-size:12px;line-height:1.55;overflow-x:auto;white-space:pre}
+.deep .pit .tbl-wrap{margin-top:4px}
+.bx-ver{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.bx-ver .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.bx-ver button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:999px;padding:5px 12px;font-size:13.5px;cursor:pointer}
+.bx-ver button[aria-pressed="true"]{border-color:var(--g2);background:var(--g2-tint);box-shadow:inset 0 0 0 1px var(--g2)}
+.bx-run{display:flex}
+.bx-trace{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.bx-real{font-size:13.5px;color:var(--muted);margin-top:6px}
+.bx-real code{color:var(--ink);overflow-wrap:anywhere}
+.bx-o{display:inline-block;font-weight:700;padding:1px 10px;border-radius:999px;margin-right:6px}
+.bx-o.fail{background:var(--bad-tint);color:var(--bad);border:1.5px solid var(--bad)}
+.bx-o.silent{background:var(--warn-tint);color:var(--ink);border:1.5px solid var(--warn)}
+.bx-o.ok{background:var(--good-tint);color:var(--good);border:1.5px solid var(--good)}
+#bx-out[data-o="fail"]{--rc:var(--bad);--rt:var(--bad-tint)}
+#bx-out[data-o="silent"]{--rc:var(--warn);--rt:var(--warn-tint)}
+#bx-out[data-o="ok"]{--rc:var(--good);--rt:var(--good-tint)}
+@media (max-width:860px){.presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.presets{grid-template-columns:1fr}}
+/* page: AOP chain */
+.duo{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.duo > *{min-width:0}
+.ac-bench{display:flex;flex-direction:column;gap:8px;padding:14px 16px;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+.ac-br{display:grid;grid-template-columns:180px minmax(0,1fr) 64px;gap:10px;align-items:center;font-size:13.5px}
+.ac-br i{display:block;height:20px;width:max(var(--w),3px);border-radius:5px;background:var(--g2-tint);border:1.5px solid var(--g2)}
+.ac-br.rn i{background:var(--rn-tint);border-color:var(--rn)}
+.ac-br b{font-family:var(--font-mono);font-size:12.5px;text-align:right}
+.ac-chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13.5px}
+.ac-chain > span{min-width:0}
+.ac-chip{display:inline-flex;gap:6px;align-items:center;border:1.5px solid var(--rc);background:var(--rt);border-radius:999px;padding:2px 10px;font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ac-chip b{font-family:var(--font-display);font-weight:400}
+.ac-chain .sep{color:var(--muted)}
+.ac-walk{margin:8px 0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.ac-walk li{position:relative;padding-left:2.4em}
+.ac-walk li::before{position:absolute;left:0;font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.ac-walk li.in::before{content:"进 →"}
+.ac-walk li.out::before{content:"← 出"}
+.ac-walk li.mid{font-weight:700}
+.ac-walk li.mid::before{content:"  ●"}
+.ac-walk li code{color:var(--rc)}
+@media (max-width:640px){.ac-br{grid-template-columns:110px minmax(0,1fr) 56px;font-size:12.5px}}
+/* page: transactions next round */
+.tx-walk{margin:8px 0;padding-left:0;list-style:none;counter-reset:w;display:flex;flex-direction:column;gap:4px;font-size:14px}
+.tx-walk li{position:relative;padding:4px 10px 4px 2.4em;border-left:4px solid var(--rc,var(--line-strong));border-radius:6px;background:var(--rt,transparent)}
+.tx-walk li::before{counter-increment:w;content:counter(w);position:absolute;left:.8em;top:5px;font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.tx-walk li code{overflow-wrap:anywhere}
+.presets.p3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.lab-sel{display:flex;flex-direction:column;gap:6px}
+.lab-sel > b{font-size:13px;color:var(--muted);font-weight:600}
+@media (max-width:640px){.presets.p3{grid-template-columns:1fr}}
+
+/* fold stepper (④-1) */
+.fold{outline:none}
+.fold:focus-visible{box-shadow:0 0 0 3px var(--cg-tint)}
+.fold-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:12px}
+.fold-grid > div{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;min-width:0}
+.fold-side{display:flex;flex-direction:column;gap:12px}
+.fold .k{font-size:12.5px;color:var(--muted);display:block;margin-bottom:6px}
+.rows-wrap{overflow-x:auto}
+.rows{width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+.rows th,.rows td{padding:4px 8px;text-align:left;border-bottom:1px solid var(--line)}
+.rows th{color:var(--muted);font-weight:600}
+.rows tr.cur td{background:var(--cg-tint);color:var(--ink);font-weight:600}
+.rows tr.done td{color:var(--muted)}
+.rows tr.cut td{color:var(--bad);text-decoration:line-through}
+.objs{display:flex;flex-direction:column;gap:6px;font-family:var(--font-mono);font-size:12.5px}
+.obj{border:1.5px solid var(--line-strong);border-radius:10px;padding:5px 10px;background:var(--card);overflow-wrap:anywhere}
+.obj.new{border-color:var(--cg);background:var(--cg-tint)}
+.obj.out{border-color:var(--good);background:var(--good-tint)}
+.obj.bad{border-color:var(--bad);background:var(--bad-tint)}
+.fold-say{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--cg);background:var(--card)}
+.btn:disabled{opacity:.45;cursor:default}
+.deep h4{font-size:17px;margin-top:14px}
+.note-p{max-width:54em;font-size:15px}
+@media (max-width:760px){.fold-grid{grid-template-columns:minmax(0,1fr)}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>MyBatis</span><span aria-hidden="true">/</span><span class="tb-here">100 笔订单发出 101 条 SQL</span></div></nav>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+<marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+<marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-mut" d="M0 0L10 5L0 10z"/></marker>
+<marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-cg" d="M0 0L10 5L0 10z"/></marker>
+<marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-g2" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+
+<main>
+<header class="hero">
+  <p class="kicker">DefaultResultSetHandler · ResultMap · &lt;id&gt; · nestedResultObjects · ResultLoader · JavassistProxyFactory · Cursor · ResultHandler · fetchSize · MyBatis 3.5.19</p>
+  <h1>100 笔订单发出 101 条 SQL：结果映射决定了查几次、对象活多久</h1>
+  <p class="lead">全景第 9 站，UPDATE 回来的只是一个数字：影响了 1 行。换成 SELECT，回来的是一张二维表：订单列表要把 100 笔订单和 199 件明细装成 <code>List&lt;Order&gt;</code>，对账要把当天 20 万条流水一条条读出来。这一半活由 <code>DefaultResultSetHandler</code> 来干：<b>一行一行读，按 resultMap 填对象，靠 <code>&lt;id&gt;</code> 认出“这一行属于哪个已经建好的对象”</b>。N+1、明细字段全是 null、分页少了订单、导出把内存撑爆，都出在两个问题上：行怎么变成对象，对象要活多久。本页在交易靶场上跑了 8 组实验。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j05-request-through-spring.html#s-9">一个请求穿过 Spring · 第 8、9 站</a></span><span>地图：<a href="../java/roadmap.html#j05">J05 · MyBatis 执行流程、插件、缓存与 MyBatis-Plus</a></span><span>上一圈：<a href="mybatis-flow.html">MyBatis 执行流程</a>（“把行变成对象”只占一格） · <a href="mybatis-plugin-page.html">插件与分页</a> · <a href="mybatis-cache.html">缓存</a> · <a href="mybatis-plus.html">MyBatis-Plus</a></span><span>8 组场景本机真跑过 <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：数据库给的是表，业务要的是对象</h2>
+    <p class="lead">在全景第 9 站，这一步要解决的是：JDBC 的 <code>ResultSet</code> 只会“往下一行、按列取值”，业务代码要的却是对象树。交易靶场里有两种最常见的查询：订单列表要“订单连明细”，一对多；日终对账要导出 20 万条流水，行特别多。前一种难在“几行拼成一个对象”，后一种难在“这么多对象放不放得下”。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="左边是 JOIN 回来的 6 行：订单 9526 两行、9527 三行、9528 一行，订单列在每一行都重复。中间箭头：DefaultResultSetHandler 逐行读，按 resultMap 填。右边是 List of Order：9526 带 2 件明细，9527 带 3 件，9528 带 1 件。下面一条：对账导出 pay_flow 20 万行，问题是全装进 List，还是读一条处理一条。">
+  <text class="t-b" x="20" y="24">ResultSet：订单 JOIN 明细回来的行</text>
+  <rect class="b-card" x="20" y="36" width="370" height="196" rx="12"/>
+  <text class="t-monos" x="36" y="60">o.id   o.status  o.amount   i_id    i_qty</text>
+  <line class="e-axis" x1="32" y1="68" x2="378" y2="68"/>
+  <text class="t-mono" x="36" y="90">9526   CREATED   119700     95261   1</text>
+  <text class="t-mono" x="36" y="112">9526   CREATED   119700     95262   2</text>
+  <rect class="f-cgt" x="28" y="120" width="354" height="68" rx="6"/>
+  <text class="t-mono" x="36" y="138">9527   CREATED   239400     95271   1</text>
+  <text class="t-mono" x="36" y="160">9527   CREATED   239400     95272   2</text>
+  <text class="t-mono" x="36" y="182">9527   CREATED   239400     95273   3</text>
+  <text class="t-mono" x="36" y="210">9528   CREATED    39900     95281   1</text>
+  <text class="t-xs" x="36" y="250">订单列在每一行里都重复一遍：1 笔订单有几件明细，就有几行</text>
+
+  <line class="e-ink" x1="404" y1="134" x2="546" y2="134" marker-end="url(#ah-ink)"/>
+  <text class="t-cg" x="412" y="118">DefaultResultSetHandler</text>
+  <text class="t-s" x="412" y="156">逐行读，按 resultMap 填</text>
+  <text class="t-xs" x="412" y="176">6 行 → 3 个订单对象</text>
+
+  <text class="t-b" x="560" y="24">业务要的：List&lt;Order&gt;</text>
+  <rect class="b-cg" x="560" y="36" width="180" height="50" rx="10"/>
+  <text class="t-mono" x="574" y="58">Order 9526</text>
+  <text class="t-xs" x="574" y="76">items: 2 件</text>
+  <rect class="b-cg" x="560" y="98" width="180" height="70" rx="10"/>
+  <text class="t-mono" x="574" y="120">Order 9527</text>
+  <text class="t-xs" x="574" y="138">items: 3 件</text>
+  <rect class="b-cg" x="560" y="180" width="180" height="50" rx="10"/>
+  <text class="t-mono" x="574" y="202">Order 9528</text>
+  <text class="t-xs" x="574" y="220">items: 1 件</text>
+  <line class="e-mut" x1="740" y1="122" x2="782" y2="104"/>
+  <line class="e-mut" x1="740" y1="130" x2="782" y2="134"/>
+  <line class="e-mut" x1="740" y1="138" x2="782" y2="164"/>
+  <rect class="b-card" x="782" y="90" width="160" height="26" rx="7"/>
+  <text class="t-mono" x="792" y="108">Item 95271 ×1</text>
+  <rect class="b-card" x="782" y="121" width="160" height="26" rx="7"/>
+  <text class="t-mono" x="792" y="139">Item 95272 ×2</text>
+  <rect class="b-card" x="782" y="152" width="160" height="26" rx="7"/>
+  <text class="t-mono" x="792" y="170">Item 95273 ×3</text>
+
+  <rect class="b-neu" x="20" y="268" width="922" height="50" rx="12"/>
+  <text class="t-b" x="36" y="290">对账导出：pay_flow 当天 20 万行</text>
+  <text class="t-s" x="36" y="308">每行都是一个 PayFlow，写进文件就没用了。是先全部装进一个 List 再写，还是读一条写一条、写完就扔？</text>
+</svg>
+  </div>
+  <figcaption>两件事都发生在第 9 站的后半段：SQL 已经发出去了，结果正在回来。前一件决定发几条 SQL，后一件决定 JVM 里同时活着多少对象。</figcaption>
+  </figure>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：自己写 while (rs.next())</h2>
+    <p class="lead">不用 MyBatis 的结果映射，一对多只能手写：边读边按订单 id 去重，再把明细挂上去。这段循环每个查询都要写一遍。</p>
+  </div>
+  <div class="duo">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">JDBC</span><b>手写一对多</b></div>
+<pre>Map&lt;Long, Order&gt; byId = new LinkedHashMap&lt;&gt;();
+try (ResultSet rs = ps.executeQuery()) {
+  while (rs.next()) {
+    long id = rs.getLong("id");
+    Order o = byId.get(id);              <span class="cm">// 这一行的订单见过没有？</span>
+    if (o == null) {
+      o = new Order(id, rs.getString("status"), rs.getLong("amount"));
+      byId.put(id, o);
+    }
+    if (rs.getObject("i_id") != null)   <span class="cm">// LEFT JOIN：没有明细的订单</span>
+      o.items().add(new Item(rs.getLong("i_id"), rs.getInt("i_qty")));
+  }
+}
+return new ArrayList&lt;&gt;(byId.values());</pre>
+    </div>
+    <div class="way" data-role="other">
+      <h4>疼在哪</h4>
+      <ul class="pains">
+        <li>每个查询一段循环，列名写成字符串，改了列编译器不报错</li>
+        <li>“这行属于哪个订单”要自己用 Map 认，三层嵌套（订单 → 明细 → 商品）就三层 Map</li>
+        <li>流水导出想省内存，就得自己控制“读一条处理一条”，还要自己管连接什么时候关</li>
+        <li class="ok">好处是什么都看得见：发了几条 SQL、Map 里存了什么、对象活多久，一清二楚</li>
+      </ul>
+    </div>
+  </div>
+  <p class="note-p">MyBatis 把这段循环做成了配置：<code>&lt;resultMap&gt;</code> 里的 <code>&lt;id&gt;</code> 就是左边的 <code>byId</code> 的 key，<code>&lt;collection&gt;</code> 就是“挂上去”那一步。<b>不懂这一点时的典型误用</b>：以为 resultMap 只是“列名对属性名”，一对多图省事写成 <code>&lt;collection select="..."/&gt;</code>，于是列表页每笔订单多发一条 SQL。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：一对多有四种装法，大结果有三种读法</h2>
+    <p class="lead">同一个需求“100 笔订单连明细”，MyBatis 里能写成四种。表里的条数和借连接次数是 ⑤ 里实测的。</p>
+  </div>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>装法</th><th>写法</th><th class="num">SQL 条数</th><th>借连接</th><th>能不能分页</th><th>适合</th></tr></thead>
+    <tbody>
+      <tr><th>嵌套查询（立即）</th><td><code>&lt;collection select="listItems" column="id"/&gt;</code></td><td class="num bad">101</td><td>1 次</td><td>能，LIMIT 只作用在订单那条上</td><td>几乎不用：N+1</td></tr>
+      <tr><th>嵌套查询（懒加载）</th><td>同上加 <code>fetchType="lazy"</code></td><td class="num">1 + 用到几笔</td><td><span class="bad">事务外每碰一笔借一次（101 次）</span></td><td>能</td><td>详情页，明细偶尔才看</td></tr>
+      <tr class="hl"><th>嵌套结果（JOIN）</th><td>一条 JOIN + <code>&lt;collection ofType&gt;</code> + <code>&lt;id&gt;</code></td><td class="num good">1</td><td>1 次</td><td><span class="bad">不能直接 LIMIT</span>，要先分订单页再 JOIN</td><td>详情页；明细不多的小列表</td></tr>
+      <tr><th>两步法</th><td>先查订单，再 <code>WHERE order_id IN (…)</code>，Java 里 <code>groupingBy</code></td><td class="num">2</td><td>事务里 1 次</td><td>能</td><td>列表页的默认选择；MyBatis-Plus 项目常用</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="tbl-wrap" style="margin-top:14px">
+  <table class="t">
+    <thead><tr><th>读 20 万条流水</th><th>Mapper 方法</th><th class="num">读到第 10 万条时多占的堆</th><th>前提</th></tr></thead>
+    <tbody>
+      <tr><th>一次装进 List</th><td><code>List&lt;PayFlow&gt; listFlows()</code></td><td class="num bad">34～43 MB</td><td>无</td></tr>
+      <tr class="hl"><th>Cursor</th><td><code>Cursor&lt;PayFlow&gt; cursorFlows()</code></td><td class="num good">0.01～0.03 MB</td><td>SqlSession 要开着：在事务里用；驱动要真的流式</td></tr>
+      <tr><th>ResultHandler</th><td><code>void scanFlows(ResultHandler&lt;PayFlow&gt; h)</code></td><td class="num good">0.01 MB</td><td>驱动要真的流式；嵌套结果要 <code>resultOrdered</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note-p">选择规则：<b>列表页用两步法，或者先分页再 JOIN；单条详情用 JOIN；嵌套查询只在“明细很少被用到”时配懒加载。大结果用 Cursor 或 ResultHandler，并且确认驱动真的在流式读。</b>本页重点学 JOIN 是怎么折叠的、懒加载代理怎么工作、Cursor 为什么离不开事务，四种装法的利弊都是从这三件事推出来的。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：一张 Map 认身份，一个代理管懒加载，一个会话管寿命</h2>
+    <p class="lead">上一圈把“把行变成对象”画成了一格。这一圈打开它：<code>DefaultResultSetHandler</code> 一行一行读，用一张 Map 认出“这一行属于哪个对象”；懒加载靠给对象套一层代理；对象和游标能活多久，由 SqlSession 也就是事务说了算。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>ResultSet 是个游标</b>：<code>next()</code> 往下挪一行，<code>getLong("id")</code> 取这一行的列。行是不是已经全在 JVM 里了，由驱动决定，MyBatis 管不着（④-3）。</li>
+      <li><b>MapperMethod 看返回类型选路</b>：返回 <code>List</code> 走 <code>selectList</code>，返回 <code>Cursor</code> 走 <code>selectCursor</code>，参数里有 <code>ResultHandler</code> 走 <code>select(…, handler)</code>（<a href="mybatis-flow.html">执行流程</a>）。</li>
+      <li><b>CacheKey</b>：MyBatis 拿来当 Map key 的类，往里 <code>update()</code> 几个值，值都相等的两个 key 就相等。一级缓存的 key 也是它（<a href="mybatis-cache.html">缓存</a>）。</li>
+      <li><b>不在事务里，每次 Mapper 调用一个新 SqlSession</b>：<code>SqlSessionTemplate</code> 调完就关，连接还给 HikariCP；在事务里，SqlSession 绑在线程上活到提交（<a href="mybatis-spring-tx.html">MyBatis 接 Spring 事务</a>）。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-fold">④-1 一行一行读：先算 rowKey，再查 Map</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="流水线：rs.next 取一行；createRowKey 用 resultMap 的 id 和 id 列的值算出 rowKey；去 nestedResultObjects 这张 HashMap 里找；找不到就新建 Order 并 storeObject 交出去，找到就只把这一行的明细挂到已有对象上。下面一条：没有嵌套的简单 resultMap 不用这张 Map，每行直接变成一个对象。交出去的地方有三种：List、Cursor、ResultHandler。">
+  <rect class="b-card" x="20" y="40" width="130" height="64" rx="10"/>
+  <text class="t-b" x="34" y="66">rs.next()</text>
+  <text class="t-xs" x="34" y="88">取下一行</text>
+  <line class="e-ink" x1="150" y1="72" x2="186" y2="72" marker-end="url(#ah-ink)"/>
+  <rect class="b-cg" x="188" y="40" width="190" height="64" rx="10"/>
+  <text class="t-b" x="202" y="64">createRowKey</text>
+  <text class="t-mono" x="202" y="86">resultMap id + &lt;id&gt; 列值</text>
+  <line class="e-ink" x1="378" y1="72" x2="414" y2="72" marker-end="url(#ah-ink)"/>
+  <rect class="b-cg" x="416" y="40" width="210" height="64" rx="10"/>
+  <text class="t-b" x="430" y="64">nestedResultObjects</text>
+  <text class="t-mono" x="430" y="86">HashMap&lt;CacheKey,Object&gt;</text>
+  <line class="e-ink" x1="626" y1="60" x2="700" y2="34" marker-end="url(#ah-ink)"/>
+  <line class="e-ink" x1="626" y1="86" x2="700" y2="112" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="636" y="38">没有</text>
+  <text class="t-xs" x="636" y="118">已有</text>
+  <rect class="b-cg" x="702" y="10" width="238" height="50" rx="10"/>
+  <text class="t-s" x="716" y="32">新建 Order，填订单列，放进 Map</text>
+  <text class="t-cg" x="716" y="50">storeObject：交出去</text>
+  <rect class="b-card" x="702" y="88" width="238" height="50" rx="10"/>
+  <text class="t-s" x="716" y="110">不新建，订单列这一行不再读</text>
+  <text class="t-s" x="716" y="128">只把明细挂到已有对象上</text>
+
+  <rect class="b-neu" x="20" y="160" width="606" height="74" rx="10"/>
+  <text class="t-b" x="34" y="184">简单 resultMap（没有 association / collection）</text>
+  <text class="t-s" x="34" y="206">不建这张 Map：每行直接变成一个对象，交出去，下一行和它无关。</text>
+  <text class="t-xs" x="34" y="224">流水导出走的就是这条路</text>
+  <rect class="b-good" x="702" y="160" width="238" height="74" rx="10"/>
+  <text class="t-b" x="716" y="184">交给谁</text>
+  <text class="t-mono" x="716" y="206">List（selectList）</text>
+  <text class="t-mono" x="716" y="224">Cursor / ResultHandler</text>
+</svg>
+  </div>
+  <figcaption><code>&lt;id&gt;</code> 的用处就在这里：它告诉 MyBatis 用哪几列算 rowKey。不写 <code>&lt;id&gt;</code>，MyBatis 就把所有普通 <code>&lt;result&gt;</code> 列都拼进 key（<code>getResultMappingsForRowKey</code>），一样能折叠，只是每行多算几列；万一两笔订单这些列全相同，会被并成一个。</figcaption>
+  </figure>
+
+  <p class="note-p">下面拿 3 笔订单、6 行，逐行走一遍。“JOIN 后 LIMIT 4”就是 ⑥ 坑 5 的缩小版；“resultOrdered”是 Cursor 和 ResultHandler 碰到嵌套结果时要求的模式：既然已经按 id 排好序，看见新 key 就说明上一个订单完整了，可以交出去、清空 Map。</p>
+  <div class="lab fold" data-role="cg" id="fd" tabindex="0" aria-label="逐行折叠演示，左右方向键切换步骤">
+    <div class="presets p3" id="fd-mode" role="group" aria-label="模式"></div>
+    <div class="seq-ctl">
+      <button type="button" class="btn" id="fd-prev">← 上一步</button>
+      <button type="button" class="btn primary" id="fd-next">下一步 →</button>
+      <button type="button" class="btn" id="fd-auto">自动播放</button>
+      <button type="button" class="btn" id="fd-reset">从头来</button>
+      <span class="seq-num" id="fd-num"></span>
+    </div>
+    <div class="fold-grid">
+      <div><span class="k">ResultSet（当前行高亮）</span><div class="rows-wrap"><table class="rows" id="fd-rows"></table></div></div>
+      <div class="fold-side">
+        <div><span class="k">nestedResultObjects（Map）</span><div class="objs" id="fd-map"></div></div>
+        <div><span class="k" id="fd-outk">交出去的</span><div class="objs" id="fd-out"></div></div>
+      </div>
+    </div>
+    <p class="fold-say" id="fd-say"></p>
+  </div>
+
+  <h3 id="m-lazy">④-2 懒加载：对象外面套了一层代理</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 360" role="img" aria-label="listOrdersLazy 返回的对象实际是 Order 的 Javassist 子类 Order_$$_jvst，它带一个 handler，handler 里有 ResultLoaderMap，记着 items 要用 listItems 和 id 9527 去查。调 getStatus 直接返回；调 getItems 或 toString、equals、hashCode、clone 会触发 ResultLoader.loadResult。ResultLoader 先问原来的 Executor 还开着且是同一个线程吗：是，用它，同一条连接；否，newExecutor，经 SpringManagedTransaction 和 DataSourceUtils 从 HikariCP 借一条新连接，查完就关。实测事务外碰 100 笔借连接 101 次，事务里 1 次。">
+  <rect class="b-g2" x="20" y="20" width="314" height="200" rx="12"/>
+  <text class="t-g2" x="36" y="44">Order_$$_jvst36d_0</text>
+  <text class="t-xs" x="36" y="62">Order 的 Javassist 子类（实测类名）</text>
+  <rect class="b-card" x="36" y="74" width="284" height="50" rx="8"/>
+  <text class="t-mono" x="48" y="94">id=9527 status=CREATED</text>
+  <text class="t-mono" x="48" y="114">items = null（还没查）</text>
+  <rect class="b-card" x="36" y="134" width="284" height="72" rx="8"/>
+  <text class="t-mono" x="48" y="154">handler: EnhancedResultObjectProxyImpl</text>
+  <text class="t-mono" x="48" y="174">  ResultLoaderMap:</text>
+  <text class="t-mono" x="48" y="194">  items → listItems(id=9527)</text>
+
+  <text class="t-b" x="350" y="44">调什么方法会触发</text>
+  <rect class="b-card" x="350" y="56" width="250" height="34" rx="8"/>
+  <text class="t-mono" x="362" y="78">getStatus()   → 直接返回</text>
+  <rect class="b-g2" x="350" y="100" width="250" height="34" rx="8"/>
+  <text class="t-mono" x="362" y="122">getItems()    → 只查 items</text>
+  <rect class="b-bad" x="350" y="144" width="250" height="52" rx="8"/>
+  <text class="t-mono" x="362" y="166">toString() equals()</text>
+  <text class="t-mono" x="362" y="186">hashCode() clone() → 全查</text>
+  <text class="t-xs" x="350" y="214">lazyLoadTriggerMethods 的默认值</text>
+  <line class="e-g2" x1="600" y1="117" x2="640" y2="117" marker-end="url(#ah-g2)"/>
+  <line class="e-g2" x1="600" y1="170" x2="640" y2="130" marker-end="url(#ah-g2)"/>
+
+  <rect class="b-g2" x="642" y="96" width="298" height="44" rx="10"/>
+  <text class="t-b" x="656" y="116">ResultLoader.loadResult()</text>
+  <text class="t-xs" x="656" y="132">原来的 Executor 还开着、而且是同一个线程？</text>
+  <line class="e-ink" x1="720" y1="140" x2="720" y2="176" marker-end="url(#ah-ink)"/>
+  <line class="e-ink" x1="880" y1="140" x2="880" y2="176" marker-end="url(#ah-ink)"/>
+  <text class="t-good" x="728" y="164">是</text>
+  <text class="t-bad" x="888" y="164">否</text>
+  <rect class="b-bk" x="642" y="178" width="150" height="70" rx="10"/>
+  <text class="t-s" x="654" y="200">用原来的 Executor</text>
+  <text class="t-s" x="654" y="220">同一条连接</text>
+  <text class="t-bk" x="654" y="240">在事务里：1 次</text>
+  <rect class="b-bad" x="802" y="178" width="138" height="70" rx="10"/>
+  <text class="t-s" x="812" y="200">newExecutor()</text>
+  <text class="t-s" x="812" y="220">从池里再借一条</text>
+  <text class="t-bad" x="812" y="240">事务外：每笔 1 次</text>
+
+  <rect class="b-neu" x="20" y="270" width="920" height="76" rx="12"/>
+  <text class="t-b" x="36" y="294">不在事务里时，Mapper 方法一返回 SqlSession 就关了，原来的 Executor 也跟着关了</text>
+  <text class="t-s" x="36" y="316">所以事务外每碰一笔订单的 items，都要经 SpringManagedTransaction → DataSourceUtils 从 HikariCP 借一条连接、查完再还。</text>
+  <text class="t-s" x="36" y="336">实测：100 笔订单碰一遍，事务外 SQL 101 条、借连接 101 次；包进 @Transactional 里，SQL 还是 101 条，借连接 1 次。</text>
+</svg>
+  </div>
+  <figcaption>和 Hibernate 不一样，MyBatis 的懒加载出了会话照样能加载，不会抛 LazyInitializationException：它直接再开一个 Executor。好处是不报错，代价是每次都要借连接，而且这一点不容易察觉。</figcaption>
+  </figure>
+
+  <h3 id="m-life">④-3 对象活多久：List、Cursor、ResultHandler，以及驱动那一层</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 400" role="img" aria-label="三列对比读 20 万条流水。你的代码一层：List 拿到时 20 万个对象全活着，实测多占 34 到 43 MB；Cursor 和 ResultHandler 同一时刻只活 1 个，实测 0.01 到 0.03 MB。MyBatis 一层：List 是一边读一边往 List 里加；Cursor 是你调 next 才读下一行；ResultHandler 是 MyBatis 读一行回调你一次。JDBC 驱动一层横跨三列：H2 本页实测不在 JVM 里攒整个结果；MySQL Connector/J 默认先把整个结果集读进内存，三种读法都一样；fetchSize 设为 Integer.MIN_VALUE 时一行一行读，useCursorFetch=true 加 fetchSize=N 时一批 N 行。最下面：Cursor 能读多久等于 SqlSession 活多久，不在事务里 Mapper 方法返回就关，实测 A Cursor is already closed。">
+  <text class="t-b" x="20" y="22">你的代码里同时活着的对象</text>
+  <rect class="b-bad" x="20" y="34" width="290" height="80" rx="10"/>
+  <text class="t-h" x="34" y="58">List&lt;PayFlow&gt;</text>
+  <rect class="f-bad" x="34" y="70" width="262" height="12" rx="4"/>
+  <text class="t-s" x="34" y="104">20 万个全活着，实测 +34～43 MB</text>
+  <rect class="b-good" x="335" y="34" width="290" height="80" rx="10"/>
+  <text class="t-h" x="349" y="58">Cursor&lt;PayFlow&gt;</text>
+  <rect class="f-good" x="349" y="70" width="6" height="12" rx="2"/>
+  <text class="t-s" x="349" y="104">同一时刻 1 个，实测 +0.01～0.03 MB</text>
+  <rect class="b-good" x="650" y="34" width="290" height="80" rx="10"/>
+  <text class="t-h" x="664" y="58">ResultHandler</text>
+  <rect class="f-good" x="664" y="70" width="6" height="12" rx="2"/>
+  <text class="t-s" x="664" y="104">同一时刻 1 个，实测 +0.01 MB</text>
+
+  <text class="t-b" x="20" y="142">MyBatis 怎么交给你</text>
+  <rect class="b-cg" x="20" y="152" width="290" height="50" rx="10"/>
+  <text class="t-s" x="34" y="182">读完所有行才返回，边读边往 List 里加</text>
+  <rect class="b-cg" x="335" y="152" width="290" height="50" rx="10"/>
+  <text class="t-s" x="349" y="182">你调一次 next()，它才读下一行</text>
+  <rect class="b-cg" x="650" y="152" width="290" height="50" rx="10"/>
+  <text class="t-s" x="664" y="182">它读一行，就回调你一次</text>
+
+  <text class="t-b" x="20" y="230">JDBC 驱动：结果是不是早就全在内存里了</text>
+  <rect class="b-good" x="20" y="240" width="220" height="64" rx="10"/>
+  <text class="t-s" x="32" y="262">H2（本页实测）</text>
+  <text class="t-xs" x="32" y="282">没有在 JVM 里攒整个结果</text>
+  <rect class="b-bad" x="252" y="240" width="300" height="64" rx="10"/>
+  <text class="t-s" x="264" y="262">MySQL Connector/J 默认</text>
+  <text class="t-xs" x="264" y="282">整个结果集先读进内存（按文档）</text>
+  <text class="t-bad" x="264" y="298">上面三列用哪种都一样</text>
+  <rect class="b-pd" x="564" y="240" width="376" height="64" rx="10"/>
+  <text class="t-mono" x="576" y="262">fetchSize = Integer.MIN_VALUE → 一行一行</text>
+  <text class="t-mono" x="576" y="284">useCursorFetch=true + fetchSize=N → 每批 N 行</text>
+  <text class="t-xs" x="576" y="298">PostgreSQL：fetchSize&gt;0 且不在自动提交（事务里）</text>
+
+  <rect class="b-bk" x="20" y="322" width="920" height="66" rx="10"/>
+  <text class="t-b" x="34" y="346">Cursor 能读多久 = SqlSession 活多久 = 那条连接借多久</text>
+  <text class="t-s" x="34" y="368">不在事务里：Mapper 方法一返回就关会话，游标跟着关，实测 IllegalStateException: A Cursor is already closed.</text>
+  <text class="t-s" x="34" y="384">在 @Transactional 里：会话活到提交，读多久就占这条连接多久。</text>
+</svg>
+  </div>
+  <figcaption>MyBatis 能做到的是“自己不攒”；驱动攒不攒，要看驱动参数。所以流式读要两层都配好：上面用 Cursor 或 ResultHandler，下面让驱动一批一批取。</figcaption>
+  </figure>
+
+  <h3>最少的写法</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">XML</span><b>一对多 JOIN、懒加载、流式</b></div>
+<pre><span class="cm">&lt;!-- 一对多 JOIN：&lt;id&gt; 决定怎么折叠；明细列全写出来，或在 collection 上加 autoMapping="true" --&gt;</span>
+&lt;resultMap id="orderJoin" type="Order"&gt;
+  &lt;id property="id" column="id"/&gt;
+  &lt;result property="status" column="status"/&gt;
+  &lt;collection property="items" ofType="Item" columnPrefix="i_"&gt;
+    &lt;id property="id" column="id"/&gt;
+    &lt;result property="qty" column="qty"/&gt;
+  &lt;/collection&gt;
+&lt;/resultMap&gt;
+
+<span class="cm">&lt;!-- 嵌套查询 + 懒加载：fetchType 单点覆盖全局 lazyLoadingEnabled（默认 false） --&gt;</span>
+&lt;collection property="items" column="id" select="listItems" fetchType="lazy"/&gt;
+
+<span class="cm">&lt;!-- 流式：MySQL 上让驱动一行一行给（Integer.MIN_VALUE） --&gt;</span>
+&lt;select id="cursorFlows" resultType="PayFlow" fetchSize="-2147483648"&gt;SELECT … FROM pay_flow ORDER BY id&lt;/select&gt;</pre>
+  </div>
+  <div class="codebox" style="margin-top:12px">
+    <div class="code-bar"><span class="n">Java</span><b>Cursor 必须在事务里读完</b></div>
+<pre>@Transactional(readOnly = true)
+public void export(Writer out) {
+  try (Cursor&lt;PayFlow&gt; c = mapper.cursorFlows()) {   <span class="cm">// 会话活到方法结束</span>
+    for (PayFlow f : c) write(out, f);                <span class="cm">// 读一条写一条，写完就扔</span>
+  }
+}</pre>
+  </div>
+  <p class="tip">参数默认值、<code>resultOrdered</code>、<code>safeResultHandlerEnabled</code> 这些细节，放到第 ⑥ 步。</p>
+
+  <h3 id="m-why">为什么这样设计：MyBatis 不认识实体，只认识行</h3>
+  <div class="design">
+    <div class="way" data-role="cg">
+      <h4>选中的：按行流式映射，身份由你用 &lt;id&gt; 告诉它</h4>
+      <ul class="pains">
+        <li class="ok">SQL 是你写的，MyBatis 不解析它，也不知道哪一列是主键，所以“哪几行是同一个对象”只能由 <code>&lt;id&gt;</code> 告诉它</li>
+        <li class="ok">认身份的 Map 只在这一个结果集里活着，读完就清空，下一条 SQL 从零开始，没有全局状态</li>
+        <li class="ok">一行一行处理，所以能自然地接上 Cursor 和 ResultHandler，不必先攒齐</li>
+        <li>代价：一对多装成什么样、发几条 SQL，全看你怎么写 resultMap；写错了不报错，只是慢或者少数据</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>放弃的：JPA 那样的持久化上下文</h4>
+      <ul class="pains">
+        <li class="ok">实体有 <code>@Id</code>，会话里有一张身份表（identity map），同一行在一个会话里永远是同一个对象，自动去重</li>
+        <li>要一直开着会话，还要做脏检查、管实体状态；出了会话再碰懒加载属性，直接 LazyInitializationException</li>
+        <li>SQL 由框架生成，“到底发了几条”反而更难看清，N+1 一样会发生</li>
+      </ul>
+    </div>
+  </div>
+  <p class="note-p">决定胜负的约束是：<b>MyBatis 的定位是“SQL 你写，映射你说”</b>。它不拥有实体模型，就只能把身份、加载时机、流式这些决定都做成可配置的，交回给写 resultMap 的人。⑥ 里所有的坑，都是这些配置没写对。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：交易靶场的订单列表和流水导出，8 组场景</h2>
+    <p class="lead">不起 Web，直接调 Mapper 和 Service。H2 内存库（MySQL 模式）：100 笔订单（9501～9600，9527 在里面），每笔 1～3 件明细，共 199 件；20 万条支付流水。一个插件挂在 <code>StatementHandler.prepare</code> 上，数 SQL 条数和借连接次数。Spring Boot 3.5.16，mybatis-spring-boot-starter 3.0.5（MyBatis 3.5.19），JDK 17。</p>
+  </div>
+  <div class="duo">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">1</span><b>SqlCounter</b>：插件数 SQL、数借连接</div>
+<pre>@Intercepts(@Signature(type = StatementHandler.class, method = "prepare",
+        args = {Connection.class, Integer.class}))
+public class SqlCounter implements Interceptor {
+  static int sql;
+  static final Set&lt;Integer&gt; conns = new HashSet&lt;&gt;();
+  public Object intercept(Invocation inv) throws Throwable {
+    sql++;
+    <span class="cm">// HikariCP 每借一次连接都给一个新的代理对象：</span>
+    <span class="cm">// 不同的代理有几个，就是借了几次</span>
+    conns.add(System.identityHashCode(inv.getArgs()[0]));
+    return inv.proceed();
+  }
+}</pre>
+    </div>
+    <div class="codebox">
+      <div class="code-bar"><span class="n">2</span><b>OrderService</b>：要事务的几个场景</div>
+<pre>@Transactional(readOnly = true)
+public int lazyInTx() {
+  int n = 0;
+  for (Order o : m.listOrdersLazy()) n += o.getItems().size();
+  return n;
+}
+
+public long cursorNoTx() {              <span class="cm">// 故意不加 @Transactional</span>
+  long sum = 0;
+  for (PayFlow f : m.cursorFlows()) sum += f.getAmount();
+  return sum;
+}
+
+@Transactional(readOnly = true)         <span class="cm">// 分 10 页导出，每页用完就扔</span>
+public long pagesInTx(LongSupplier heap) {
+  for (int off = 0; off &lt; 200_000; off += 20_000)
+    m.listFlowsPage(off, 20_000).size();
+  return heap.getAsLong();
+}</pre>
+    </div>
+  </div>
+  <p class="cmdline" style="margin-top:12px">cd java &amp;&amp; JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64 mvn -q -pl mybatis/mybatis-result-mapping compile exec:java -Dexec.mainClass=labs.mybatis.mybatis_result_mapping.Lab</p>
+  <p class="tip"><a href="https://github.com/archeu/study-labs/tree/main/java/mybatis/mybatis-result-mapping">完整代码 →</a>（4 种 resultMap 在 <code>mapper/OrderMapper.xml</code>，造数在 <code>schema.sql</code>）</p>
+  <div class="codebox" style="margin-top:12px">
+    <div class="code-bar"><span class="n">输出</span><b>摘录，本机跑了 3 次，条数和次数每次一样</b></div>
+<pre class="console"><b>== nplus1：100 笔订单连明细，嵌套查询 vs JOIN</b>
+  嵌套查询：订单 100 笔，明细 199 件，<span class="r">SQL 101 条</span>，借连接 1 次，最快一次 8.90 ms
+  JOIN：订单 100 笔，明细 199 件，<span class="w">SQL 1 条</span>，借连接 1 次，最快一次 1.88 ms
+<b>== lazy：懒加载</b>
+  查完订单：SQL 1 条，借连接 1 次；对象的类：labs.mybatis.mybatis_result_mapping.Order_$$_jvst36d_0
+  调 getStatus()：SQL 1 条，借连接 1 次
+  调第 2 笔的 toString()（它不碰 items）：<span class="r">SQL 2 条，借连接 2 次</span>
+  不在事务里，把 100 笔的 items 都碰一遍：<span class="r">SQL 101 条，借连接 101 次</span>
+  在 @Transactional 里做同样的事：明细 199 件，SQL 101 条，借连接 1 次
+  Jackson 序列化懒加载对象：<span class="r">InvalidDefinitionException: No serializer found for class org.apache.ibatis.executor.loader.javassist.JavassistProxyFactory$EnhancedResultObjectProxyImpl</span> … ["handler"]
+<b>== auto：明细的 resultMap 只写 &lt;id&gt;</b>
+  9527 的明细：[Item#95271(<span class="r">sku=null, qty=null, price=null</span>), Item#95272(…null…), Item#95273(…null…)]
+<b>== limit：想要“前 10 笔订单”</b>
+  JOIN 后 LIMIT 10：拿到 <span class="r">6 笔</span>订单：9501×1 9502×2 9503×3 9504×1 9505×2 <span class="r">9506×1</span>
+  先分订单页再 JOIN：拿到 10 笔订单：9501×1 9502×2 9503×3 9504×1 9505×2 9506×3 9507×1 9508×2 9509×3 9510×1
+<b>== handler：嵌套结果映射 + 自定义 ResultHandler</b>
+  <span class="r">ExecutorException: Mapped Statements with nested result mappings cannot be safely used with a custom ResultHandler.</span> …
+<b>== stream：导出 20 万条流水，在第 10 万条时量堆（GC 后）</b>
+  第 2 轮 selectList：200000 条，第 10 万条时堆比开始多 <span class="r">34.34 MB</span>
+  第 2 轮 Cursor（事务里）：第 10 万条时堆比开始多 <span class="w">0.01 MB</span>
+  第 2 轮 ResultHandler：第 10 万条时堆比开始多 <span class="w">0.01 MB</span>
+  Cursor（不在事务里）：<span class="r">IllegalStateException: A Cursor is already closed.</span>
+<b>== pages：分 10 页导出 20 万条，每页用完就扔；循环结束时量堆</b>
+  第 2 轮：不在事务里 0.00 MB；在一个 @Transactional 里 <span class="r">34.35 MB</span>；事务结束后再量 0.00 MB</pre>
+  </div>
+  <div class="tbl-wrap" style="margin-top:14px">
+  <table class="t runs">
+    <thead><tr><th>场景</th><th>结果</th><th>从哪条原理推出来</th></tr></thead>
+    <tbody>
+      <tr class="badrow"><td>嵌套查询（立即）</td><td>SQL 101 条，比 JOIN 慢约 5 倍（内存库，没有网络往返）</td><td>每个父对象建好就查一次子查询（④-2 左半）</td></tr>
+      <tr class="goodrow"><td>JOIN + <code>&lt;id&gt;</code></td><td>199 行折成 100 个订单，SQL 1 条</td><td>④-1 rowKey</td></tr>
+      <tr class="badrow"><td>懒加载，事务外</td><td>借连接 101 次</td><td>④-2 会话关了就 newExecutor</td></tr>
+      <tr class="badrow"><td>懒加载，<code>toString()</code></td><td>不碰 items 也触发</td><td>④-2 触发方法</td></tr>
+      <tr class="badrow"><td>明细只写 <code>&lt;id&gt;</code></td><td>其余字段全是 null</td><td>⑥ 坑 4：PARTIAL</td></tr>
+      <tr class="badrow"><td>JOIN 后 LIMIT 10</td><td>6 笔，最后一笔少两件</td><td>④-1 LIMIT 管的是行</td></tr>
+      <tr class="goodrow"><td>Cursor / ResultHandler</td><td>堆几乎不涨</td><td>④-3 同一时刻 1 个</td></tr>
+      <tr class="badrow"><td>分页导出包在事务里</td><td>10 页全留着，34 MB</td><td>⑥ 第三圈：一级缓存活到事务结束</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="pit" style="border-left-color:var(--good);margin-top:14px"><b>到这里已经能交差了</b><p class="tip">订单列表改成 JOIN（或两步法），流水导出改成事务里的 Cursor，在 H2 上已经又快又省。</p></div>
+  <div class="pit" style="border-left-color:var(--warn);margin-top:10px"><b><em>还没处理</em>的细节</b><p class="tip">换成 MySQL，Cursor 照样可能把内存撑爆（<a href="#p-mysql">坑 7</a>）；列表页要分页时 JOIN 不能直接 LIMIT（<a href="#p-limit">坑 5</a>）；懒加载对象交给 Controller 会被 Jackson 和日志意外触发（<a href="#p-trigger">坑 3</a>）。</p></div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：每个坑都在问“这一行属于谁”或“这个对象还要活多久”</h2>
+    <p class="lead">上一圈的“常踩的坑”提过 N+1 和 <code>#{}</code> / <code>${}</code>，这里不重复后者。这一圈的 8 个坑，7 个在本机跑出来过。</p>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-n1"><b><em>坑 1</em>列表页 100 笔订单，发了 101 条 SQL<a class="root" href="#m-lazy">← ④-2 嵌套查询</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>⑤：嵌套查询 101 条、8.9～10.9 ms，JOIN 1 条、1.7～2.1 ms。这还是内存库；真 MySQL 每条至少一个网络往返，同机房按 0.2～0.5 ms 算，多出来 100 条就是 20～50 ms（估算）。</dd>
+      <dt>根源</dt><dd><code>&lt;collection select&gt;</code> 的意思就是“每建好一个父对象，拿它的 <code>column</code> 去执行一次子查询”。父对象有几个，子查询就有几次。</dd>
+      <dt>做法</dt><dd class="fix">列表页用两步法（<code>IN</code>）或 JOIN；嵌套查询只留给单条详情。上线前开 SQL 日志，或者用 ⑤ 的计数插件跑一遍接口。</dd></dl></div>
+    <div class="pit" id="p-borrow"><b><em>坑 2</em>懒加载在事务外：每碰一次，借一次连接<a class="root" href="#m-lazy">← ④-2 newExecutor</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>⑤：事务外碰 100 笔订单的 items，借连接 101 次；放进 <code>@Transactional</code> 只借 1 次。并发高时，每个请求在循环里反复借还，池子周转变慢。</dd>
+      <dt>根源</dt><dd>Mapper 方法返回时 SqlSession 已经关了，<code>ResultLoader</code> 发现原 Executor 关了，就 <code>newExecutor()</code> 走 <code>SpringManagedTransaction</code> 再借一条，查完就关。</dd>
+      <dt>做法</dt><dd class="fix">要用懒加载，就在 Service 的 <code>@Transactional(readOnly = true)</code> 里把需要的属性碰完；更好的是一开始就按需要的形状查（JOIN 或两步法）。</dd></dl></div>
+    <div class="pit" id="p-trigger"><b><em>坑 3</em>打一行日志、返回给前端，懒加载就被触发了<a class="root" href="#m-lazy">← ④-2 触发方法</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>⑤：<code>toString()</code> 根本不碰 items，照样多发 1 条 SQL。把代理对象直接交给 Jackson：<code>InvalidDefinitionException: No serializer found for class …EnhancedResultObjectProxyImpl</code>，引用链停在 <code>["handler"]</code>。</dd>
+      <dt>根源</dt><dd><code>lazyLoadTriggerMethods</code> 默认是 <code>equals,clone,hashCode,toString</code>，调到它们就加载全部懒属性；代理类多了一个 <code>handler</code> 字段，Jackson 不知道怎么序列化它。</dd>
+      <dt>做法</dt><dd class="fix">Controller 返回 DTO，不返回带懒加载的实体；日志里打 id，不打整个对象。实在要改，把 <code>lazyLoadTriggerMethods</code> 设成空，或给 Jackson 配 <code>@JsonIgnoreProperties("handler")</code>。</dd></dl></div>
+    <div class="pit" id="p-null"><b><em>坑 4</em>JOIN 回来了，明细字段全是 null<a class="root" href="#m-fold">← ④-1 嵌套 resultMap</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>⑤：明细的 resultMap 只写了 <code>&lt;id&gt;</code>，指望 <code>i_sku_id</code> 自动映射成 <code>skuId</code>，结果 <code>Item#95271(sku=null, qty=null, price=null)</code>。不报错。</dd>
+      <dt>根源</dt><dd><code>autoMappingBehavior</code> 默认 <code>PARTIAL</code>：只给“没有嵌套映射”的 resultMap 做自动映射。源码 <code>shouldApplyAutomaticMappings</code>：嵌套的那层只有 <code>FULL</code> 才自动映射。打开 <code>mapUnderscoreToCamelCase</code> 也救不了，它只管列名怎么转，不管做不做。</dd>
+      <dt>做法</dt><dd class="fix">嵌套那层的列全写出来，或者只在这个 <code>&lt;collection&gt;</code> 上加 <code>autoMapping="true"</code>。不建议全局 <code>FULL</code>：父子表都有 <code>id</code>、<code>status</code> 时容易映射串。</dd></dl></div>
+    <div class="pit" id="p-limit"><b><em>坑 5</em>JOIN 之后分页：要 10 笔，拿到 6 笔，最后一笔还缺明细<a class="root" href="#m-fold">← ④-1 LIMIT 管的是行</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>⑤：<code>LIMIT 10</code> 拿到 9501～9506 共 6 笔，9506 只有 1 件（实际 3 件）。PageHelper 一类插件给外层 SQL 拼 LIMIT，结果一样；<code>RowBounds</code> 默认也不报错（<code>safeRowBoundsEnabled</code> 默认 false）。</dd>
+      <dt>根源</dt><dd>数据库按行截断，不知道哪几行属于同一个订单；MyBatis 只能折叠它收到的行（上面实验台的“JOIN 后 LIMIT 4”）。总数也会算成行数。</dd>
+      <dt>做法</dt><dd class="fix">先在子查询里对订单分页再 JOIN（⑤ 的 <code>listOrdersPageThenJoin</code>，10 笔都对），或者两步法：先分页查订单，再 <code>IN</code> 查明细。</dd></dl></div>
+    <div class="pit" id="p-closed"><b><em>坑 6</em>Cursor 一迭代就报 A Cursor is already closed<a class="root" href="#m-life">← ④-3 会话寿命</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>⑤：没加 <code>@Transactional</code> 的方法里，<code>for (PayFlow f : m.cursorFlows())</code> 抛 <code>IllegalStateException: A Cursor is already closed.</code></dd>
+      <dt>根源</dt><dd>不在事务里，<code>SqlSessionTemplate</code> 在 Mapper 方法返回前就关了 SqlSession，<code>DefaultSqlSession.close()</code> 会把它打开过的所有 Cursor 一起关掉（<code>closeCursors</code>）。</dd>
+      <dt>做法</dt><dd class="fix">用 Cursor 的方法加 <code>@Transactional(readOnly = true)</code>，或者用 <code>TransactionTemplate</code> 把读的循环包起来；读完用 try-with-resources 关。</dd></dl></div>
+    <div class="pit" id="p-mysql"><b><em>坑 7</em>换成 MySQL，Cursor 照样 OOM<a class="root" href="#m-life">← ④-3 驱动那一层</a><span class="seen">按文档</span></b>
+      <dl><dt>现象</dt><dd>代码和 H2 上一模一样，导出几百万行时堆还是涨满，因为执行查询那一刻，驱动已经把所有行读进了内存。</dd>
+      <dt>根源</dt><dd>Connector/J 文档：“By default, ResultSets are completely retrieved and stored in memory.” MyBatis 的 Cursor 只保证自己不攒，管不到驱动。</dd>
+      <dt>做法</dt><dd class="fix">语句上加 <code>fetchSize="-2147483648"</code>（<code>Integer.MIN_VALUE</code>，配合默认的只进只读结果集，一行一行读），或者 URL 加 <code>useCursorFetch=true</code> 再设 <code>fetchSize="1000"</code>。流式读完之前，这条连接上不能再发别的 SQL。PostgreSQL 要在事务里且 <code>fetchSize&gt;0</code>。</dd></dl></div>
+    <div class="pit" id="p-handler"><b><em>坑 8</em>嵌套 resultMap 配 ResultHandler，直接报错<a class="root" href="#m-fold">← ④-1 resultOrdered</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>⑤：<code>ExecutorException: Mapped Statements with nested result mappings cannot be safely used with a custom ResultHandler…</code></dd>
+      <dt>根源</dt><dd>嵌套结果要等同一个订单的所有行都读到才算完整。不保证有序时，MyBatis 不知道什么时候能把一个订单交给你，所以 <code>safeResultHandlerEnabled</code>（默认 true）直接拦下。</dd>
+      <dt>做法</dt><dd class="fix">SQL 按 <code>&lt;id&gt;</code> 列 <code>ORDER BY</code>，语句上加 <code>resultOrdered="true"</code>（实验台第三种模式）。Cursor 配嵌套 collection 也要这样，<code>Cursor</code> 接口的 Javadoc 里写明了。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <ul class="rules-list" style="margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:6px">
+    <li>每个 resultMap 都写 <code>&lt;id&gt;</code>，嵌套那层也写。<span class="tip">防的是：用所有列拼 key，又慢；两行全同时被并成一个。</span></li>
+    <li>列表接口不用嵌套查询，默认两步法；单条详情可以 JOIN。<span class="tip">防的是：N+1。</span></li>
+    <li>全局 <code>lazyLoadingEnabled</code> 保持默认 false，需要时用 <code>fetchType="lazy"</code> 单点打开。<span class="tip">防的是：全局打开后，所有关联都变成代理，日志和序列化到处触发。</span></li>
+    <li>Controller 返回 DTO，不返回 Mapper 查出来的实体。<span class="tip">防的是：坑 3。</span></li>
+    <li>大结果导出：<code>@Transactional(readOnly = true)</code> + Cursor（或 ResultHandler）+ 驱动流式参数，循环里不做远程调用。<span class="tip">防的是：坑 6、坑 7；流式期间连接和数据库里的语句一直占着。</span></li>
+    <li>导出不要在一个大事务里循环 <code>selectList</code> 分页。<span class="tip">防的是：每页都留在一级缓存里（第三圈）。</span></li>
+  </ul>
+
+  <div class="round"><span class="rb">第三圈</span><h3>优化和深处</h3></div>
+  <div class="deep">
+    <h4 id="d-l1">分页导出包在事务里，每一页都没被回收<span class="seen"> 实测</span></h4>
+    <p class="note-p">⑤ 的 <code>pages</code>：分 10 页、每页 2 万条，每页用完就扔。不在事务里，循环结束时堆只多 0～0.9 MB；包进一个 <code>@Transactional</code>，多了 <b>34.3 MB</b>，事务一结束又回到 0。原因在 <code>BaseExecutor.queryFromDatabase</code>：每次查完都 <code>localCache.putObject(key, list)</code>，而 SqlSession 跟着事务活，10 页的 List 都被一级缓存拽着。Cursor 走 <code>queryCursor</code>，不进一级缓存，所以没有这个问题。实在要分页：设 <code>localCacheScope=STATEMENT</code>（每条语句结束就清，代价是同一事务里重复查询不再命中），或者换成 Cursor。</p>
+
+    <h4>源码：一次 JOIN 查询在 DefaultResultSetHandler 里走过的方法</h4>
+    <div class="codebox">
+<pre>handleResultSets(stmt)                      <span class="cm">// 可能有多个结果集，逐个处理</span>
+└ handleResultSet(rsw, resultMap, …)
+  └ handleRowValues(…)                       <span class="cm">// resultMap.hasNestedResultMaps() ? 嵌套 : 简单</span>
+    └ handleRowValuesForNestedResultMap(…)
+      ├ createRowKey(resultMap, rsw, null)   <span class="cm">// resultMap id + &lt;id&gt; 列值；没有 &lt;id&gt; 就用全部普通列</span>
+      ├ nestedResultObjects.get(rowKey)      <span class="cm">// 已有 → partialObject</span>
+      ├ getRowValue(…, partialObject)        <span class="cm">// 没有就 createResultObject + 自动映射 + 显式映射</span>
+      │ └ applyNestedResultMappings(…)       <span class="cm">// 明细：combineKeys(子 key, 父 key) 去重后 linkObjects</span>
+      └ storeObject(resultHandler, …)        <span class="cm">// 新父对象才调；List 用 DefaultResultHandler 收</span>
+  └ cleanUpAfterHandlingResultSet()          <span class="cm">// nestedResultObjects.clear()</span></pre>
+    </div>
+    <p class="note-p">两点值得记住：一，明细也有自己的 key（子 key 合并父 key），所以同一件明细在 JOIN 结果里重复出现，也只挂一次；二，没开 <code>resultOrdered</code> 时，这张 Map 要到整个结果集读完才清，所以“Cursor + 嵌套 collection + 不排序”时，内存还是会随订单数涨。</p>
+
+    <h4>JOIN 和两步法，传输量差多少</h4>
+    <p class="note-p">JOIN 让订单列在每一行重复：订单行宽 1 KB、平均 5 件明细，JOIN 回来约 5 KB 的订单列，两步法只有 1 KB 再加一次往返（估算）。明细多、订单宽时两步法省带宽；明细少、往返贵时 JOIN 更快。MyBatis-Plus 没有一对多 JOIN 映射，项目里通常就是两步法。</p>
+  </div>
+
+  <h4 style="margin-top:18px">版本差异：主干没变，默认值动过几次</h4>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>版本</th><th>变化</th><th>影响</th></tr></thead>
+    <tbody>
+      <tr><td>MyBatis 3.3</td><td>懒加载代理默认从 CGLIB 换成 Javassist</td><td>⑤ 里的 <code>Order_$$_jvst…</code> 类名就是它；3.5.10 起 CGLIB 标为废弃</td></tr>
+      <tr><td>MyBatis 3.4.0</td><td>加入 <code>Cursor</code></td><td>更早的版本只能用 ResultHandler 流式</td></tr>
+      <tr><td>MyBatis 3.4.2 以后</td><td><code>aggressiveLazyLoading</code> 默认从 true 改成 false（文档写“true in ≤3.4.1”）</td><td>老项目升级后，调任意方法不再加载全部懒属性，只有触发方法才会</td></tr>
+      <tr><td>JDK 8 / 17</td><td>MyBatis 3.5.x 两边都能跑，上面的流程完全一样</td><td>变的是 starter：Boot 2 用 mybatis-spring-boot-starter 2.3.x，Boot 3 用 3.0.x</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="round" style="margin-top:18px"><span class="rb">下一圈</span><h3>这一层没有尽头</h3></div>
+  <ul class="next">
+    <li>换真 MySQL（Testcontainers）：亲手看 Connector/J 默认把 20 万行读进堆，再用 <code>fetchSize</code> 压下去（接 J06）</li>
+    <li>批量写：<code>ExecutorType.BATCH</code>、<code>foreach</code> 拼 VALUES、<code>rewriteBatchedStatements</code> 三种写 1 万条流水比一比</li>
+    <li>构造器映射和不可变对象：<code>&lt;constructor&gt;</code>、record、<code>argNameBasedConstructorAutoMapping</code></li>
+    <li>TypeHandler：金额用 <code>BigDecimal</code> 还是分、枚举存名字还是序号、JSON 列怎么映射</li>
+    <li>多结果集和存储过程：<code>resultSets</code> 属性，一次调用回来订单和明细两个结果集</li>
+    <li>MyBatis-Plus 的 <code>selectPage</code> 配一对多：为什么它不做 JOIN 映射，社区的 mybatis-plus-join 是怎么补的</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到 ⑤：在订单列表和导出上改三处</h2>
+    <p class="lead">都在 <a href="https://github.com/archeu/study-labs/tree/main/java/mybatis/mybatis-result-mapping">mybatis-result-mapping</a> 上改，改完跑对应的场景。</p>
+  </div>
+  <div class="rules-list">
+    <div class="pit" style="border-left-color:var(--of)"><b>练习 1 · 用两步法消掉 N+1</b><p class="tip">把 <code>listOrdersNested</code> 改成：先查订单，收集 id，再 <code>WHERE order_id IN (…)</code> 查明细（<code>&lt;foreach&gt;</code>），在 Java 里 <code>groupingBy</code> 装回去。跑 <code>nplus1</code>，预期 SQL 2 条，9527 还是 3 件。</p></div>
+    <div class="pit" style="border-left-color:var(--of)"><b>练习 2 · 让嵌套结果也能流式交出去</b><p class="tip">给 <code>scanOrdersJoin</code> 加上 <code>resultOrdered="true"</code>（SQL 已经 <code>ORDER BY o.id</code>），handler 里每收到一个订单打印 id 和件数。跑 <code>handler</code>，预期不再报错，100 笔都完整。再去掉 <code>ORDER BY</code> 看看会怎样（坑 8）。</p></div>
+    <div class="pit" style="border-left-color:var(--of)"><b>练习 3 · 让分页导出在事务里也不攒</b><p class="tip">在 <code>application.properties</code> 加 <code>mybatis.configuration.local-cache-scope=statement</code>，跑 <code>pages</code>，预期事务里也降到 1 MB 以下。改回来，只在 <code>listFlowsPage</code> 上加 <code>flushCache="true"</code>：查之前清，查完还会放进去，预期剩一页的量，约 3.4 MB。</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>MyBatis 一行一行读结果集，用 <code>&lt;id&gt;</code> 算出的 rowKey 在一张 Map 里认出“这一行属于哪个对象”；发几条 SQL 由 resultMap 怎么写决定，对象和游标活多久由 SqlSession（也就是事务）和驱动决定。</p></details>
+    <details><summary>2. 手写 JDBC 装一对多，最疼的是哪两点？</summary><p>每个查询都要自己写“按 id 去重再挂明细”的循环，列名是字符串、改了不报错；想省内存还得自己控制读一条处理一条、自己管连接什么时候关。</p></details>
+    <details><summary>3. 明细字段全是 null，根源是哪条原理？</summary><p><code>autoMappingBehavior</code> 默认 <code>PARTIAL</code>，嵌套的那层 resultMap 不做自动映射（④-1 里“新建对象 + 自动映射 + 显式映射”，嵌套层只剩显式映射）。只写了 <code>&lt;id&gt;</code>，就只有 id 有值。</p></details>
+    <details><summary>4. 预测：订单的 resultMap 去掉 <code>&lt;id&gt;</code>，只留几个 <code>&lt;result&gt;</code>，JOIN 查询还能折叠成 100 笔吗？什么时候会出错？</summary><p>能。没有 <code>&lt;id&gt;</code> 时 rowKey 用全部普通 <code>&lt;result&gt;</code> 列（④-1 图下的说明），同一订单的几行这些列都相同，照样折叠。出错的情况是两笔不同的订单在这些列上完全相同，比如只映射了 <code>status</code> 和 <code>amount</code>，两笔都是 CREATED、239400，就会被并成一个，明细也挂到一起。</p></details>
+    <details><summary>5. 预测：把懒加载那个场景改成在 <code>@Transactional</code> 里查订单，但在事务提交以后（方法返回给 Controller 之后）再碰 items，借连接几次？</summary><p>每笔一次。事务一提交，SqlSession 就关了，原来的 Executor 也关了，<code>ResultLoader</code> 只能 <code>newExecutor()</code> 再借（④-2 右下）。决定借几次的不是“查的时候在不在事务里”，是“碰的时候原 Executor 还开没开”。</p></details>
+    <details><summary>6. 预测：MySQL 上，导出用 Cursor，语句加了 <code>fetchSize="-2147483648"</code>，循环里每读一条流水又调一次 <code>orderMapper.selectById</code> 查订单。会怎样？</summary><p>报错。Connector/J 流式读时，这条连接在结果集读完或关闭之前不能再发别的查询；在同一个事务里，<code>selectById</code> 用的正是这条连接（④-3、坑 7）。要么先把需要的订单查好放进 Map，要么把查订单挪到流式循环之外。</p></details>
+    <details><summary>7. 放回全景：第 9 站前后各发生了什么？这一页讲的东西坏了，整条链路会怎样？</summary><p>第 9 站之前是第 8 站：Mapper 代理按方法名找到 MappedStatement，看返回类型决定走 <code>selectList</code> 还是 <code>selectCursor</code>，SqlSessionTemplate 从第 7 站绑在线程上的事务里拿到 SqlSession 和连接。第 9 站 Executor 发出 SQL，结果回来交给 <code>DefaultResultSetHandler</code>；之后第 10 站提交事务、关会话，第 11 站把返回值写成 JSON。结果映射写坏了：N+1 让第 9 站发 101 条 SQL，请求变慢、连接占得更久，第 7 站后面排队的请求借不到连接；懒加载对象漏到第 11 站，Jackson 序列化时要么再借连接查库，要么直接 500；Cursor 用在事务外，在第 9 站之后一迭代就抛异常。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机实测：2 核 ARM Linux，OpenJDK 17.0.21，Spring Boot 3.5.16（Spring Framework 6.2.19），mybatis-spring-boot-starter 3.0.5（MyBatis 3.5.19），HikariCP，H2 内存库（MySQL 模式）。⑤ 的 8 组场景完整跑了 1 次、<code>nplus1</code> 和 <code>stream</code> 又跑了 2 次、<code>pages</code> 跑了 1 次（每次 2 轮），条数和次数每次一样；耗时和堆是 GC 后的 <code>MemoryMXBean</code> 读数，只看相对大小。真 MySQL 上的网络往返（坑 1）是估算，Connector/J 和 PostgreSQL 驱动的流式行为（坑 7）按官方文档，没有在本机跑。</p>
+  <p>按源码（MyBatis 3.5.19）：<code>DefaultResultSetHandler</code> 的 <code>handleRowValuesForNestedResultMap</code>、<code>createRowKey</code>、<code>getResultMappingsForRowKey</code>、<code>shouldApplyAutomaticMappings</code>、<code>checkResultHandler</code>；<code>ResultMap</code> 构建时没有 <code>&lt;id&gt;</code> 就用全部映射；<code>ResultLoader.selectList</code> / <code>newExecutor</code>；<code>BaseExecutor.queryFromDatabase</code>、<code>queryCursor</code>；<code>DefaultSqlSession.closeCursors</code>；<code>DefaultCursor</code>；<code>Configuration</code> 的默认值。按文档：MyBatis 3 Configuration 的 settings 表（默认值和版本注记）、MySQL Connector/J “JDBC API Implementation Notes” 的 ResultSet 一节、pgJDBC “Getting results based on a cursor”。</p>
+  <p>相关：<a href="../java/pano-j05-request-through-spring.html">全景：一个请求穿过 Spring</a> · <a href="mybatis-flow.html">MyBatis 执行流程（上一圈）</a> · <a href="mybatis-plugin-page.html">插件与分页</a> · <a href="mybatis-cache.html">一级、二级缓存</a> · <a href="mybatis-spring-tx.html">MyBatis 与 Spring 事务</a> · <a href="mybatis-plus.html">MyBatis-Plus</a> · <a href="../spring/spring-tx-propagation.html">事务传播与失效</a> · <a href="../java/roadmap.html#j05">回到 Java 地图 J05</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// JOIN 回来的行怎么折叠成订单：照 MyBatis 3.5.19 DefaultResultSetHandler.handleRowValuesForNestedResultMap 写
+//  - 每行先算 rowKey = resultMap id + <id> 列的值（createRowKey）
+//  - 去 nestedResultObjects 里找：没有 → 新建 Order，放进 map；不是 resultOrdered 时马上 storeObject 进结果 List
+//  - 有 → 不新建，只把这一行的明细挂到已有的 Order 上（applyNestedResultMappings）
+//  - resultOrdered=true（Cursor / ResultHandler 要求）：遇到新 key 且手里有上一个 → 清空 map，把上一个交出去；最后一个在读完时交
+var ROWS = [
+  { o: 9526, u: 1026, amt: 119700, i: 95261, sku: 89, qty: 1 },
+  { o: 9526, u: 1026, amt: 119700, i: 95262, sku: 90, qty: 2 },
+  { o: 9527, u: 1027, amt: 239400, i: 95271, sku: 89, qty: 1 },
+  { o: 9527, u: 1027, amt: 239400, i: 95272, sku: 90, qty: 2 },
+  { o: 9527, u: 1027, amt: 239400, i: 95273, sku: 91, qty: 3 },
+  { o: 9528, u: 1028, amt: 39900, i: 95281, sku: 89, qty: 1 }
+];
+var REAL = { 9526: 2, 9527: 3, 9528: 1 };
+function fold(mode) {
+  var rows = mode === 'limit' ? ROWS.slice(0, 4) : ROWS;
+  var map = {}, keys = [], out = [], steps = [], prev = null, maxMap = 0;
+  function snap(idx, say, kind) {
+    var m = keys.map(function (k) { return { o: map[k].o, n: map[k].items.length }; });
+    if (m.length > maxMap) maxMap = m.length;
+    steps.push({ row: idx, say: say, kind: kind, map: m,
+      out: out.map(function (x) { return { o: x.o, n: x.items.length, full: x.items.length === REAL[x.o] }; }) });
+  }
+  for (var idx = 0; idx < rows.length; idx++) {
+    var r = rows[idx], key = 'orderJoin|id=' + r.o, hit = map.hasOwnProperty(key), say;
+    if (mode === 'ordered' && !hit && prev !== null) {
+      var done = map[prev];
+      map = {}; keys = [];
+      out.push(done);
+      say = 'rowKey ' + r.o + ' 是新的，而查询保证按 id 排好序：上一个订单 ' + done.o + ' 不会再有行了。清空 map，把 ' + done.o + '（' + done.items.length + ' 件）交给 Cursor / ResultHandler。再为 ' + r.o + ' 新建对象。';
+    }
+    if (!hit) {
+      map[key] = { o: r.o, items: [] }; keys.push(key);
+      if (mode !== 'ordered') out.push(map[key]);
+      if (!say) say = 'rowKey = orderJoin + id=' + r.o + '，map 里没有 → 新建 Order ' + r.o + (mode !== 'ordered' ? '，马上放进结果 List（此时它还没有明细）' : '') + '。这一行的明细 ' + r.i + ' 挂上去。';
+    } else {
+      say = 'rowKey = orderJoin + id=' + r.o + '，map 里已有 → 不新建订单，订单列这一行直接跳过，只把明细 ' + r.i + ' 挂到已有的 Order ' + r.o + ' 上。';
+    }
+    map[key].items.push(r.i);
+    prev = key;
+    snap(idx, say, hit ? 'hit' : 'new');
+  }
+  var endSay;
+  if (mode === 'ordered') {
+    out.push(map[prev]); map = {}; keys = [];
+    endSay = 'rs.next() 返回 false：把手里最后一个订单交出去。整个过程中 map 里最多只有 1 个订单，所以结果再多，内存也只占一个订单。';
+  } else {
+    map = {}; keys = [];
+    endSay = mode === 'limit'
+      ? 'LIMIT 4 让数据库只回了 4 行，rs.next() 就返回 false 了。MyBatis 不知道 9527 还有第 3 件，也不知道 9528 存在：拿到 2 个订单，9527 少一件，不报错。'
+      : 'rs.next() 返回 false：结果集读完，清空 map。List 里 3 个订单，件数都对。6 行变成 3 个对象，靠的就是 rowKey。';
+  }
+  snap(-1, endSay, 'end');
+  return { rows: rows, cut: ROWS.length - rows.length, steps: steps, maxMap: maxMap };
+}
+/*SIM-END*/
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  var MODES = [
+    { id: 'id', t: '按 <id> 折叠', d: 'selectList，6 行全回来' },
+    { id: 'limit', t: 'JOIN 后 LIMIT 4', d: '数据库只回前 4 行' },
+    { id: 'ordered', t: 'resultOrdered', d: 'Cursor / ResultHandler' }
+  ];
+  var mode = 'id', run = fold(mode), at = 0, timer = null;
+  var box = $('fd'), modeEl = $('fd-mode');
+  MODES.forEach(function (m) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.dataset.m = m.id;
+    b.innerHTML = '<b>' + esc(m.t) + '</b><span>' + esc(m.d) + '</span>';
+    b.addEventListener('click', function () { stop(); mode = m.id; run = fold(mode); at = 0; render(); });
+    modeEl.appendChild(b);
+  });
+  function objHtml(x, cls) {
+    return '<div class="obj ' + cls + '">Order ' + x.o + ' · items ' + x.n + ' 件' + (x.full === false ? '（实际 ' + REAL[x.o] + ' 件）' : '') + '</div>';
+  }
+  function render() {
+    [].forEach.call(modeEl.children, function (b) { b.setAttribute('aria-pressed', b.dataset.m === mode ? 'true' : 'false'); });
+    var s = run.steps[at], h = '<thead><tr><th>#</th><th>o.id</th><th>i_id</th><th>i_qty</th></tr></thead><tbody>';
+    ROWS.forEach(function (r, i) {
+      var cls = i >= run.rows.length ? 'cut' : (i === s.row ? 'cur' : (s.row === -1 || i < s.row ? 'done' : ''));
+      h += '<tr class="' + cls + '"><td>' + (i + 1) + '</td><td>' + r.o + '</td><td>' + r.i + '</td><td>' + r.qty + '</td></tr>';
+    });
+    $('fd-rows').innerHTML = h + '</tbody>';
+    $('fd-map').innerHTML = s.map.length ? s.map.map(function (x) { return '<div class="obj new">rowKey(id=' + x.o + ') → Order ' + x.o + ' · ' + x.n + ' 件</div>'; }).join('') : '<div class="obj">空</div>';
+    $('fd-outk').textContent = mode === 'ordered' ? '已交给 Cursor / ResultHandler 的' : '结果 List（对象一建好就放进来，之后还在长）';
+    $('fd-out').innerHTML = s.out.length ? s.out.map(function (x) { return objHtml(x, s.row === -1 ? (x.full ? 'out' : 'bad') : ''); }).join('') : '<div class="obj">还没有</div>';
+    $('fd-say').textContent = s.say;
+    $('fd-num').textContent = '第 ' + (at + 1) + ' / ' + run.steps.length + ' 步' + (s.row === -1 ? '' : ' · 第 ' + (s.row + 1) + ' 行');
+    $('fd-prev').disabled = at === 0; $('fd-next').disabled = at === run.steps.length - 1;
+  }
+  function go(d) { var n = at + d; if (n < 0 || n >= run.steps.length) return false; at = n; render(); return true; }
+  function stop() { if (timer) { clearInterval(timer); timer = null; $('fd-auto').textContent = '自动播放'; } }
+  $('fd-prev').addEventListener('click', function () { stop(); go(-1); });
+  $('fd-next').addEventListener('click', function () { stop(); go(1); });
+  $('fd-reset').addEventListener('click', function () { stop(); at = 0; render(); });
+  $('fd-auto').addEventListener('click', function () {
+    if (timer) { stop(); return; }
+    if (at === run.steps.length - 1) { at = 0; render(); }
+    $('fd-auto').textContent = '暂停';
+    timer = setInterval(function () { if (!go(1)) stop(); }, 1600);
+  });
+  box.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { stop(); go(1); e.preventDefault(); }
+    if (e.key === 'ArrowLeft') { stop(); go(-1); e.preventDefault(); }
+  });
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

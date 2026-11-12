@@ -62,6 +62,7 @@
 | 03 | [MyBatis 插件与分页](https://archeu.github.io/study-notes/mybatis/mybatis-plugin-page.html) | 四个能拦的对象、Plugin.wrap 套娃和登记顺序，PageHelper 和 MyBatis-Plus 怎么分页，深分页 |
 | 04 | [MyBatis 缓存与 Caffeine](https://archeu.github.io/study-notes/mybatis/mybatis-cache.html) | 一级、二级缓存怎么存怎么清，五个剧情看旧数据，和 Caffeine 逐项对比，LRU 与 W-TinyLFU 命中率 |
 | 05 | [MyBatis-Plus 原理](https://archeu.github.io/study-notes/mybatis/mybatis-plus.html) | 启动时注入 SQL、Wrapper 怎么变成 SQL、自动填充和雪花 ID、插件总管和顺序，saveBatch 怎么批量 |
+| 06 | [100 笔订单发出 101 条 SQL：MyBatis 结果映射、N+1 与流式查询](https://archeu.github.io/study-notes/mybatis/mybatis-result-mapping.html) | JOIN 的行怎么靠 <id> 折叠成对象、嵌套查询的 N+1、懒加载代理在事务外每次借连接、明细字段全 null、JOIN 后分页少订单、Cursor 离不开事务和驱动 fetchSize、分页导出被一级缓存拽住，8 组交易靶场实测和逐行折叠演示 |
 
 ## 数据库
 
