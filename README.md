@@ -53,6 +53,7 @@
 | 14 | [代理里那十几层在干什么：AOP 与代理下一圈](https://archeu.github.io/study-notes/spring/spring-aop-chain.html) | 调用栈 11 层逐层拆开、启动时链怎么过筛加头排序、@Async 插到第 0 位、下标走链与一个代理一条链的设计、计时漏算提交和重试切面在事务里等四个坑、每层开销粗测与 6.1/6.2、JDK 17/21 差异，排链先猜再跑实验台 |
 | 15 | [付款失败，流水要不要一起撕：事务传播、隔离与失效下一圈](https://archeu.github.io/study-notes/spring/spring-tx-propagation.html) | 进门先问线程上有没有事务、三种传播在连接上的样子、提交六步和提交后写库、REQUIRES_NEW 借空连接池和自锁、隔离和超时何时生效、Spring 6.0～7.0 护栏，3×4 付款组合先猜再跑实验台 |
 | 16 | [一个 400 进了两次 DispatcherServlet](https://archeu.github.io/study-notes/spring/spring-mvc-dispatch.html) | Spring MVC 请求处理下一圈：分派类型与 /error 再分派、过滤器按分派登记的两层开关、拦截器调两次、Boot 3 公开接口出错变 401、过滤器重复注册、冷热请求时间账，八个场景的分派演示 |
+| 17 | [付款一次算一遍密码：Spring Security 认证与授权下一圈](https://archeu.github.io/study-notes/spring/spring-security-token.html) | BCrypt 为什么故意慢和 cost 实测、登录一次换会话或 JWT、JWT 怎么验（签名、60 秒偏差、SCOPE_ 前缀）、@PreAuthorize 按数据授权、显式保存、会话固定、登出撤销六个坑，凭证实验台 |
 
 ## MyBatis
 
