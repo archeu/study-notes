@@ -48,6 +48,7 @@
 | 09 | [Spring IoC 与依赖注入](https://archeu.github.io/study-notes/spring/spring-ioc-di.html) | 容器里有什么、图纸从哪来、三种注入写法，同类型多个 Bean 时怎么选的注入裁判 |
 | 10 | [Spring AOP 代理原理](https://archeu.github.io/study-notes/spring/spring-aop-proxy.html) | 替身什么时候换上、JDK 代理和 CGLIB、调用怎样穿过拦截器链，替身管不到的地方 |
 | 11 | [Spring @Async 与线程池](https://archeu.github.io/study-notes/spring/spring-async-pool.html) | @Async 背后的派单员、用哪个线程池、四步规则和拒绝策略，线程池模拟器 |
+| 12 | [代理是哪一刻换进容器的：Bean 生命周期下一圈](https://archeu.github.io/study-notes/spring/spring-bean-proxy-swap.html) | refresh 三段和 BPP 三组登记、代理在初始化最后一步换进去、@PostConstruct / 循环依赖 / BPP 提前建三条漏口、@Async 环的 raw version 和 Spring 6.2 的变化，九个场景的先猜再跑实验台 |
 
 ## MyBatis
 
