@@ -50,6 +50,7 @@
 | 11 | [Spring @Async 与线程池](https://archeu.github.io/study-notes/spring/spring-async-pool.html) | @Async 背后的派单员、用哪个线程池、四步规则和拒绝策略，线程池模拟器 |
 | 12 | [代理是哪一刻换进容器的：Bean 生命周期下一圈](https://archeu.github.io/study-notes/spring/spring-bean-proxy-swap.html) | refresh 三段和 BPP 三组登记、代理在初始化最后一步换进去、@PostConstruct / 循环依赖 / BPP 提前建三条漏口、@Async 环的 raw version 和 Spring 6.2 的变化，九个场景的先猜再跑实验台 |
 | 13 | [249 个 bean 是谁建的：Boot 自动配置与启动下一圈](https://archeu.github.io/study-notes/spring/spring-boot-bean-ledger.html) | 两道筛子（158→43→35）、249 个 bean 的账本、全景各站对象出自哪张图纸、“你没写我才写”的让位规矩、3.8 s 启动时间账、六个实测坑，七场景先猜再跑实验台 |
+| 14 | [代理里那十几层在干什么：AOP 与代理下一圈](https://archeu.github.io/study-notes/spring/spring-aop-chain.html) | 调用栈 11 层逐层拆开、启动时链怎么过筛加头排序、@Async 插到第 0 位、下标走链与一个代理一条链的设计、计时漏算提交和重试切面在事务里等四个坑、每层开销粗测与 6.1/6.2、JDK 17/21 差异，排链先猜再跑实验台 |
 
 ## MyBatis
 
