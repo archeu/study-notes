@@ -51,6 +51,7 @@
 | 12 | [代理是哪一刻换进容器的：Bean 生命周期下一圈](https://archeu.github.io/study-notes/spring/spring-bean-proxy-swap.html) | refresh 三段和 BPP 三组登记、代理在初始化最后一步换进去、@PostConstruct / 循环依赖 / BPP 提前建三条漏口、@Async 环的 raw version 和 Spring 6.2 的变化，九个场景的先猜再跑实验台 |
 | 13 | [249 个 bean 是谁建的：Boot 自动配置与启动下一圈](https://archeu.github.io/study-notes/spring/spring-boot-bean-ledger.html) | 两道筛子（158→43→35）、249 个 bean 的账本、全景各站对象出自哪张图纸、“你没写我才写”的让位规矩、3.8 s 启动时间账、六个实测坑，七场景先猜再跑实验台 |
 | 14 | [代理里那十几层在干什么：AOP 与代理下一圈](https://archeu.github.io/study-notes/spring/spring-aop-chain.html) | 调用栈 11 层逐层拆开、启动时链怎么过筛加头排序、@Async 插到第 0 位、下标走链与一个代理一条链的设计、计时漏算提交和重试切面在事务里等四个坑、每层开销粗测与 6.1/6.2、JDK 17/21 差异，排链先猜再跑实验台 |
+| 15 | [付款失败，流水要不要一起撕：事务传播、隔离与失效下一圈](https://archeu.github.io/study-notes/spring/spring-tx-propagation.html) | 进门先问线程上有没有事务、三种传播在连接上的样子、提交六步和提交后写库、REQUIRES_NEW 借空连接池和自锁、隔离和超时何时生效、Spring 6.0～7.0 护栏，3×4 付款组合先猜再跑实验台 |
 
 ## MyBatis
 
