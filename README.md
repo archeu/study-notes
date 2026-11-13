@@ -82,6 +82,7 @@
 | 07 | [commit 返回了，数据页还是旧的：redo、undo、binlog 与两阶段提交](https://archeu.github.io/study-notes/database/mysql-redo-undo-binlog.html) | WAL 与检查点、undo 版本链与 purge、binlog 与 redo 的分工、两阶段提交和崩溃恢复规则、提交途中 kill -9 三次实测、redo 容量与长事务实测，崩溃点实验台 |
 | 08 | [付完款跳回订单页，还是待付款：主从复制、读写分离与复制延迟](https://archeu.github.io/study-notes/database/mysql-replication-lag.html) | 三个线程两份日志、GTID、延迟拆成传排队回放、大事务与心跳曲线、从库被写停在 1032、读写分离三种写后读，路由实验台 |
 | 09 | [orders 加一列，支付接口全卡住了：表结构设计与大表变更（Online DDL）](https://archeu.github.io/study-notes/database/mysql-online-ddl.html) | 建表时每个类型的改表代价、INSTANT / INPLACE / COPY 三种算法、元数据锁排队、DDL 到从库再做一遍、gh-ost 影子表对照，一边付款一边改表的实测，改表计划台 |
+| 10 | [池子从 10 开到 50，付款一点没快：连接池与事务性能（下一圈）](https://archeu.github.io/study-notes/database/db-pool-tx-perf-hot-row.html) | 热点行吞吐 ≈ 1 ÷ 持锁时间、队伍从 HikariCP 挪进 InnoDB、组提交为什么在热点行上凑不成组、8 组靶场实测和池子 1～64 曲线，三开关实验台 |
 
 ## 性能
 

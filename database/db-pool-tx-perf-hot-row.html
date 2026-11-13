@@ -1,0 +1,1519 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>池子从 10 开到 50，付款一点没快：连接池与事务性能（下一圈）</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J06 knowledge point "connection pool and transaction performance", next loop, panorama "an UPDATE from app to disk" stops 1, 3, 10 (plus 6 and 9). Roles: of = app side, HikariCP and connections, rn = row lock on the hot inventory row and InnoDB lock waits, bk = commit, fsync and group commit, cg = the external risk-control call. bad/good/neutral keep their repo-wide meaning; neutral = Tomcat threads and the abandoned design. One interactive: the hot-row lab in step 6 (three switches, guess first, measured numbers plus the min() formula with two bound bars). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+body{overflow-x:clip}
+.lab-h{font-family:var(--font-display);font-weight:400;font-size:20px}
+#eb-res p{margin:0 0 4px}
+#eb-res .note-p{font-size:13px;color:var(--muted)}
+#eb pre{white-space:pre;overflow-x:auto}
+
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2;fill:none}
+.e-warn{stroke:var(--warn);stroke-width:2.5;fill:none}
+.misj{border-collapse:collapse}
+.ev-card{font-family:var(--font-mono);font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--console-bg);color:var(--console-fg);border-radius:12px;padding:10px 12px;margin:0}
+.tr-nav{display:flex;flex-wrap:wrap;gap:6px}
+.tr-nav button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:var(--font-mono)}
+.tr-nav button[aria-current="true"]{border-color:var(--ink);background:var(--ink);color:var(--paper)}
+.tr-nav button.ok{border-color:var(--good)}
+.tr-nav button.ng{border-color:var(--bad)}
+.tr-score{font-size:13.5px;color:var(--muted)}
+
+/* page: budget bench */
+.bud{display:flex;flex-direction:column;gap:6px}
+.bud-bar{position:relative;display:flex;height:34px;border-radius:10px;overflow:hidden;border:1.5px solid var(--line-strong);background:var(--paper)}
+.bud-bar span{display:block;height:100%;min-width:0}
+.bud-bar .h{background:var(--pd)} .bud-bar .m{background:var(--warn);opacity:.55} .bud-bar .c{background:var(--warn);opacity:.7}
+.bud-bar .s{background:var(--warn);opacity:.85} .bud-bar .o{background:var(--neutral);opacity:.6} .bud-bar .d{background:var(--warn)}
+.bud-bar .d.over{background:var(--bad)}
+.bud-lim{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--ink)}
+.bud-cap{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);font-family:var(--font-mono)}
+.bud-lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.bud-lg i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.derive{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.derive > div{padding:8px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--card);font-size:13.5px;min-width:0}
+.derive b{display:block;font-size:12px;color:var(--muted);font-weight:500}
+.derive code{font-size:13px;overflow-wrap:anywhere}
+.ctl select{font:inherit;font-size:14px;padding:5px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:720px){.derive{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.derive{grid-template-columns:1fr}}
+
+/* page: tcp */
+.cap{font-size:13.5px;color:var(--muted);margin-top:8px;line-height:1.55}
+.seq{display:flex;flex-direction:column;gap:12px}
+.seq-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seq-ctl .seg{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;margin-left:auto}
+.seq-box{outline:none}
+.seq svg .msg{opacity:.13;transition:opacity .25s}
+.seq svg .msg.on{opacity:1}
+.seq svg .msg.cur .ln{stroke-width:4}
+.seq svg .msg.cur .lab{font-weight:700}
+.seq svg .lane{stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5}
+.st-chip{font-family:var(--font-mono);font-size:12.5px;font-weight:600}
+.seq-info{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.seq-info > div{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.seq-info .k{font-size:12.5px;color:var(--muted);display:block;margin-bottom:4px}
+.seq-info .sts{display:flex;flex-wrap:wrap;gap:8px 16px}
+.seq-info .sts span{display:inline-flex;gap:6px;align-items:baseline}
+.seq-info .sts b{font-family:var(--font-mono);font-size:14px;padding:1px 8px;border-radius:8px;background:var(--rt);border:1.5px solid var(--rc)}
+.seq-say{grid-column:1 / -1}
+.seq-say p + p{margin-top:6px}
+.seq-num{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.frames{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.frames > div{border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.frames h4{font-size:17px;color:var(--rc)}
+.frames pre{margin:0;font-family:var(--font-mono);font-size:12px;background:var(--code-bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+@media (max-width:760px){.way{overflow-x:auto}.way > svg{min-width:400px}.seq-info{grid-template-columns:minmax(0,1fr)}.frames{grid-template-columns:minmax(0,1fr)}.seq-ctl .seg{margin-left:0}}
+/* ---------- netty page ---------- */
+.lanes{display:flex;flex-direction:column;gap:6px}
+.lane{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.lane .nm{font-family:var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lane .tr{position:relative;height:18px;border-radius:6px;background:var(--neutral-tint)}
+.lane .tr i{position:absolute;top:0;bottom:0;background:var(--bad);border-radius:5px;opacity:.85}
+.lane .tr u{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--bk)}
+.lane .v{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right}
+.lane-axis{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;font-size:11.5px;color:var(--muted);font-family:var(--font-mono)}
+.lane-axis span{display:flex;justify-content:space-between}
+.lanes-more{font-size:12.5px;color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:760px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.ctl-grid{grid-template-columns:1fr}}
+.seg-mode{display:flex;flex-wrap:wrap;gap:6px}
+.seg-mode button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 10px;font-size:13.5px;cursor:pointer;color:var(--ink)}
+.seg-mode button[aria-pressed="true"]{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.verx{width:100%;border-collapse:collapse;font-size:14px}
+.verx th,.verx td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.verx th{font-size:13px;color:var(--muted);font-weight:600;background:var(--code-bg)}
+.verx code{overflow-wrap:anywhere}
+
+/* ---- 本页新增 ---- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2;fill:none}
+.bytes{display:flex;flex-direction:column;gap:10px}
+.brow{display:grid;grid-template-columns:8.5em minmax(0,1fr);gap:10px;align-items:start}
+.brow > b{font-size:14px;line-height:1.3}
+.brow > b small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:3px;min-width:0}
+.chips i{font-style:normal;font-family:var(--font-mono);font-size:11.5px;line-height:1;padding:4px 3px;border-radius:4px;background:var(--rt);border:1px solid var(--rc);min-width:2.1em;text-align:center}
+.chips i.k{background:var(--card);border-style:dashed;color:var(--muted)}
+.chips i.w{padding:4px 6px}
+@media (max-width:560px){.brow{grid-template-columns:minmax(0,1fr)}}
+.hdr{display:grid;grid-template-columns:repeat(17,minmax(0,1fr)) minmax(0,4fr);gap:2px;min-width:620px;font-family:var(--font-mono);font-size:11.5px}
+.hdr > div{border:1.5px solid var(--rc);background:var(--rt);border-radius:6px;padding:6px 4px;text-align:center;display:flex;flex-direction:column;gap:3px;min-width:0}
+.hdr > div small{font-family:var(--font-body);font-size:11.5px;color:var(--ink)}
+.hdr-wrap{overflow-x:auto;padding-bottom:4px}
+.lbt{display:flex;flex-direction:column;gap:10px}
+.lbrow{display:grid;grid-template-columns:6.5em minmax(0,1fr) 15em;gap:10px;align-items:center;font-size:13.5px}
+.lbrow > b{font-size:14px}
+.lbrow.best > b::after{content:" ✓";color:var(--good)}
+.stk{display:flex;height:22px;border-radius:6px;overflow:hidden;background:var(--neutral-tint);min-width:0}
+.stk i{display:block;height:100%;font-style:normal;font-family:var(--font-mono);font-size:10.5px;line-height:22px;text-align:center;overflow:hidden;white-space:nowrap;color:var(--ink);border-right:1.5px solid var(--card)}
+.stk i.n{background:var(--rn-tint)}
+.stk i.n2{background:var(--pd-tint)}
+.stk i.s{background:var(--warn-tint)}
+.stk i.x{background:var(--bad-tint);color:var(--bad)}
+.lbstat{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap}
+.lbstat .e{color:var(--bad);font-weight:600}
+.leg{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.leg span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-2px;background:var(--c)}
+.inst-cfg{display:flex;flex-wrap:wrap;gap:8px}
+.inst-cfg .ic{display:flex;flex-direction:column;gap:4px;border:1.5px solid var(--line-strong);border-radius:10px;padding:6px 8px;font-size:12.5px;background:var(--card);min-width:0}
+.inst-cfg .ic b{font-family:var(--font-mono);font-size:12.5px}
+.inst-cfg select{font:inherit;font-size:12.5px;padding:2px 4px;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){.lbrow{grid-template-columns:minmax(0,1fr)}.lbrow .stk{order:2}}
+
+/* 本页：超时实验台 */
+.hc-ctl{display:flex;flex-direction:column;gap:12px}
+.hc-leg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.hc-leg i{display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:6px;vertical-align:0}
+.hc-out{display:flex;flex-direction:column;gap:8px;min-height:30px}
+.hc-row{display:grid;grid-template-columns:4.2em minmax(0,1fr);gap:4px 10px;align-items:center}
+.hc-lb{font-size:13px;color:var(--muted)}
+.hc-track{height:20px;background:var(--neutral-tint);border-radius:6px;overflow:hidden}
+.hc-fill{display:flex;height:100%}
+.hc-fill i{display:block;height:100%}
+.hc-end{grid-column:2;font-size:13px;font-family:var(--font-mono);min-width:0;overflow-wrap:anywhere}
+.lead code{overflow-wrap:anywhere}
+.good-t{color:var(--good)}
+.dp-h{margin-top:18px}
+
+/* page-specific */
+.esteps{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.esteps code{overflow-wrap:anywhere}
+.code-s{margin:0;padding:10px 12px;background:var(--code-bg);border-radius:10px;font-family:var(--font-mono);font-size:12px;line-height:1.55;overflow-x:auto;white-space:pre}
+.deep .pit .tbl-wrap{margin-top:4px}
+.bx-ver{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.bx-ver .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.bx-ver button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:999px;padding:5px 12px;font-size:13.5px;cursor:pointer}
+.bx-ver button[aria-pressed="true"]{border-color:var(--g2);background:var(--g2-tint);box-shadow:inset 0 0 0 1px var(--g2)}
+.bx-run{display:flex}
+.bx-trace{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.bx-real{font-size:13.5px;color:var(--muted);margin-top:6px}
+.bx-real code{color:var(--ink);overflow-wrap:anywhere}
+.bx-o{display:inline-block;font-weight:700;padding:1px 10px;border-radius:999px;margin-right:6px}
+.bx-o.fail{background:var(--bad-tint);color:var(--bad);border:1.5px solid var(--bad)}
+.bx-o.silent{background:var(--warn-tint);color:var(--ink);border:1.5px solid var(--warn)}
+.bx-o.ok{background:var(--good-tint);color:var(--good);border:1.5px solid var(--good)}
+#bx-out[data-o="fail"]{--rc:var(--bad);--rt:var(--bad-tint)}
+#bx-out[data-o="silent"]{--rc:var(--warn);--rt:var(--warn-tint)}
+#bx-out[data-o="ok"]{--rc:var(--good);--rt:var(--good-tint)}
+@media (max-width:860px){.presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.presets{grid-template-columns:1fr}}
+/* page: AOP chain */
+.duo{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.duo > *{min-width:0}
+.ac-bench{display:flex;flex-direction:column;gap:8px;padding:14px 16px;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+.ac-br{display:grid;grid-template-columns:180px minmax(0,1fr) 64px;gap:10px;align-items:center;font-size:13.5px}
+.ac-br i{display:block;height:20px;width:max(var(--w),3px);border-radius:5px;background:var(--g2-tint);border:1.5px solid var(--g2)}
+.ac-br.rn i{background:var(--rn-tint);border-color:var(--rn)}
+.ac-br b{font-family:var(--font-mono);font-size:12.5px;text-align:right}
+.ac-chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13.5px}
+.ac-chain > span{min-width:0}
+.ac-chip{display:inline-flex;gap:6px;align-items:center;border:1.5px solid var(--rc);background:var(--rt);border-radius:999px;padding:2px 10px;font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ac-chip b{font-family:var(--font-display);font-weight:400}
+.ac-chain .sep{color:var(--muted)}
+.ac-walk{margin:8px 0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.ac-walk li{position:relative;padding-left:2.4em}
+.ac-walk li::before{position:absolute;left:0;font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.ac-walk li.in::before{content:"进 →"}
+.ac-walk li.out::before{content:"← 出"}
+.ac-walk li.mid{font-weight:700}
+.ac-walk li.mid::before{content:"  ●"}
+.ac-walk li code{color:var(--rc)}
+@media (max-width:640px){.ac-br{grid-template-columns:110px minmax(0,1fr) 56px;font-size:12.5px}}
+
+/* dispatch walker */
+.dw-scn{display:flex;flex-wrap:wrap;gap:6px}
+.dw-scn button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:4px 12px;font-size:13.5px;cursor:pointer;font-family:var(--font-body)}
+.dw-scn button[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.dw-scn button:focus-visible,.dw:focus-visible{outline:2px solid var(--pd);outline-offset:2px}
+.dw svg .g{transition:opacity .25s}
+.dw svg .g.idle{opacity:.25}
+.dw svg .g.skip{opacity:.75}
+.dw svg .g.skip rect.box{stroke-dasharray:5 4;fill:var(--card)}
+.dw svg .g.deny rect.box,.dw svg .g.thr rect.box{fill:var(--bad-tint);stroke:var(--bad)}
+.dw svg .g.cur rect.box{stroke-width:4}
+.dw svg .g .tag{font-weight:700;fill:var(--ink)}
+.dw svg .g.deny .tag,.dw svg .g.thr .tag{fill:var(--bad)}
+.dw .seq-info .sts > span:last-child:not(:has(b)){flex-basis:100%;font-weight:700}
+@media (prefers-reduced-motion: reduce){.dw svg .g{transition:none}}
+
+
+/* ---------- this page ---------- */
+.jwt{font-family:var(--font-mono);font-size:13px;line-height:1.6;padding:12px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-wrap:anywhere}
+.jwt .h{color:var(--rn)} .jwt .p{color:var(--cg)} .jwt .s{color:var(--bk)}
+.jwt-parts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.jwt-parts > div{border:2px solid var(--rc);background:var(--rt);border-radius:12px;padding:8px 12px;font-size:13.5px;min-width:0}
+.jwt-parts code{overflow-wrap:anywhere;font-size:12px}
+.walk{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.walk li{display:grid;grid-template-columns:1.6em minmax(0,1fr);gap:8px;font-size:14px;align-items:start;padding:6px 10px;border-radius:10px;background:var(--card);border-left:4px solid var(--rc)}
+.walk li > i{font-style:normal;font-weight:700;color:var(--rc);text-align:center}
+.walk li.stop{background:var(--bad-tint)}
+.walk li.pass > i{color:var(--good)}
+.walk code{overflow-wrap:anywhere}
+.lab-out{font-family:var(--font-mono);font-size:12.5px;line-height:1.55;padding:10px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:pre}
+.lab-out .r{color:#FF9C9A} .lab-out .g{color:#7EE2A8} .lab-out .w{color:var(--console-dim)}
+.statline{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:baseline;font-size:15px}
+.statline b.code{font-family:var(--font-display);font-weight:400;font-size:28px}
+.statline b.code.ok{color:var(--good)} .statline b.code.no{color:var(--bad)}
+@media (max-width:860px){.jwt-parts{grid-template-columns:1fr}}
+pre.console .hi{color:var(--console-hi)}
+.presets.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+#lb-builds{margin-bottom:8px}
+@media (max-width:860px){.presets.c3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.presets.c3{grid-template-columns:1fr}}
+
+/* page-specific: 11-stop strip (real / fake / absent / distorted) */
+.stn{display:grid;grid-template-columns:repeat(11,minmax(0,1fr));gap:4px}
+.stn .c{border:2px solid var(--line-strong);border-radius:10px;padding:6px 4px;text-align:center;background:var(--card);min-width:0;display:flex;flex-direction:column;gap:1px}
+.stn .c b{font-family:var(--font-mono);font-size:13px}
+.stn .c span{font-size:11px;line-height:1.3;color:var(--muted);overflow-wrap:anywhere}
+.stn .c[data-st="real"]{border-color:var(--bk);background:var(--bk-tint)}
+.stn .c[data-st="real"] span{color:var(--ink)}
+.stn .c[data-st="fake"]{border-color:var(--rn);border-style:dashed;background:var(--rn-tint)}
+.stn .c[data-st="part"]{border-color:var(--cg);border-style:dotted}
+.stn .c[data-st="none"]{opacity:.38}
+.stn .c[data-st="warp"]{border-color:var(--bad);background:var(--bad-tint)}
+.stn-leg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.stn-leg i{display:inline-block;width:14px;height:12px;border-radius:3px;border:2px solid var(--line-strong);vertical-align:-1px;margin-right:4px}
+.stn-leg i.real{border-color:var(--bk);background:var(--bk-tint)}
+.stn-leg i.fake{border-color:var(--rn);border-style:dashed;background:var(--rn-tint)}
+.stn-leg i.part{border-color:var(--cg);border-style:dotted}
+.stn-leg i.none{opacity:.38}
+.stn-leg i.warp{border-color:var(--bad);background:var(--bad-tint)}
+.verd{font-family:var(--font-display);font-size:22px;padding:2px 12px;border-radius:10px;border:2px solid var(--line-strong)}
+.verd[data-v="绿"]{border-color:var(--good);background:var(--good-tint);color:var(--good)}
+.verd[data-v="红"]{border-color:var(--bad);background:var(--bad-tint);color:var(--bad)}
+.verd[data-v="测不了"]{border-color:var(--neutral);background:var(--neutral-tint);color:var(--ink)}
+.presets.c5{grid-template-columns:repeat(5,minmax(0,1fr))}
+@media (max-width:720px){
+  .stn{grid-template-columns:repeat(6,minmax(0,1fr))}
+  .presets.c5{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
+.presets.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:720px){.presets.c3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.qt .nd rect{transition:fill .2s,stroke-width .2s}
+.qt .nd.on rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3.5}
+.qt .nd.bad rect{fill:var(--bad-tint);stroke:var(--bad);stroke-width:3.5}
+#qw-back,#qw-backt{opacity:0;transition:opacity .2s}
+#qw-back.on,#qw-backt.on{opacity:1}
+#qw-sql{white-space:pre-wrap;margin:0}
+#qw .codebox pre{padding:10px 14px}
+/* page: explain-tuning */
+.b-of-z{fill:var(--of-tint);stroke:none}
+.g-line{stroke:var(--line);stroke-width:1;fill:none}
+.ln-pd,.ln-cg,.ln-g2{fill:none;stroke-width:2.5;stroke-linejoin:round}
+.ln-pd{stroke:var(--pd)}.ln-cg{stroke:var(--cg)}.ln-g2{stroke:var(--g2)}
+.ln-pd.dash{stroke-dasharray:6 5;stroke-width:2}
+.pt-bad{fill:var(--card);stroke:var(--bad);stroke-width:2.5}
+.dumb{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dumb > div{border:1.5px solid var(--line-strong);border-radius:14px;background:var(--card);padding:12px 16px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.dumb h4{font-size:17px;color:var(--neutral)}
+.dumb p{font-size:14px;margin:0}
+.dumb p.pain{color:var(--bad)}
+.dumb p.pain::before{content:"疼在哪 ";font-weight:700}
+.ladder{display:flex;flex-wrap:wrap;gap:6px;align-items:stretch}
+.ladder > span{flex:1 1 120px;min-width:0;border-radius:12px;padding:8px 10px;border:2px solid var(--rc);background:var(--rt);font-size:13px;display:flex;flex-direction:column;gap:2px}
+.ladder b{font-family:var(--font-mono);font-size:15px}
+.ladder small{color:var(--muted);font-size:12px}
+.cols5{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.cols5 > div{border:1.5px solid var(--line);border-radius:12px;background:var(--card);padding:10px 12px;font-size:13.5px;min-width:0}
+.cols5 b{font-family:var(--font-mono);font-size:14px;display:block;color:var(--of)}
+.bench-sql{font-family:var(--font-mono);font-size:13px;padding:10px 12px;border-radius:10px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.bench .presets{grid-template-columns:repeat(4,minmax(0,1fr))}
+.bench .presets button code{font-size:11.5px;color:var(--muted);overflow-wrap:anywhere}
+.bench .presets button.done{border-style:dashed}
+.score{font-size:13px;color:var(--muted)}
+@media (max-width:720px){.dumb{grid-template-columns:1fr}.bench .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* ---------- race lab (this page) ---------- */
+.race-top{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between}
+.race-body{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:14px;align-items:start}
+.race-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;counter-reset:rs}
+.race-steps li{display:grid;grid-template-columns:2.2em minmax(0,1fr);gap:4px 10px;align-items:start;padding:7px 10px;border-radius:10px;border:1.5px solid var(--line);background:var(--card);font-size:14px;transition:opacity .2s}
+.race-steps li.fut{opacity:.28}
+.race-steps li.now{border-color:var(--rc);background:var(--rt)}
+.race-steps li .who{grid-row:1 / span 2;font-family:var(--font-display);font-size:18px;line-height:1.2;text-align:center;border-radius:8px;color:var(--on-accent);background:var(--rc);padding:2px 0}
+.race-steps li code{overflow-wrap:anywhere;font-size:12.5px}
+.race-steps li .say{color:var(--muted);font-size:13px}
+.race-steps li .say b{color:var(--ink)}
+.race-steps li.blk .say b{color:var(--bad)}
+.race-state{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;border:1.5px solid var(--line);background:var(--paper);font-size:14px}
+.race-state h4{font-size:16px}
+.race-state dl{margin:0;display:grid;grid-template-columns:5.4em minmax(0,1fr);gap:5px 8px}
+.race-state dt{color:var(--muted);font-size:13px}
+.race-state dd{margin:0;min-width:0;font-family:var(--font-mono);font-size:13px}
+.race-state dd.big{font-family:var(--font-display);font-size:24px;line-height:1.1}
+.race-state dd.big.bad-t{color:var(--bad)}
+.race-state dd.big.good-t{color:var(--good)}
+.chip{display:inline-block;padding:0 8px;border-radius:999px;font-size:12px;font-family:var(--font-body);border:1.5px solid var(--rc);background:var(--rt);color:var(--ink);margin:1px 2px 1px 0}
+.bad-t{color:var(--bad)} .good-t{color:var(--good)}
+@media (max-width:760px){.race-body{grid-template-columns:minmax(0,1fr)}}
+@media (prefers-reduced-motion:reduce){.race-steps li{transition:none}}
+
+/* 本页：崩溃点实验台 */
+.cp-ctl{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center}
+.cp-ctl > div{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.cp-ctl small{color:var(--muted);font-size:13px;margin-right:2px}
+.cp-list{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.cp-list button{width:100%;height:100%;text-align:left;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:10px;padding:8px;font-size:13px;line-height:1.35;cursor:pointer;display:flex;flex-direction:column;gap:4px}
+.cp-list button b{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.cp-list button[aria-pressed="true"]{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.cp-list button i{font-style:normal;font-size:11px;color:var(--bk);font-weight:700}
+.cp-list button:focus-visible,.cp-ctl button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+@media (max-width:760px){.cp-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.cp-out{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.cp-out > div{border:1.5px solid var(--line);border-radius:12px;padding:8px 12px;background:var(--card);min-width:0}
+.cp-out small{display:block;font-size:12px;color:var(--muted)}
+.cp-out b{font-size:16px}
+.cp-out .masked b{color:var(--muted);font-weight:400}
+@media (max-width:760px){.cp-out{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.cp-verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--line-strong);background:var(--neutral-tint)}
+.cp-verdict.v-ok{border-color:var(--good);background:var(--good-tint)}
+.cp-verdict.v-unknown{border-color:var(--warn);background:var(--warn-tint)}
+.cp-verdict.v-lost,.cp-verdict.v-split{border-color:var(--bad);background:var(--bad-tint)}
+.logcmp{width:100%}
+.seg-mode.dim{opacity:.45}
+.seg-mode.dim small::after{content:"（gh-ost 用自己的超时）";font-weight:400}
+
+/* this page */
+table.t tr.badrow td,table.t tr.badrow th{background:var(--bad-tint)}
+table.t tr.goodrow td,table.t tr.goodrow th{background:var(--good-tint)}
+.lab-bars{display:flex;flex-direction:column;gap:8px}
+.lab-bars:empty{display:none}
+.lb-row{display:grid;grid-template-columns:minmax(0,15em) minmax(0,1fr) auto;gap:10px;align-items:center;font-size:13.5px}
+.lb-name{color:var(--muted)}
+.lb-track{height:14px;border-radius:7px;background:var(--neutral-tint);overflow:hidden}
+.lb-fill{display:block;height:100%;background:var(--rc);opacity:.45;border-radius:7px}
+.lb-row.lb-min .lb-fill{opacity:1}
+.lb-row.lb-min .lb-val{font-weight:700;color:var(--rc)}
+.lb-val{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+@media (max-width:640px){.lb-row{grid-template-columns:minmax(0,1fr) auto}.lb-track{grid-column:1 / -1;grid-row:2}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>数据库</span><span aria-hidden="true">/</span><span class="tb-here">池子从 10 开到 50，付款一点没快</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-mut" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-of" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bk" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-rn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-rn" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-cg" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+<header class="hero">
+  <p class="kicker">MySQL 8.4 · HikariCP · 持锁时间 · 热点行 · 组提交 · 利特尔法则 · 交易靶场</p>
+  <h1>池子从 10 开到 50，付款一点没快：连接池与事务性能（下一圈）</h1>
+  <p class="lead">连接池只是排队的入口。事务真正占着的是数据库里的两样东西：<b>热点行上的锁</b>（第 6 站，提交才放）和<b>提交时的一次落盘</b>（第 9 站）。88 号商品的库存行人人都要改，每秒最多能付的笔数 ≈ <b>1 ÷ 这行锁被占的时间</b>，公式里没有池子。实测：风控接口 20 ms 写在事务里，池子 10 条和 50 条都是每秒 41 笔；池子开大，只是把排队的人从 HikariCP 门口挪进了 InnoDB 的锁等待里。把风控挪出事务、库存放到最后改，涨到每秒约 300 笔，代码一行没加。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j06-update-to-disk.html#s-1">一条 UPDATE 从应用到磁盘 · 第 1、3、10 站</a></span><span>地图：<a href="../java/roadmap.html#j06">J06 · 连接池与事务性能</a></span><span>第一圈：<a href="db-pool-tx-perf.html">一排拨通的电话，谁打完谁挂</a> · <a href="hikari-concurrentbag.html">借连接不加锁（ConcurrentBag）</a></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：第 1 站到第 10 站之间，就是一个事务</h2>
+    <p class="lead">在全景第 1、10 站，这一步要解决：第 1 站从 HikariCP 借出连接，第 10 站把它还回去，<b>中间这一段就是事务的全部时长</b>。全景里只有一笔付款，这段只有几毫秒。现在是 20:00 秒杀 88 号商品，64 个 Tomcat 线程同时付款，每一笔都要扣同一行库存。要回答的是：每秒能付多少笔？变慢了，是该加池子，还是该改代码？</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="交易靶场 20 点秒杀。左边是 Tomcat 的 64 个线程，每个线程处理一笔付款；中间是 HikariCP 连接池，10 条连接；右边是 MySQL 8.4 的 InnoDB，三张表：orders 每笔改自己那一行，pay_log 每笔插一行，inventory 里 88 号商品那一行人人都要改。下方标注：第 1 站借连接，第 10 站还连接，中间就是事务。">
+  <g data-role="other"><rect class="b-neu" x="16" y="40" width="200" height="190" rx="12"/><text class="t-h" x="32" y="66">Tomcat · 64 个线程</text><text class="t-xs" x="32" y="84">每个线程处理一笔付款</text>
+    <g><circle class="f-neu" cx="36" cy="104" r="5"/><circle class="f-neu" cx="51" cy="104" r="5"/><circle class="f-neu" cx="66" cy="104" r="5"/><circle class="f-neu" cx="81" cy="104" r="5"/><circle class="f-neu" cx="96" cy="104" r="5"/><circle class="f-neu" cx="111" cy="104" r="5"/><circle class="f-neu" cx="126" cy="104" r="5"/><circle class="f-neu" cx="141" cy="104" r="5"/><circle class="f-neu" cx="156" cy="104" r="5"/><circle class="f-neu" cx="171" cy="104" r="5"/><circle class="f-neu" cx="186" cy="104" r="5"/><circle class="f-neu" cx="36" cy="120" r="5"/><circle class="f-neu" cx="51" cy="120" r="5"/><circle class="f-neu" cx="66" cy="120" r="5"/><circle class="f-neu" cx="81" cy="120" r="5"/><circle class="f-neu" cx="96" cy="120" r="5"/><circle class="f-neu" cx="111" cy="120" r="5"/><circle class="f-neu" cx="126" cy="120" r="5"/><circle class="f-neu" cx="141" cy="120" r="5"/><circle class="f-neu" cx="156" cy="120" r="5"/><circle class="f-neu" cx="171" cy="120" r="5"/><circle class="f-neu" cx="186" cy="120" r="5"/><circle class="f-neu" cx="36" cy="136" r="5"/><circle class="f-neu" cx="51" cy="136" r="5"/><circle class="f-neu" cx="66" cy="136" r="5"/><circle class="f-neu" cx="81" cy="136" r="5"/><circle class="f-neu" cx="96" cy="136" r="5"/><circle class="f-neu" cx="111" cy="136" r="5"/><circle class="f-neu" cx="126" cy="136" r="5"/><circle class="f-neu" cx="141" cy="136" r="5"/><circle class="f-neu" cx="156" cy="136" r="5"/><circle class="f-neu" cx="171" cy="136" r="5"/><circle class="f-neu" cx="186" cy="136" r="5"/><circle class="f-neu" cx="36" cy="152" r="5"/><circle class="f-neu" cx="51" cy="152" r="5"/><circle class="f-neu" cx="66" cy="152" r="5"/><circle class="f-neu" cx="81" cy="152" r="5"/><circle class="f-neu" cx="96" cy="152" r="5"/><circle class="f-neu" cx="111" cy="152" r="5"/><circle class="f-neu" cx="126" cy="152" r="5"/><circle class="f-neu" cx="141" cy="152" r="5"/><circle class="f-neu" cx="156" cy="152" r="5"/><circle class="f-neu" cx="171" cy="152" r="5"/><circle class="f-neu" cx="186" cy="152" r="5"/><circle class="f-neu" cx="36" cy="168" r="5"/><circle class="f-neu" cx="51" cy="168" r="5"/><circle class="f-neu" cx="66" cy="168" r="5"/><circle class="f-neu" cx="81" cy="168" r="5"/><circle class="f-neu" cx="96" cy="168" r="5"/><circle class="f-neu" cx="111" cy="168" r="5"/><circle class="f-neu" cx="126" cy="168" r="5"/><circle class="f-neu" cx="141" cy="168" r="5"/><circle class="f-neu" cx="156" cy="168" r="5"/><circle class="f-neu" cx="171" cy="168" r="5"/><circle class="f-neu" cx="186" cy="168" r="5"/><circle class="f-neu" cx="36" cy="184" r="5"/><circle class="f-neu" cx="51" cy="184" r="5"/><circle class="f-neu" cx="66" cy="184" r="5"/><circle class="f-neu" cx="81" cy="184" r="5"/><circle class="f-neu" cx="96" cy="184" r="5"/><circle class="f-neu" cx="111" cy="184" r="5"/><circle class="f-neu" cx="126" cy="184" r="5"/><circle class="f-neu" cx="141" cy="184" r="5"/><circle class="f-neu" cx="156" cy="184" r="5"/></g></g>
+  <g data-role="of"><rect class="b-of" x="300" y="40" width="210" height="190" rx="12"/><text class="t-of" x="316" y="66">HikariCP · 10 条连接</text><text class="t-xs" x="316" y="84">maximumPoolSize = 10（默认）</text>
+    <g><rect class="f-oft" x="318" y="104" width="28" height="34" rx="5" stroke="var(--of)" stroke-width="1.6"/><rect class="f-oft" x="354" y="104" width="28" height="34" rx="5" stroke="var(--of)" stroke-width="1.6"/><rect class="f-oft" x="390" y="104" width="28" height="34" rx="5" stroke="var(--of)" stroke-width="1.6"/><rect class="f-oft" x="426" y="104" width="28" height="34" rx="5" stroke="var(--of)" stroke-width="1.6"/><rect class="f-oft" x="462" y="104" width="28" height="34" rx="5" stroke="var(--of)" stroke-width="1.6"/><rect class="f-oft" x="318" y="148" width="28" height="34" rx="5" stroke="var(--of)" stroke-width="1.6"/><rect class="f-oft" x="354" y="148" width="28" height="34" rx="5" stroke="var(--of)" stroke-width="1.6"/><rect class="f-oft" x="390" y="148" width="28" height="34" rx="5" stroke="var(--of)" stroke-width="1.6"/><rect class="f-oft" x="426" y="148" width="28" height="34" rx="5" stroke="var(--of)" stroke-width="1.6"/><rect class="f-oft" x="462" y="148" width="28" height="34" rx="5" stroke="var(--of)" stroke-width="1.6"/></g><text class="t-xs" x="316" y="214">借不到就在门口等，最多 30 s</text></g>
+  <g data-role="bk"><rect class="b-bk" x="594" y="40" width="350" height="190" rx="12"/><text class="t-bk" x="610" y="66">MySQL 8.4 · InnoDB</text>
+    <rect class="b-card" x="610" y="80" width="318" height="36" rx="8"/><text class="t-mono" x="622" y="103">orders</text><text class="t-xs" x="700" y="103">20 万行，每笔改自己那一行</text>
+    <rect class="b-card" x="610" y="124" width="318" height="36" rx="8"/><text class="t-mono" x="622" y="147">pay_log</text><text class="t-xs" x="700" y="147">每笔插一行</text>
+    <rect class="b-rn" x="610" y="168" width="318" height="44" rx="8"/><text class="t-mono" x="622" y="195">inventory · sku 88</text><text class="t-rn" x="790" y="195">人人都改这一行</text></g>
+  <path class="e-of" d="M216 135 H292" marker-end="url(#ah-of)"/><text class="t-of" x="224" y="126">getConnection()</text>
+  <path class="e-bk" d="M510 135 H586" marker-end="url(#ah-bk)"/><text class="t-bk" x="526" y="126">SQL</text>
+  <path class="e-mut" d="M300 252 H944" style="stroke-dasharray:6 5"/>
+  <text class="t-of" x="300" y="276">第 1 站 借连接</text><text class="t-s" x="520" y="276">中间这段 = 事务：锁、undo、redo、提交都在这里</text><text class="t-of" x="944" y="276" text-anchor="end">第 10 站 还连接</text>
+</svg>
+  </div>
+  </figure>
+  <div class="codebox" data-role="of">
+    <div class="code-bar"><b>交易靶场里原来的付款代码</b><span>四步都在一个 <code>@Transactional</code> 里</span></div>
+<pre><code>@Transactional
+public void pay(long orderId) {
+    inventoryMapper.deduct(88, 2);     // UPDATE inventory SET stock = stock - 2 WHERE sku = 88   ← 人人都改这一行
+    orderMapper.markPaid(orderId);     // UPDATE orders SET status = 'PAID' … WHERE id = ?
+    payLogMapper.insert(orderId);      // INSERT INTO pay_log …
+    riskClient.check(orderId);         // 调风控接口，约 20 ms
+}</code></pre>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：慢了就加池子</h2>
+    <p class="lead">压测时看到线程都卡在 <code>getConnection()</code>，最顺手的做法是把 <code>maximum-pool-size</code> 从 10 调到 50。第一圈的<a href="db-pool-tx-perf.html#sim-sec">连接池模拟器</a>里，加池子确实管用，可那个模拟器假设“数据库永远按时执行完 SQL”。88 号这一行上，这个假设不成立。下图是 64 个线程在同一时刻都在哪里（实测峰值）：</p>
+  </div>
+  <figure>
+  <div class="fig-box wide"><svg class="sv" viewBox="0 0 960 330" role="img" aria-label="64 个付款线程在哪里等。池子 10 条：54 个在 HikariCP 外面排队等连接，9 个拿着连接在 InnoDB 里等 88 号库存行的锁，1 个拿着锁在干活，每秒 41 笔，中位 0.25 秒，p99 7.9 秒。池子 50 条：14 个在 HikariCP 外面等，49 个拿着连接在等锁，1 个在干活，每秒还是 41 笔，中位 1.23 秒，p99 4.7 秒。队伍只是从池子外面挪到了数据库里面。"><text class="t-of" x="150" y="28">在 HikariCP 外面排队</text><text class="t-xs" x="150" y="44">没借到连接，<tspan font-family="var(--font-mono)">getConnection()</tspan> 里等</text><text class="t-rn" x="440" y="28">拿着连接，等 88 号这行的锁</text><text class="t-xs" x="440" y="44">已在 InnoDB 里，<tspan font-family="var(--font-mono)">LOCK WAIT</tspan></text><text class="t-rn" x="640" y="28">拿着锁</text><text class="t-xs" x="640" y="44">风控 20 ms + 提交</text><text class="t-b" x="740" y="28">结果（实测）</text><text class="t-h" x="16" y="104">池子 10</text><text class="t-xs" x="16" y="124">64 个线程</text><rect class="b-of" x="140" y="64" width="280" height="96" rx="10"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="157" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="172" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="187" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="202" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="217" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="232" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="247" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="262" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="277" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="292" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="307" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="322" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="337" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="352" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="367" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="382" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="397" cy="79" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="157" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="172" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="187" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="202" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="217" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="232" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="247" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="262" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="277" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="292" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="307" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="322" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="337" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="352" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="367" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="382" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="397" cy="94" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="157" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="172" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="187" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="202" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="217" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="232" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="247" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="262" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="277" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="292" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="307" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="322" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="337" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="352" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="367" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="382" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="397" cy="109" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="157" cy="124" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="172" cy="124" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="187" cy="124" r="5"/><text class="t-of" x="404" y="152" text-anchor="end">54</text><rect class="b-rn" x="430" y="64" width="196" height="96" rx="10"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="447" cy="79" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="462" cy="79" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="477" cy="79" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="492" cy="79" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="507" cy="79" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="522" cy="79" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="537" cy="79" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="552" cy="79" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="567" cy="79" r="5"/><text class="t-rn" x="612" y="152" text-anchor="end">9</text><rect class="b-rn" x="634" y="64" width="86" height="96" rx="10"/><circle class="f-rn" cx="677" cy="104" r="9"/><text class="t-rn" x="677" y="144" text-anchor="middle">1</text><path class="e-of" d="M430 168 V176 H720 V168"/><text class="t-of" x="575" y="188" text-anchor="middle">10 条连接 = 9 + 1</text><text class="t-h" x="740" y="94">41 笔/秒</text><text class="t-s" x="740" y="118">中位 0.25 s · p99 7.9 s</text><text class="t-xs" x="740" y="138">等连接平均 0.67 s</text><text class="t-h" x="16" y="234">池子 50</text><text class="t-xs" x="16" y="254">64 个线程</text><rect class="b-of" x="140" y="194" width="280" height="96" rx="10"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="157" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="172" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="187" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="202" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="217" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="232" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="247" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="262" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="277" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="292" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="307" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="322" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="337" cy="209" r="5"/><circle class="f-card" stroke="var(--of)" stroke-width="1.6" cx="352" cy="209" r="5"/><text class="t-of" x="404" y="282" text-anchor="end">14</text><rect class="b-rn" x="430" y="194" width="196" height="96" rx="10"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="447" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="462" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="477" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="492" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="507" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="522" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="537" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="552" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="567" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="582" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="597" cy="209" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="447" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="462" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="477" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="492" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="507" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="522" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="537" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="552" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="567" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="582" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="597" cy="224" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="447" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="462" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="477" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="492" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="507" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="522" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="537" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="552" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="567" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="582" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="597" cy="239" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="447" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="462" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="477" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="492" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="507" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="522" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="537" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="552" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="567" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="582" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="597" cy="254" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="447" cy="269" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="462" cy="269" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="477" cy="269" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="492" cy="269" r="5"/><circle class="f-rnt" stroke="var(--rn)" stroke-width="1.6" cx="507" cy="269" r="5"/><text class="t-rn" x="612" y="282" text-anchor="end">49</text><rect class="b-rn" x="634" y="194" width="86" height="96" rx="10"/><circle class="f-rn" cx="677" cy="234" r="9"/><text class="t-rn" x="677" y="274" text-anchor="middle">1</text><path class="e-of" d="M430 298 V306 H720 V298"/><text class="t-of" x="575" y="318" text-anchor="middle">50 条连接 = 49 + 1</text><text class="t-h" x="740" y="224">41 笔/秒</text><text class="t-s" x="740" y="248">中位 1.23 s · p99 4.7 s</text><text class="t-xs" x="740" y="268">等锁平均 1.20 s</text></svg></div>
+  <figcaption class="cap">池里排队数取 HikariCP 的 <code>getThreadsAwaitingConnection()</code>，锁等待数取 <code>information_schema.innodb_trx</code> 里 <code>LOCK WAIT</code> 的事务，每 100 ms 采一次，取峰值。<span class="tag-real">实测</span> 5 遍：池子 10 是 40～41 笔/秒，池子 50 是 41 笔/秒。</figcaption>
+  </figure>
+  <ul class="pains">
+    <li><b>吞吐纹丝不动。</b>瓶颈是 88 号这行的锁，一次只能一个人拿，池子里的连接再多，也只是多了几个拿着连接干等的人。</li>
+    <li><b>中位延迟从 0.25 s 变成 1.23 s。</b>原来在门口等，现在进了屋还是等，而且等在了数据库里：每个等锁的连接都占着 MySQL 的一个连接线程，还已经锁住了自己那张订单。</li>
+    <li><b>监控里“池子不缺连接了”。</b>池里排队的峰值从 54 降到 14，看着像是问题解决了，其实 49 个人在 InnoDB 里排队，HikariCP 的指标看不到这一段。</li>
+  </ul>
+  <p class="tip"><b>缺的那一块：</b>要看的不是“池子够不够”，而是“每个事务在数据库里占着什么、占多久”。不懂这一点的典型误用，就是看到 <code>Connection is not available, request timed out after 30000ms</code> 就加池子。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：88 号这一行，怎么扛住更多付款</h2>
+    <p class="lead">都是在 64 个线程、风控 20 ms 的同一场压测下比。前三种只改代码或配置，后三种要动业务结构或者拿持久性去换。</p>
+  </div>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>做法</th><th>改了什么</th><th>每秒付款</th><th>代价</th></tr></thead>
+    <tbody>
+      <tr class="badrow"><th>池子 10 → 50</th><td>只改配置</td><td><span class="tag-real">实测</span> 41 → 41</td><td>队伍挪进数据库，中位变慢，多占 40 个 MySQL 连接线程</td></tr>
+      <tr><th>风控挪出事务</th><td>先调风控，再开事务</td><td><span class="tag-real">实测</span> 41 → 235～264</td><td>几乎没有。风控结论要在事务里复核的，事务里只查库，不调接口</td></tr>
+      <tr class="goodrow"><th>再把库存放到最后改</th><td>调换语句顺序</td><td><span class="tag-real">实测</span> → 297～313</td><td>没有。这之后的天花板是“一次提交一次落盘”</td></tr>
+      <tr><th>库存分桶</th><td>88 号拆成 N 行，每次随机扣一行</td><td>估算：近似 × N</td><td>查总库存要求和；某个桶扣光了要换桶</td></tr>
+      <tr><th>合并扣减 / Redis 预扣</th><td>先在内存里扣，攒一批再落库</td><td>不再受行锁限制</td><td>多一套组件，要处理超卖、对账和宕机丢数据</td></tr>
+      <tr class="badrow"><th>提交不等落盘</th><td><code>innodb_flush_log_at_trx_commit=2</code>、<code>sync_binlog=0</code></td><td>估算：再翻几倍</td><td>操作系统崩溃或断电，可能丢最近约 1 秒已经回了 OK 的付款</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tip"><b>选择规则：</b>先缩短热点行的持锁时间，这只需要改代码；撞上“一次提交一次落盘”的天花板以后，再去动业务结构；持久性不拿来换。本页学的是前一半：事务在数据库里占着什么、占多久，怎么算出天花板。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：连接、锁、落盘，三样东西各占多久</h2>
+    <p class="lead">先把一笔付款的时间线摊开，看它在每一刻占着什么；再看热点行怎么把所有人串成一队、队伍会排在哪里；然后是提交那一下的落盘，以及组提交为什么能把它摊薄；最后是为什么这些规则改不了。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>行锁要到提交或回滚才放</b>，不是语句执行完就放。等锁的事务醒来以后重新读最新版本，详见<a href="mysql-lock-wait-deadlock.html#m-wake">两次付款同时到</a>。</li>
+      <li><b>提交要等 redo 和 binlog 写到磁盘上</b>（默认的“双 1”），实测一次约 3 ms，详见<a href="mysql-redo-undo-binlog.html#m-2pc">redo、undo、binlog 与两阶段提交</a>。</li>
+      <li><b>利特尔法则</b>：系统里同时有多少人 = 每秒进来多少人 × 每人待多久，第一圈用它算过<a href="db-pool-tx-perf.html#size">池子要多大</a>。</li>
+      <li><b>HikariCP 借连接不保证先来先得</b>：刚还连接的线程可能马上又借走，详见 <a href="hikari-concurrentbag.html">ConcurrentBag</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-hold">④-1 一笔付款在每一刻占着什么</h3>
+  <p>同一笔付款，三种写法。每种画三行：这笔付款在干什么、它什么时候占着连接、什么时候占着 88 号这行的锁。各段时长取实测的平均：每条 SQL 约 0.45 ms，提交约 3.1 ms，风控 20 ms。</p>
+  <figure>
+  <div class="fig-box wide"><svg class="sv" viewBox="0 0 960 436" role="img" aria-label="一笔付款的时间线，三种写法。原来：风控在事务里、库存先改，连接和 88 号库存行的锁都要占 24.5 毫秒。风控挪出事务：先调风控 20 毫秒，不占连接也不占锁，事务里连接占 4.5 毫秒，锁也占 4.5 毫秒。再把库存放到最后改：连接占 4.5 毫秒，88 号的锁只占 3.6 毫秒，其中 3.1 毫秒是提交时等落盘。热点行上每秒最多能付的笔数等于 1 除以持锁时间：41、225、282。"><path class="e-axis" d="M220 406 H770"/><path class="e-axis" d="M220 406 v5"/><text class="t-xs" x="220" y="424" text-anchor="middle">0 ms</text><path class="e-axis" d="M330 406 v5"/><text class="t-xs" x="330" y="424" text-anchor="middle">5 ms</text><path class="e-axis" d="M440 406 v5"/><text class="t-xs" x="440" y="424" text-anchor="middle">10 ms</text><path class="e-axis" d="M550 406 v5"/><text class="t-xs" x="550" y="424" text-anchor="middle">15 ms</text><path class="e-axis" d="M660 406 v5"/><text class="t-xs" x="660" y="424" text-anchor="middle">20 ms</text><path class="e-axis" d="M770 406 v5"/><text class="t-xs" x="770" y="424" text-anchor="middle">25 ms</text><text class="t-h" x="16" y="34">① 原来：风控在事务里，库存先改</text><text class="t-xs" x="16" y="60">这笔付款在干什么</text><rect class="f-rn" x="220.0" y="46" width="9.9" height="20" rx="3"/><rect class="f-of" x="229.9" y="46" width="9.9" height="20" rx="3"/><rect class="f-of" x="239.8" y="46" width="9.9" height="20" rx="3"/><rect class="f-cg" x="249.7" y="46" width="440.0" height="20" rx="3"/><text class="t-cg" x="469.7" y="60" text-anchor="middle">风控 20 ms</text><rect class="f-bk" x="689.7" y="46" width="68.2" height="20" rx="3"/><text class="t-s" x="723.8" y="60" text-anchor="middle" style="fill:var(--on-accent)">提交</text><text class="t-of" x="16" y="86">占着连接</text><rect class="b-of" x="220.0" y="73" width="537.9" height="16" rx="3"/><text class="t-of" x="765.9" y="86">24.5 ms</text><text class="t-rn" x="16" y="112">占着 88 号的锁</text><rect class="b-rn" x="220.0" y="99" width="537.9" height="16" rx="3"/><text class="t-rn" x="765.9" y="112">24.5 ms → 每秒最多 41 笔</text><text class="t-h" x="16" y="146">② 风控挪出事务</text><text class="t-xs" x="16" y="172">这笔付款在干什么</text><rect class="f-cgt" x="220.0" y="158" width="440.0" height="20" rx="4" stroke="var(--cg)" stroke-dasharray="4 3"/><text class="t-cg" x="440.0" y="172" text-anchor="middle">风控 20 ms（事务外）</text><rect class="f-rn" x="660.0" y="158" width="9.9" height="20" rx="3"/><rect class="f-of" x="669.9" y="158" width="9.9" height="20" rx="3"/><rect class="f-of" x="679.8" y="158" width="9.9" height="20" rx="3"/><rect class="f-bk" x="689.7" y="158" width="68.2" height="20" rx="3"/><text class="t-s" x="723.8" y="172" text-anchor="middle" style="fill:var(--on-accent)">提交</text><text class="t-of" x="16" y="198">占着连接</text><rect class="b-of" x="660.0" y="185" width="97.9" height="16" rx="3"/><text class="t-of" x="765.9" y="198">4.5 ms</text><text class="t-rn" x="16" y="224">占着 88 号的锁</text><rect class="b-rn" x="660.0" y="211" width="97.9" height="16" rx="3"/><text class="t-rn" x="765.9" y="224">4.5 ms → 每秒最多 225 笔</text><text class="t-h" x="16" y="258">③ 再把库存放到最后改</text><text class="t-xs" x="16" y="284">这笔付款在干什么</text><rect class="f-cgt" x="220.0" y="270" width="440.0" height="20" rx="4" stroke="var(--cg)" stroke-dasharray="4 3"/><text class="t-cg" x="440.0" y="284" text-anchor="middle">风控 20 ms（事务外）</text><rect class="f-of" x="660.0" y="270" width="9.9" height="20" rx="3"/><rect class="f-of" x="669.9" y="270" width="9.9" height="20" rx="3"/><rect class="f-rn" x="679.8" y="270" width="9.9" height="20" rx="3"/><rect class="f-bk" x="689.7" y="270" width="68.2" height="20" rx="3"/><text class="t-s" x="723.8" y="284" text-anchor="middle" style="fill:var(--on-accent)">提交</text><text class="t-of" x="16" y="310">占着连接</text><rect class="b-of" x="660.0" y="297" width="97.9" height="16" rx="3"/><text class="t-of" x="765.9" y="310">4.5 ms</text><text class="t-rn" x="16" y="336">占着 88 号的锁</text><rect class="b-rn" x="679.8" y="323" width="78.1" height="16" rx="3"/><text class="t-rn" x="765.9" y="336">3.6 ms → 每秒最多 282 笔</text></svg></div>
+  <figcaption class="cap">“每秒最多”是按 1 ÷ 持锁时间算出来的<b>估算</b>。<span class="tag-real">实测</span> 依次是 40～41、235～264、297～313 笔/秒，和估算差 10% 以内。</figcaption>
+  </figure>
+  <p>三种写法里，连接占用时间从 24.5 ms 降到 4.5 ms，以后不再变；88 号的锁则从 24.5 ms 降到 4.5 ms，再降到 3.6 ms。第三种写法里，这 3.6 ms 有 3.1 ms 是提交时等落盘，也就是说，<b>锁已经短到只剩第 9 站了</b>。</p>
+
+  <h3 id="m-hot">④-2 热点行：一把锁把所有人串成一队</h3>
+  <p>64 笔付款改的是 64 张不同的订单，这部分可以同时进行；可它们都要改 88 号这一行。InnoDB 给这一行加 X 锁，后来的事务只能排队，等前一个<b>提交</b>以后才轮到下一个。所以这一行上同一时刻只有一个事务在动，每秒能过多少个，只看每个人占着锁多久：</p>
+  <div class="formula"><p class="f">每秒最多付款 ≈ min( <em>1 ÷ 热点行持锁时间</em>，池子大小 ÷ 连接占用时间，CPU 和磁盘撑得住的 )</p><p>第一项只有热点行才有；第二项就是第一圈的利特尔法则倒过来用；哪一项最小，哪里就是瓶颈。</p></div>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>写法（实测组号）</th><th>连接占用</th><th>池子上限<br><small>池 10 / 池 50</small></th><th>88 号持锁</th><th>热点行上限</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><th>风控在事务里 · 库存先改（1、2）</th><td>24.5 ms</td><td>409 / 2045</td><td class="bad-t">24.5 ms</td><td class="bad-t">41</td><td>40～41</td></tr>
+      <tr><th>风控在事务里 · 库存最后改（3、4）</th><td>24.5 ms</td><td>409 / 2045</td><td>3.6 ms</td><td>282</td><td>276～293</td></tr>
+      <tr><th>风控挪出事务 · 库存先改（5、6）</th><td>4.5 ms</td><td>2247 / 11236</td><td>4.5 ms</td><td>225</td><td>235～264</td></tr>
+      <tr><th>风控挪出事务 · 库存最后改（7、8）</th><td>4.5 ms</td><td>2247 / 11236</td><td>3.6 ms</td><td>282</td><td>285～313</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>八组实测里，每一组都是“热点行上限”最小，所以吞吐只跟持锁时间走，和池子是 10 还是 50 无关。第 3 组最能说明问题：风控还在事务里，连接照样被占 24.5 ms，可库存挪到最后改以后，88 号的锁只占 3.6 ms，吞吐就从 41 跳到 276～284。<b>对热点行来说，持锁时间比连接占用时间要紧得多。</b></p>
+
+  <h3 id="m-queue">④-3 队伍只会换地方：在门口等，还是在屋里等</h3>
+  <p>压测时 64 个线程一直在发请求，同时在系统里的人数固定是 64。用利特尔法则倒过来算：<b>平均延迟 = 64 ÷ 吞吐</b>。吞吐被锁定在 41，平均延迟就一定是 64 ÷ 41 ≈ 1.56 s，池子多大都改不了。池子能改的只有两件事：队伍排在哪里，谁先谁后。</p>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th></th><th>排在 HikariCP 门口（池子小）</th><th>排在 InnoDB 锁上（池子大）</th></tr></thead>
+    <tbody>
+      <tr><th>占着什么</th><td>只占一个 Tomcat 线程</td><td>Tomcat 线程 + 一条连接 + MySQL 的一个连接线程 + 已经锁住的订单行</td></tr>
+      <tr><th>最多等多久</th><td><code>connectionTimeout</code>，默认 30 s</td><td><code>innodb_lock_wait_timeout</code>，默认 50 s</td></tr>
+      <tr><th>谁先谁后</th><td>不保证先来先得，刚还连接的线程常常马上又借到。<span class="tag-real">实测</span> 中位 0.25 s，p99 7.9 s</td><td>InnoDB 按自己的规则放锁。<span class="tag-real">实测</span> 中位 1.23 s，p99 4.7 s</td></tr>
+      <tr><th>监控看得到吗</th><td><code>hikaricp.connections.pending</code> 一眼看到</td><td>HikariCP 只看到“连接都在用”；要去查 <code>innodb_trx</code>、<code>data_lock_waits</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tip">池子 10 那组实测的平均延迟只有 0.90～0.99 s，比 1.56 s 小，因为最倒霉的那些请求在 8 秒的测量窗口里还没等完，没算进来；池子 50 那组是 1.48～1.52 s，和法则对得上。</p>
+
+  <h3 id="m-commit">④-4 提交：一次落盘，凑齐了一起落</h3>
+  <p>第 9 站提交时，MySQL 要等 binlog 和 redo 都写到磁盘上，一次 fsync 在这台机器上约 3 ms。好在多个事务同时提交时，MySQL 会把它们排成一组，由排在最前面的那个替大家 fsync 一次，这叫<b>组提交</b>（group commit）。下面这组实测去掉了热点行，每笔只改自己的订单、写一条流水，只把池子从 1 开到 64：</p>
+  <figure>
+  <div class="fig-box wide"><svg class="sv" viewBox="0 0 960 330" role="img" aria-label="没有热点行时，池子从 1 开到 64：每秒付款 233、365、550、764、1001、1165、1343 笔；每次提交摊到的 binlog 同步次数 1.00、1.00、0.76、0.44、0.23、0.13、0.07。池子每翻一倍，吞吐涨幅从 57% 降到 15%。"><text class="t-b" x="16" y="24">每秒付款（笔）</text><text class="t-bk" x="16" y="274">binlog sync / 提交</text><text class="t-xs" x="16" y="310">池子大小</text><path class="e-axis" d="M100 230 H888"/><rect class="b-of" x="110" y="201.7" width="84" height="28.3" rx="4"/><text class="t-of" x="152.0" y="193.7" text-anchor="middle">233</text><rect class="f-bkt" x="110" y="260" width="84" height="20" rx="3"/><rect class="f-bk" x="110" y="260" width="84.0" height="20" rx="3"/><text class="t-b" x="152.0" y="275" text-anchor="middle" style="fill:var(--on-accent)">1.00</text><text class="t-h" x="152.0" y="310" text-anchor="middle">1</text><rect class="b-of" x="224" y="185.7" width="84" height="44.3" rx="4"/><text class="t-of" x="266.0" y="177.7" text-anchor="middle">365</text><rect class="f-bkt" x="224" y="260" width="84" height="20" rx="3"/><rect class="f-bk" x="224" y="260" width="84.0" height="20" rx="3"/><text class="t-b" x="266.0" y="275" text-anchor="middle" style="fill:var(--on-accent)">1.00</text><text class="t-h" x="266.0" y="310" text-anchor="middle">2</text><text class="t-xs" x="209" y="246" text-anchor="middle">+57%</text><rect class="b-of" x="338" y="163.2" width="84" height="66.8" rx="4"/><text class="t-of" x="380.0" y="155.2" text-anchor="middle">550</text><rect class="f-bkt" x="338" y="260" width="84" height="20" rx="3"/><rect class="f-bk" x="338" y="260" width="63.8" height="20" rx="3"/><text class="t-b" x="380.0" y="275" text-anchor="middle" style="fill:var(--on-accent)">0.76</text><text class="t-h" x="380.0" y="310" text-anchor="middle">4</text><text class="t-xs" x="323" y="246" text-anchor="middle">+51%</text><rect class="b-of" x="452" y="137.2" width="84" height="92.8" rx="4"/><text class="t-of" x="494.0" y="129.2" text-anchor="middle">764</text><rect class="f-bkt" x="452" y="260" width="84" height="20" rx="3"/><rect class="f-bk" x="452" y="260" width="37.0" height="20" rx="3"/><text class="t-b" x="494.0" y="275" text-anchor="middle" >0.44</text><text class="t-h" x="494.0" y="310" text-anchor="middle">8</text><text class="t-xs" x="437" y="246" text-anchor="middle">+39%</text><rect class="b-of" x="566" y="108.5" width="84" height="121.5" rx="4"/><text class="t-of" x="608.0" y="100.5" text-anchor="middle">1001</text><rect class="f-bkt" x="566" y="260" width="84" height="20" rx="3"/><rect class="f-bk" x="566" y="260" width="19.3" height="20" rx="3"/><text class="t-b" x="608.0" y="275" text-anchor="middle" >0.23</text><text class="t-h" x="608.0" y="310" text-anchor="middle">16</text><text class="t-xs" x="551" y="246" text-anchor="middle">+31%</text><rect class="b-of" x="680" y="88.5" width="84" height="141.5" rx="4"/><text class="t-of" x="722.0" y="80.5" text-anchor="middle">1165</text><rect class="f-bkt" x="680" y="260" width="84" height="20" rx="3"/><rect class="f-bk" x="680" y="260" width="10.9" height="20" rx="3"/><text class="t-b" x="722.0" y="275" text-anchor="middle" >0.13</text><text class="t-h" x="722.0" y="310" text-anchor="middle">32</text><text class="t-xs" x="665" y="246" text-anchor="middle">+16%</text><rect class="b-of" x="794" y="66.9" width="84" height="163.1" rx="4"/><text class="t-of" x="836.0" y="58.9" text-anchor="middle">1343</text><rect class="f-bkt" x="794" y="260" width="84" height="20" rx="3"/><rect class="f-bk" x="794" y="260" width="5.9" height="20" rx="3"/><text class="t-b" x="836.0" y="275" text-anchor="middle" >0.07</text><text class="t-h" x="836.0" y="310" text-anchor="middle">64</text><text class="t-xs" x="779" y="246" text-anchor="middle">+15%</text></svg></div>
+  <figcaption class="cap"><span class="tag-real">实测</span> 两遍，图中是第二遍。binlog sync 次数取 <code>performance_schema.file_summary_by_event_name</code> 里 binlog 文件的 <code>COUNT_MISC</code>（以 sync 为主）。redo 的 fsync 也同样摊薄：每次提交从 2.4 次降到 0.2 次左右。</figcaption>
+  </figure>
+  <p>池子 1 时，每次提交独占一次 sync，吞吐卡在 1 ÷ 落盘时间附近；池子越大，一次 sync 带走的事务越多，到 64 时平均 15 个事务才 sync 一次。这台 2 核机器上的吞吐一直涨到 64，只是越涨越少（每翻一倍从 +57% 降到 +15%）。这里的“池子大有用”，和第一圈说的“池子不是越大越好”并不矛盾：这里连接大部分时间在<b>等磁盘</b>，等磁盘可以凑团；CPU 和锁凑不了团，先满的是谁，拐点就在哪里。</p>
+  <p>回到热点行：⑤ 里 8 组实测，每一组都是<b>每次提交 1.00 次 sync</b>。热点行上的事务一个接一个，前一个不提交，后一个连 UPDATE 都过不去，根本凑不成组。所以热点行的天花板最终就是 1 ÷（一条 UPDATE + 一次落盘），这是第 6 站和第 9 站叠在一起的结果。</p>
+
+  <h3 id="m-why">④-5 为什么这样设计：锁为什么不能早点放，提交为什么非等盘</h3>
+  <p>要是 InnoDB 在 UPDATE 执行完就放锁，或者提交时不等磁盘，热点行就不是问题了。为什么不这样做？</p>
+  <div class="design">
+    <div class="way" data-role="rn">
+      <h4>提交时才放锁 <small>InnoDB 的做法</small></h4>
+      <ul class="pains">
+        <li class="ok">别人改 88 号时，看到的一定是已经提交的库存，不会在一个可能回滚的值上接着扣。</li>
+        <li class="ok">回滚时 undo 把旧值写回去，不会冲掉别人的修改。</li>
+        <li>持锁时间 = 从拿到锁到提交，事务里的每一毫秒都算进去。</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>语句执行完就放锁 <small>被放弃的做法</small></h4>
+      <ul class="pains">
+        <li class="ok">88 号的锁只占一条 UPDATE 的时间，吞吐高得多。</li>
+        <li>A 扣到 98，B 接着扣到 96；A 回滚，undo 把库存写回 100，B 扣的那 2 件凭空消失。</li>
+        <li>要避免这种错乱，只能让 B 等 A 结束，于是又回到了“提交才放”。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="tip"><b>决定胜负的约束：</b>没提交的修改不能被别人当成真的去用（锁要持到提交），已经回了 OK 的提交不能因为断电丢掉（提交要等落盘）。这两条是事务的定义本身，换不掉。所以应用这边能动的只有两件事：<b>让热点行上的那一段尽量短</b>，或者<b>让同一行被改的次数变少</b>（分桶、合并）。“事务要短”就是从这里来的。</p>
+
+  <h3>最少的写法</h3>
+  <div class="codebox" data-role="of">
+    <div class="code-bar"><b>改后的付款：调接口放在事务外，热点行最后改</b><span>用 <code>TransactionTemplate</code> 圈出事务的边界</span></div>
+<pre><code>public void pay(long orderId) {
+    riskClient.check(orderId);                 // 事务外：不占连接，不占锁
+    txTemplate.executeWithoutResult(s -&gt; {     // 第 1 站：借连接，开事务
+        orderMapper.markPaid(orderId);         // 各改各的行
+        payLogMapper.insert(orderId);
+        inventoryMapper.deduct(88, 2);         // 热点行放最后：拿到锁，紧接着就提交
+    });                                        // 提交（第 9 站），还连接（第 10 站）
+}</code></pre>
+  </div>
+  <p class="tip">为什么不在同一个类里拆出一个 <code>@Transactional</code> 方法来调？同类自调用不经过代理，注解不生效，见 <a href="../spring/spring-aop-tx.html">Spring AOP 与事务</a>。参数、超时、监控放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：在靶场上跑 8 组付款</h2>
+    <p class="lead">一个 MySQL 8.4 容器（默认配置，双 1 都开着），<code>orders</code> 20 万行。64 个线程连续付款，每组跑 8 秒。用 JDBC 手写事务，等价于 <code>@Transactional</code>：借连接 → <code>setAutoCommit(false)</code> → SQL → <code>commit()</code> → 还连接。三个开关：风控在事务里还是外、库存先改还是最后改、池子 10 还是 50。</p>
+  </div>
+  <div class="codebox" data-role="bk">
+    <div class="code-bar"><b>怎么跑</b><span>需要 Docker（拉 <code>mysql:8.4</code>）、JDK 8+、Maven</span></div>
+<pre><code>cd java/database/db-pool-tx-perf-hot-row
+./run.sh          # 起容器、建表，跑 hot（8 组）和 size（池子 1～64）
+./run.sh 15       # 每组跑 15 秒
+./run.sh clean    # 删容器和数据卷</code></pre>
+  </div>
+  <div class="codebox" data-role="of">
+    <div class="code-bar"><b>核心：一笔付款</b><span><code>PayLab.run()</code> 节选，<a href="https://github.com/archeu/study-labs/tree/main/java/database/db-pool-tx-perf-hot-row">完整代码 →</a></span></div>
+<pre><code>if (!cfg.riskInTx) sleep(RISK_MS);                  // 风控在事务外：先调，再借连接
+long tA = System.nanoTime();
+try (Connection c = ds.getConnection()) {          // 第 1 站
+    long tB = System.nanoTime();                   // tB - tA = 等连接
+    c.setAutoCommit(false);
+    if (cfg.hotFirst) inv.executeUpdate();         // UPDATE inventory … WHERE sku = 88（计时 = 等锁 + 执行）
+    ord.executeUpdate();                           // UPDATE orders … WHERE id = ?
+    log.executeUpdate();                           // INSERT INTO pay_log …
+    if (cfg.riskInTx) sleep(RISK_MS);              // 风控在事务里
+    if (!cfg.hotFirst) inv.executeUpdate();
+    c.commit();                                    // 第 9 站：等落盘
+}                                                  // 第 10 站：还连接</code></pre>
+  </div>
+<pre class="console"><span class="w">[hot] 64 个线程连续付款，每笔：改订单 + 写流水 + 扣 88 号库存（同一行），风控 20 ms；每组 8 s</span>
+  组                      池 付款/秒  中位    p99 | 等连接 等锁(扣库存) 提交 | 池里排队峰值 锁等待峰值 | binlog sync/提交
+<span class="r">  1 风控在事务里 · 库存先改    10     41  248.0 8123.4 |  665.9    223.2   3.1 |      54          9  |   1.00</span>
+<span class="r">  2 风控在事务里 · 库存先改    50     41 1228.2 4657.8 |  259.4   1197.5   3.0 |      14         49  |   1.00</span>
+  3 风控在事务里 · 库存最后改  10    284   33.8 3479.6 |  165.8      9.7   3.4 |      55          7  |   1.00
+  4 风控在事务里 · 库存最后改  50    293  169.5 1463.1 |   47.2    147.0   3.4 |      14         45  |   1.00
+  5 风控挪出事务 · 库存先改    10    264  241.6  426.0 |  186.9     33.8   2.9 |      51          9  |   1.00
+  6 风控挪出事务 · 库存先改    50    258  247.7  309.7 |   34.8    191.7   3.0 |      13         49  |   1.00
+<b>  7 风控挪出事务 · 库存最后改  10    311  204.5  358.2 |  155.1     27.6   3.2 |      50          9  |   1.00</b>
+  8 风控挪出事务 · 库存最后改  50    294  211.7  289.0 |   27.8    165.5   3.3 |      10         49  |   1.00</pre>
+  <p class="cap">2 核 ARM，JDK 17.0.21，HikariCP 4.0.3，Connector/J 9.7.0，MySQL 8.4（Docker，buffer pool 512 MB，其余默认），客户端和数据库在同一台机器上。延迟单位 ms。这是第 4 遍；1、2、5、7、8 组跑了 5 遍，3、4、6 组跑了 2 遍，范围见 ④-2 的表。</p>
+  <ul class="pains">
+    <li><b>看吞吐：</b>1 和 2 一样，3～8 都在 260～310 之间。池子 10 和 50 两两对比，没有一对差出 10% 以上。</li>
+    <li><b>看等在哪：</b>池子 10 时，“等连接”是大头；池子 50 时，“等锁”是大头，两者加起来差不多。</li>
+    <li><b>看最后一列：</b>8 组全是 1.00，热点行上一次提交就是一次 sync，组提交凑不起来。</li>
+  </ul>
+  <p class="tip"><b>到这里已经能交差了：</b>把调外部接口挪出事务、热点行放到最后改，秒杀付款从每秒 41 笔变成约 300 笔。<b>已知还没处理的细节：</b>等锁和等连接的超时怎么配（<a href="#p-timeout">坑 6</a>），监控要看哪几个数（<a href="#rules">规范</a>），300 笔还不够时怎么办（<a href="#d-split">深 2</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：坑、规范、深处</h2>
+    <p class="lead">第一圈是不知道就会出事故的坑，每条的根源都能点回 ④；然后用实验台把 8 组实测和公式对一遍；第二圈是写法和监控的规范；第三圈往下挖几处。</p>
+  </div>
+
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-bigger"><b><em>坑 1</em>池子开大，吞吐不涨，中位反而变慢<a class="root" href="#m-queue">← ④-3 队伍只会换地方</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>压测报 <code>Connection is not available</code>，池子从 10 调到 50，吞吐还是 41，中位从 0.25 s 变成 1.23 s。</dd>
+      <dt>根源</dt><dd>瓶颈在热点行的锁上，池子不在瓶颈上；平均延迟 = 线程数 ÷ 吞吐，吞吐不变，平均延迟就不变，只是排队的地方从 HikariCP 换到了 InnoDB。</dd>
+      <dt>做法</dt><dd class="fix">先看等在哪：<code>hikaricp.connections.acquire</code> 高，同时数据库里 <code>LOCK WAIT</code> 多，就去缩短持锁时间，而不是加池子。</dd></dl></div>
+    <div class="pit" id="p-blind"><b><em>坑 2</em>池子的监控一片正常，接口照样慢<a class="root" href="#m-queue">← ④-3 屋里的队伍池子看不见</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>池子 50 时，池里排队峰值只有 10～15，看起来“连接够用”；可接口延迟比池子 10 时还高。</dd>
+      <dt>根源</dt><dd>49 个连接都借出去了，可它们在 InnoDB 里等 88 号的锁，HikariCP 只知道“连接在用”，看不到它们在干等。</dd>
+      <dt>做法</dt><dd class="fix">数据库这边同时看 <code>Innodb_row_lock_current_waits</code>、<code>sys.innodb_lock_waits</code>（谁挡着谁）；应用这边看 <code>hikaricp.connections.usage</code>（每次借出多久），它比 pending 更早暴露长事务。</dd></dl></div>
+    <div class="pit" id="p-rpc"><b><em>坑 3</em>事务里调外部接口<a class="root" href="#m-hot">← ④-2 锁到提交才放</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>风控平时 20 ms，事务里的热点行只能过 41 笔/秒；风控一抖到 200 ms，就只剩 5 笔/秒，所有请求排队到超时。</dd>
+      <dt>根源</dt><dd>接口耗时整段算进持锁时间和连接占用时间，而热点行的上限是 1 ÷ 持锁时间。</dd>
+      <dt>做法</dt><dd class="fix">RPC、HTTP、发 MQ、写文件，一律放在事务外。必须和数据库状态一致的，用本地消息表，在事务里只写一行“待发送”。</dd></dl></div>
+    <div class="pit" id="p-order"><b><em>坑 4</em>热点行放在事务开头改<a class="root" href="#m-hold">← ④-1 锁从拿到那一刻开始算</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>同样的四步，扣库存写在最前面，吞吐 235～264；挪到最后，297～313。事务里还有别的慢操作时，差距更大：41 对 276～284。</dd>
+      <dt>根源</dt><dd>锁从 UPDATE 拿到那一刻起一直持有到提交，它后面的每条语句都算在持锁时间里。</dd>
+      <dt>做法</dt><dd class="fix">最热的那一行最后改，改完立刻提交。有多行热点时，所有代码按同一个顺序改，免得死锁（见<a href="mysql-lock-wait-deadlock.html#p-dl">死锁那一坑</a>）。</dd></dl></div>
+    <div class="pit" id="p-group"><b><em>坑 5</em>以为换了 SSD，提交就不是瓶颈<a class="root" href="#m-commit">← ④-4 串行的事务凑不成组</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>其他表的写入每秒上千笔，偏偏扣库存卡在 300 左右；监控里磁盘 IOPS 远没打满。</dd>
+      <dt>根源</dt><dd>组提交靠的是“同时有很多事务在提交”，热点行上的事务一个接一个，每次提交都独自 sync 一次（8 组实测都是 1.00）。磁盘不忙，是每次都在等它。</dd>
+      <dt>做法</dt><dd class="fix">这时再去缩短 SQL 已经没多少空间了，要么让这行被改得少一点（<a href="#d-split">深 2</a>），要么接受这个上限、在入口限流。</dd></dl></div>
+    <div class="pit" id="p-timeout"><b><em>坑 6</em>一个请求最长能挂 80 秒<a class="root" href="#m-queue">← ④-3 两段等待各有各的超时</a><span class="seen">手册</span></b>
+      <dl><dt>现象</dt><dd>网关 10 s 就给用户返回超时了，后端的线程还在等；用户重试，又多一个线程等。</dd>
+      <dt>根源</dt><dd>先在 HikariCP 门口最多等 <code>connectionTimeout</code>（默认 30 s），借到连接后又在锁上最多等 <code>innodb_lock_wait_timeout</code>（默认 50 s）。两段各算各的。</dd>
+      <dt>做法</dt><dd class="fix">给事务设上限 <code>@Transactional(timeout = 3)</code>：Spring 会把剩余时间设成每条语句的查询超时，到点驱动取消正在等的语句；或者会话级 <code>SET innodb_lock_wait_timeout = 3</code>。<code>connectionTimeout</code> 也调到秒级，让后端放弃得比网关早。</dd></dl></div>
+    <div class="pit" id="p-tail"><b><em>坑 7</em>中位数很漂亮，p99 却有 8 秒<a class="root" href="#m-queue">← ④-3 门口不排先来后到</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>池子 10、风控在事务里：中位 0.25 s，p99 7.5～8.3 s。只看平均或中位，会以为“偶尔慢一下”。</dd>
+      <dt>根源</dt><dd>HikariCP 借连接不排队，刚还连接的线程常常立刻又借到，运气差的线程一等就是好几秒。</dd>
+      <dt>做法</dt><dd class="fix">压测和监控都看 p99 和最大值；p99 远大于中位、而且 <code>hikaricp.connections.pending</code> 不为 0，就是有人在门口挨饿。</dd></dl></div>
+  </div>
+
+  <div class="lab" id="poollab" data-role="rn" tabindex="0" aria-label="热点行实验台">
+    <div class="lab-h"><b>实验台：拨三个开关，先猜每秒能付多少笔</b></div>
+    <div class="cp-ctl">
+      <div class="seg-mode" role="group" aria-label="风控接口"><small>风控 20 ms</small>
+        <button type="button" data-risk="in" aria-pressed="true">在事务里</button>
+        <button type="button" data-risk="out" aria-pressed="false">挪出事务</button>
+      </div>
+      <div class="seg-mode" role="group" aria-label="扣库存的位置"><small>扣 88 号库存</small>
+        <button type="button" data-hot="first" aria-pressed="true">最先改</button>
+        <button type="button" data-hot="last" aria-pressed="false">最后改</button>
+      </div>
+      <div class="seg-mode" role="group" aria-label="池子大小"><small>池子</small>
+        <button type="button" data-pool="10" aria-pressed="true">10 条</button>
+        <button type="button" data-pool="50" aria-pressed="false">50 条</button>
+      </div>
+    </div>
+    <div class="guess" id="pl-guess">
+      <p>先猜：64 个线程一起付款，每秒能付多少笔？</p>
+      <div class="opts"><button type="button" data-g="low">40 笔左右</button><button type="button" data-g="mid">200～350 笔</button><button type="button" data-g="high">500 笔以上</button><button type="button" data-g="skip">不猜了，直接看</button></div>
+    </div>
+    <div class="cp-out" id="pl-out" aria-live="polite">
+      <div><small>实测每秒付款</small><b id="o-tps">?</b></div>
+      <div><small>中位 / p99</small><b id="o-lat">?</b></div>
+      <div><small>平均等连接 / 等锁</small><b id="o-wait">?</b></div>
+      <div><small>按公式估算</small><b id="o-pred">?</b></div>
+    </div>
+    <div class="lab-bars" id="pl-bars" aria-hidden="true"></div>
+    <p class="cp-verdict" id="pl-verdict">拨好三个开关，先猜结果。</p>
+  </div>
+  <p class="cap">数字取 ⑤ 第 4 遍的实测（范围见 ④-2）。“按公式估算”用 ④-2 的公式：每条 SQL 0.45 ms、提交 3.1 ms、风控 20 ms，取池子上限和热点行上限中较小的那个。下面的横条是池子上限和热点行上限，短的那条就是瓶颈。</p>
+
+  <h3 id="rules">第二圈 · 使用规范</h3>
+  <div class="rules-list">
+    <div class="rl"><b>事务里只放数据库操作</b><p>调接口、发消息、写文件都放到事务外。防的是：外部系统一抖，连接和锁跟着被占住（坑 3）。</p></div>
+    <div class="rl"><b>最热的行最后改，改完立刻提交</b><p>写代码时先认出哪一行是热点：库存、账户余额、计数器、序号表。防的是：前面每一步都算进持锁时间（坑 4）。</p></div>
+    <div class="rl"><b>每个事务都有上限</b><p><code>@Transactional(timeout = …)</code> 或者全局默认超时；<code>connectionTimeout</code> 设到秒级，比网关的超时短。防的是：用户早走了，后端还在等（坑 6）。</p></div>
+    <div class="rl"><b>池子按“峰值 QPS × 连接占用时间”起步，热点行单独算</b><p>热点行的上限是 1 ÷ 持锁时间，和池子无关；池子只要别成为比它更紧的瓶颈就够了。防的是：用加池子去治锁的病（坑 1）。</p></div>
+    <div class="rl"><b>四个数一起看</b><p>HikariCP 的 <code>pending</code>（门口排队）、<code>acquire</code>（等多久）、<code>usage</code>（每次借出多久）；数据库的锁等待（<code>Innodb_row_lock_current_waits</code>、<code>sys.innodb_lock_waits</code>）。防的是：只看一边，看不到屋里的队伍（坑 2）。</p></div>
+    <div class="rl"><b>把 <code>leakDetectionThreshold</code> 当长事务报警</b><p>设成正常事务时长的几倍（最小 2 s），超过就打出借连接时的调用栈。防的是：长事务在线上悄悄出现，没人知道是哪段代码。</p></div>
+  </div>
+
+  <h3>第三圈 · 优化和深处</h3>
+  <div class="pits deep">
+    <div class="pit" id="d-group"><b><em>深 1</em>组提交怎么凑团<span class="seen">手册</span></b>
+      <p>binlog 的提交分三段队列：flush（把各事务的 binlog 写进文件）、sync（fsync）、commit（让 InnoDB 提交）。第一个进队列的事务当 leader，替后面跟上来的整组做这一段，跟随者只需要等。在 leader 干活这段时间里到达的事务，自然排进下一组，所以并发越高，一组越大。<code>binlog_group_commit_sync_delay</code>（默认 0）可以让 leader 故意多等几微秒、凑更大的组，用一点延迟换更少的 sync；热点行上没人可凑，调它没用。</p></div>
+    <div class="pit" id="d-split"><b><em>深 2</em>300 笔还不够：让这一行被改得少一点<span class="seen">推理</span></b>
+      <p>到第 7 组，持锁时间里已经只剩一条 UPDATE 加一次落盘，再怎么改 SQL 也短不了多少。接下来只能改结构：<b>分桶</b>，把 88 号的库存拆成 8 行，每次随机扣一行，8 把锁可以同时拿，提交也重新凑得成组；<b>合并扣减</b>，请求先进队列，每 10 ms 汇总一次，在一个事务里扣掉一批；<b>Redis 预扣</b>，内存里扣，异步落库。越往后吞吐越高，要处理的超卖、对账、宕机丢数据也越多。</p></div>
+    <div class="pit" id="d-dl"><b><em>深 3</em>几十个事务等同一把锁，死锁检测也要花 CPU<span class="seen">手册</span></b>
+      <p>InnoDB 每次有事务要进入等待，都会检查一遍会不会形成死锁。手册说，高并发下很多线程等同一把锁时，死锁检测本身会拖慢系统，这时可以关掉 <code>innodb_deadlock_detect</code>，改靠 <code>innodb_lock_wait_timeout</code> 兜底。这正是池子开大以后的状态：池子 50 时有 49 个事务在等 88 号。更好的办法是别让这么多人同时进去等，在应用这边限流。</p></div>
+    <div class="pit" id="d-little"><b><em>深 4</em>压测里的利特尔法则：先分清开环还是闭环<span class="seen">推理 + 实测</span></b>
+      <p>⑤ 是闭环压测：64 个线程，一个请求回来才发下一个，所以系统里永远是 64 个人，平均延迟 = 64 ÷ 吞吐。线上更像开环：请求按自己的节奏来，不管你处理没处理完。开环下，吞吐撑不住时队伍会无限变长，直到超时；池子开大的副作用（屋里的人更多）也会更明显。所以压测结论搬到线上前，要先换算成“每秒进来多少”。</p></div>
+  </div>
+
+  <h3>版本差异</h3>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th></th><th>Spring Boot 2.7</th><th>Spring Boot 3.5</th><th>Spring Boot 4.1</th></tr></thead>
+    <tbody>
+      <tr><th>自带的 HikariCP</th><td>4.0.3（最后一个支持 Java 8 的版本）</td><td>6.3.3（Java 11+）</td><td>7.0.2</td></tr>
+      <tr><th>本页用到的部分</th><td colspan="3"><code>maximumPoolSize</code> 默认 10、<code>connectionTimeout</code> 默认 30 s、借连接不保证先来先得、<code>leakDetectionThreshold</code>，这几个版本相同</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tip">⑤ 用的是 4.0.3，为了能用 <code>--release 8</code> 编译。MySQL 这边，双 1 默认值、<code>innodb_lock_wait_timeout</code> 50 s、binlog 组提交，8.0 和 8.4 一样。</p>
+
+  <h3>面试官会怎么问</h3>
+  <div class="faq">
+    <details><summary>连接池设多大合适？</summary><p>先算要多少：峰值 QPS × 每次占用连接的时间，再留余量；再看数据库扛多少：所有实例的池子加起来，不能超过数据库的连接上限，也别远超它的 CPU 和磁盘能并行处理的量。最后要说明，如果瓶颈是热点行的锁，池子多大都没用，要看持锁时间。</p></details>
+    <details><summary>为什么说事务要短？</summary><p>三笔账：连接，占用越久，池子越早被借光；锁，行锁到提交才放，热点行上吞吐上限就是 1 ÷ 持锁时间；undo，长事务让旧版本清不掉。提交那一下的落盘是固定成本，高并发时靠组提交摊薄，可热点行上凑不成组。所以事务里只放数据库操作，热点行最后改。</p></details>
+    <details><summary>秒杀扣库存很慢，怎么优化？</summary><p>先量持锁时间：把外部调用挪出事务，库存放到最后改，这两步只改代码（实测 41 → 约 300 笔/秒）。再不够就改结构：库存分桶、合并扣减、Redis 预扣加异步落库，同时在入口限流，别让大量请求进数据库排队。不靠加池子，也不靠关掉双 1。</p></details>
+    <details><summary>线上报 Connection is not available，怎么排查？</summary><p>先分清是“借不到”还是“还得慢”：看 <code>usage</code>（每次借出多久）有没有变长。变长了，就去数据库里看 <code>innodb_trx</code> 里有没有长事务、<code>sys.innodb_lock_waits</code> 里谁挡着谁；再用 <code>leakDetectionThreshold</code> 的调用栈找到是哪段代码。最后才考虑加池子，而且要算所有实例加起来的总连接数。</p></details>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="pains">
+    <li>库存分桶、合并扣减在靶场上实测：吞吐能到多少，超卖和对账怎么兜。</li>
+    <li>虚拟线程（JDK 21）＋连接池：线程不再是限制，池子成了唯一的闸门，pending 会一下子涨到几千。</li>
+    <li>读写分离下的两个池子：主库池、从库池各开多大，故障切换时连接怎么重建。</li>
+    <li>开环压测（固定到达率）下重跑 ⑤：池子开大以后，屋里的队伍怎么拖垮数据库。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：拿刚学的东西改靶场</h2>
+    <p class="lead">都在 <code>PayLab.java</code> 上改。先写下猜测再跑。</p>
+  </div>
+  <div class="rules-list">
+    <div class="rl"><b>1. 库存分桶</b><p>把 88 号的库存拆成 8 行（<code>sku_bucket</code> 0～7），每笔随机扣一行，跑第 7 组的配置。猜：吞吐是 300 的 8 倍吗？binlog sync / 提交还是 1.00 吗？</p><p class="guard">对照深 2 和 ④-4：锁不再是一把，提交也重新凑得成组了；但 2 核机器的 CPU 可能先满。</p></div>
+    <div class="rl"><b>2. 给等待设上限</b><p>第 2 组的配置，事务开始前 <code>SET SESSION innodb_lock_wait_timeout = 1</code>，池子的 <code>connectionTimeout</code> 改成 1000。猜：吞吐变吗？会有多少笔报错，报的是哪两种错？</p><p class="guard">对照坑 6：超时不会让吞吐变高，它只是让排不上的人早点失败，把队伍变短。</p></div>
+    <div class="rl"><b>3. 拿持久性换速度（只在靶场上试）</b><p>第 7 组的配置，<code>SET GLOBAL innodb_flush_log_at_trx_commit = 2</code>、<code>SET GLOBAL sync_binlog = 0</code>。猜：吞吐变成多少？瓶颈换成了谁？</p><p class="guard">对照 ④-2 的公式：持锁时间里的那 3.1 ms 落盘没了；对照 ④-5：代价是断电会丢已经回了 OK 的付款。</p></div>
+  </div>
+
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>连接池只是排队的入口；事务在数据库里占着热点行的锁（到提交才放）和提交时的一次落盘，热点行上的吞吐上限 ≈ 1 ÷ 持锁时间，和池子大小无关，所以事务要短、外部调用挪出去、热点行最后改。</p></details>
+    <details><summary>2. 第一圈的“慢了就加池子”，在热点行上的痛点是什么？</summary><p>吞吐不涨（实测 41 → 41），中位延迟变差（0.25 s → 1.23 s），还多占几十个数据库连接线程；队伍挪进 InnoDB，HikariCP 的监控看不见。</p></details>
+    <details><summary>3. 头号坑“事务里调外部接口”，根源是哪条原理？</summary><p>④-2：行锁要持有到提交，事务里每一毫秒都算进持锁时间；热点行上同一时刻只有一个事务能动，所以上限是 1 ÷ 持锁时间。</p></details>
+    <details><summary>4. 预测：第 1 组的配置下，风控接口从 20 ms 抖到 200 ms，会怎样？</summary><p>持锁约 204.5 ms，热点行上限约 5 笔/秒。64 个线程的平均延迟 = 64 ÷ 5 ≈ 13 s；HikariCP 门口又不排先来后到，运气差的会超过 30 s，开始报 <code>Connection is not available</code>。报错的是池子，根源是风控和锁。</p></details>
+    <details><summary>5. 预测：第 7 组的配置下，把池子从 10 改成 4，吞吐会怎样？改成 1 呢？</summary><p>改成 4 基本不变：池子上限 = 4 ÷ 4.5 ms ≈ 900，仍然比热点行的 282 大。改成 1 会明显下降：一条连接要串着做完整个事务（约 4.5 ms），而不只是持锁的 3.6 ms，上限约 225；其他人改订单、写流水的那部分也没法和持锁的人并行了。</p></details>
+    <details><summary>6. 预测：同一台数据库上，另一个服务每秒写几千条日志（各写各的行），它会不会拖慢 88 号的扣库存？</summary><p>会拖一点。它不抢 88 号的锁，但和扣库存共用 binlog 和 redo 的组提交：扣库存的事务可能被编进一个更大的组，等 leader 把整组写完再 sync，单次提交可能变慢一点；CPU 和磁盘也是共用的。热点行的上限是 1 ÷ 持锁时间，持锁时间里的提交一变慢，上限就跟着降。</p></details>
+    <details><summary>7. 放回全景：第 1 站借连接、第 10 站还连接，中间第 6 站加锁、第 9 站落盘。如果第 9 站的磁盘变慢，一次 fsync 从 3 ms 变成 30 ms，整条链路会怎样？</summary><p>热点行的持锁时间从约 3.6 ms 变成约 30 ms，上限从约 280 笔/秒掉到约 33 笔/秒；后面的事务在第 6 站排队等锁，连接借出去不还，第 1 站的 HikariCP 门口跟着排起长队，最后报 <code>Connection is not available</code>。现象出在第 1 站，病根在第 9 站，所以要看 <code>usage</code> 和数据库里的提交耗时，而不是只看池子。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>标准档。<span class="tag-real">实测</span> 的数字来自本机：2 核 ARM，JDK 17.0.21，HikariCP 4.0.3，Connector/J 9.7.0，Docker 里一个 MySQL 8.4 容器（buffer pool 512 MB，其余默认），客户端和数据库在同一台机器上。热点行实验：1、2、5、7、8 组各跑 5 遍，3、4、6 组各跑 2 遍，每遍 8 秒；池子大小实验跑 2 遍。④-1、④-2 里的持锁时间和上限是按实测的分段耗时算出来的<b>估算</b>。来自 MySQL 8.4 参考手册的：<code>innodb_lock_wait_timeout</code> 默认 50 s，binlog 组提交的三段队列和 <code>binlog_group_commit_sync_delay</code>，<code>innodb_deadlock_detect</code> 的说明；来自 HikariCP 文档的：<code>connectionTimeout</code> 默认 30 s、<code>maximumPoolSize</code> 默认 10、<code>leakDetectionThreshold</code> 最小 2 s。分桶、合并扣减的效果是推理，没有在本机测。代码：<a href="https://github.com/archeu/study-labs/tree/main/java/database/db-pool-tx-perf-hot-row">study-labs/java/database/db-pool-tx-perf-hot-row</a>。</p>
+  <p>相关：<a href="../java/pano-j06-update-to-disk.html">全景：一条 UPDATE 从应用到磁盘</a> · <a href="db-pool-tx-perf.html">连接池与事务性能（第一圈）</a> · <a href="hikari-concurrentbag.html">HikariCP 借连接为什么快</a> · <a href="mysql-lock-wait-deadlock.html">两次付款同时到</a> · <a href="mysql-redo-undo-binlog.html">redo、undo、binlog 与两阶段提交</a> · <a href="../java/roadmap.html#j06">回到 Java 地图 J06</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 热点行实验台：实测数字取 ⑤ 第 4 遍（2 核 ARM，MySQL 8.4，64 个线程，每组 8 s）；估算用 ④-2 的公式
+var POOL_MEAS = {   // key = 风控(in/out) + 库存(first/last) + 池子
+  'in-first-10':  {no:1, tps:41,  range:'40～41',   p50:248.0,  p99:8123.4, acq:665.9, lock:223.2},
+  'in-first-50':  {no:2, tps:41,  range:'41',       p50:1228.2, p99:4657.8, acq:259.4, lock:1197.5},
+  'in-last-10':   {no:3, tps:284, range:'276～284', p50:33.8,   p99:3479.6, acq:165.8, lock:9.7},
+  'in-last-50':   {no:4, tps:293, range:'287～293', p50:169.5,  p99:1463.1, acq:47.2,  lock:147.0},
+  'out-first-10': {no:5, tps:264, range:'235～264', p50:241.6,  p99:426.0,  acq:186.9, lock:33.8},
+  'out-first-50': {no:6, tps:258, range:'258～259', p50:247.7,  p99:309.7,  acq:34.8,  lock:191.7},
+  'out-last-10':  {no:7, tps:311, range:'297～313', p50:204.5,  p99:358.2,  acq:155.1, lock:27.6},
+  'out-last-50':  {no:8, tps:294, range:'285～305', p50:211.7,  p99:289.0,  acq:27.8,  lock:165.5}
+};
+var SQL_MS = 0.45, COMMIT_MS = 3.1, RISK_MS = 20, THREADS = 64;
+function poolModel(risk, hot, pool){
+  var conn = 3*SQL_MS + COMMIT_MS + (risk==='in' ? RISK_MS : 0);           // 连接占用
+  var lock = hot==='first' ? conn : SQL_MS + COMMIT_MS;                    // 88 号持锁
+  var poolCap = pool*1000/conn, hotCap = 1000/lock;
+  var pred = Math.min(poolCap, hotCap);
+  return {conn:conn, lock:lock, poolCap:poolCap, hotCap:hotCap, pred:pred,
+          bound: hotCap <= poolCap ? 'hot' : 'pool', avgLatency: THREADS*1000/pred};
+}
+function bucketOf(tps){ return tps < 100 ? 'low' : (tps <= 350 ? 'mid' : 'high'); }
+/*SIM-END*/
+(function(){
+  var lab=document.getElementById('poollab'); if(!lab) return;
+  var guessBox=document.getElementById('pl-guess');
+  var st={risk:'in', hot:'first', pool:10, guessed:null, skip:false};
+  function bind(attr,key,num){
+    lab.querySelectorAll('['+attr+']').forEach(function(b){b.addEventListener('click',function(){
+      var v=b.getAttribute(attr); st[key]=num?+v:v; st.guessed=null; render();});});
+  }
+  bind('data-risk','risk'); bind('data-hot','hot'); bind('data-pool','pool',true);
+  guessBox.querySelectorAll('[data-g]').forEach(function(b){b.addEventListener('click',function(){
+    if(b.dataset.g==='skip') st.skip=true; else st.guessed=b.dataset.g; render();});});
+  var BUCKET={low:'40 笔左右',mid:'200～350 笔',high:'500 笔以上'};
+  function ms(v){ return v>=1000 ? (v/1000).toFixed(v>=10000?0:1)+' s' : Math.round(v)+' ms'; }
+  function set(id,v){document.getElementById(id).textContent=v;}
+  function bars(m){
+    var MAX=1000, rows=[['池子上限（'+st.pool+' 条 ÷ '+(m.conn+1e-9).toFixed(1)+' ms）',m.poolCap,'of',m.bound==='pool'],
+                        ['热点行上限（1 ÷ '+(m.lock+1e-9).toFixed(1)+' ms）',m.hotCap,'rn',m.bound==='hot']];
+    return rows.map(function(r){
+      var w=Math.min(100, r[1]/MAX*100), over=r[1]>MAX;
+      return '<div class="lb-row'+(r[3]?' lb-min':'')+'" data-role="'+r[2]+'"><span class="lb-name">'+r[0]+'</span>'+
+        '<span class="lb-track"><span class="lb-fill" style="width:'+w.toFixed(1)+'%"></span></span>'+
+        '<span class="lb-val">'+Math.round(r[1])+(over?' →':'')+(r[3]?' · 瓶颈':'')+'</span></div>';
+    }).join('');
+  }
+  function render(){
+    [['data-risk','risk'],['data-hot','hot'],['data-pool','pool']].forEach(function(p){
+      lab.querySelectorAll('['+p[0]+']').forEach(function(b){b.setAttribute('aria-pressed',String(b.getAttribute(p[0])===String(st[p[1]])));});
+    });
+    var key=st.risk+'-'+st.hot+'-'+st.pool, r=POOL_MEAS[key], m=poolModel(st.risk,st.hot,st.pool), real=bucketOf(r.tps);
+    var show=st.skip||st.guessed!==null;
+    guessBox.hidden=st.skip;
+    guessBox.querySelectorAll('[data-g]').forEach(function(b){
+      b.classList.remove('right','wrong');
+      b.setAttribute('aria-pressed',String(b.dataset.g===st.guessed));
+      if(st.guessed&&b.dataset.g===st.guessed) b.classList.add(st.guessed===real?'right':'wrong');
+    });
+    document.getElementById('pl-out').querySelectorAll('div').forEach(function(d){d.classList.toggle('masked',!show);});
+    var barBox=document.getElementById('pl-bars'), v=document.getElementById('pl-verdict');
+    if(!show){ ['o-tps','o-lat','o-wait','o-pred'].forEach(function(id){set(id,'?');}); barBox.innerHTML='';
+      v.className='cp-verdict'; v.textContent='第 '+r.no+' 组。先猜：64 个线程一起付款，每秒能付多少笔？'; return; }
+    set('o-tps', r.tps+' 笔（'+r.range+'）');
+    set('o-lat', ms(r.p50)+' / '+ms(r.p99));
+    set('o-wait', ms(r.acq)+' / '+ms(r.lock));
+    set('o-pred', Math.round(m.pred)+' 笔');
+    barBox.innerHTML=bars(m);
+    var head=st.guessed?(st.guessed===real?'猜对了。':'猜错了，是“'+BUCKET[real]+'”。'):'';
+    var why=[];
+    why.push('第 '+r.no+' 组：88 号的锁每次占 '+(m.lock+1e-9).toFixed(1)+' ms，热点行上限约 '+Math.round(m.hotCap)+' 笔/秒；连接每次占 '+(m.conn+1e-9).toFixed(1)+' ms，'+st.pool+' 条连接的上限约 '+Math.round(m.poolCap)+' 笔/秒。');
+    why.push(m.bound==='hot' ? '较小的是热点行上限，所以吞吐只跟持锁时间走，池子开大也不会涨（④-2）。' : '较小的是池子上限，这时加池子才有用（④-2）。');
+    if(st.risk==='in' && st.hot==='first') why.push('风控 20 ms 整段算进了持锁时间。');
+    if(st.risk==='in' && st.hot==='last') why.push('风控还在事务里，连接照样被占 24.5 ms，但锁只在最后 3.6 ms 才拿，吞吐照样上去了：对热点行来说，持锁时间比连接占用时间要紧。');
+    if(st.hot==='last' && st.risk==='out') why.push('持锁的 3.6 ms 里有 3.1 ms 是提交时等落盘，SQL 已经没什么可省的了，再往上要靠分桶或合并扣减（深 2）。');
+    why.push(r.acq>r.lock ? '大部分人排在 HikariCP 门口（平均等连接 '+ms(r.acq)+'）。' : '大部分人拿着连接在 InnoDB 里等锁（平均 '+ms(r.lock)+'），HikariCP 的监控看不到这一段（坑 2）。');
+    if(r.p99>r.p50*8) why.push('p99 是中位的 '+Math.round(r.p99/r.p50)+' 倍：门口不排先来后到，有人一直借不到（坑 7）。');
+    v.className='cp-verdict '+(r.tps<100?'v-lost':'v-ok'); v.textContent=head+why.join('');
+  }
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

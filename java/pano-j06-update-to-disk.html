@@ -611,7 +611,7 @@ table.runs td.why code.bad{color:var(--bad)}
         <p><code>@Transactional</code> 的事务拦截器向 HikariCP 借一条连接。这条连接在池子启动时就建好了：TCP 握手、认证都做过。然后调 <code>setAutoCommit(false)</code>，驱动给 MySQL 发一句 <code>SET autocommit=0</code>。从这一刻起，这条连接上的语句都属于同一个事务，直到 commit。</p>
         <p class="log"><span class="tag-real">实测</span> 借连接 6～9 µs，只是从池子里拿一条现成的；<code>setAutoCommit(false)</code> 0.30～0.74 ms，是一次网络往返。</p>
         <p class="why"><b>为什么要它</b>新建一条连接要握手、认证，毫秒级，池子把这笔开销挪到了启动时。事务必须绑在一条连接上，因为 MySQL 把事务状态存在这条连接对应的服务端会话里。</p>
-        <p class="down"><b>往下一层</b><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a> · <a href="../database/hikari-concurrentbag.html">HikariCP 借连接为什么快</a> · 事务怎么借到这条连接：<a href="pano-j05-request-through-spring.html#s-7">J05 全景第 7 站</a></p>
+        <p class="down"><b>往下一层</b><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a> · <a href="../database/hikari-concurrentbag.html">HikariCP 借连接为什么快</a> · <a href="../database/db-pool-tx-perf-hot-row.html">下一圈：池子从 10 开到 50，付款一点没快</a>：借到连接以后占多久，看的是第 6 站的锁和第 9 站的落盘 · 事务怎么借到这条连接：<a href="pano-j05-request-through-spring.html#s-7">J05 全景第 7 站</a></p>
         <p class="risk"><b>常出的事</b>事务里夹了慢操作，比如调第三方支付、发 HTTP，连接就被一直占着。池子默认 10 条，占满以后，后来的请求卡在借连接这一步，默认等 30 秒才报错。</p>
       </div>
       <div class="stop" id="s-2" data-stop="2" data-role="of">
@@ -627,7 +627,7 @@ table.runs td.why code.bad{color:var(--bad)}
         <p>MySQL 社区版默认“一个连接一个线程”。这条连接对应的服务端线程一直阻塞在读 socket 上，收到 COM_QUERY 就开始干活：语句的第一个阶段 <code>starting</code> 从这里计时。</p>
         <p class="log"><span class="tag-real">实测</span> performance_schema 里这条语句的 <code>starting</code> 阶段 49～62 µs；查语句历史用的 THREAD_ID，就是这条连接专属的那个线程。</p>
         <p class="why"><b>为什么要它</b>每个连接的会话状态，包括事务、会话变量、临时表，都在这个线程手里，处理语句时不用到处去找。代价是连接越多，线程越多。</p>
-        <p class="down"><b>往下一层</b><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a>：池子开多大，和 <code>max_connections</code>、服务端线程数是什么关系</p>
+        <p class="down"><b>往下一层</b><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a>：池子开多大，和 <code>max_connections</code>、服务端线程数是什么关系 · <a href="../database/db-pool-tx-perf-hot-row.html">下一圈：池子从 10 开到 50，付款一点没快</a>：池子开大以后，等锁的连接各占一个服务端线程</p>
         <p class="risk"><b>常出的事</b>应用扩到 50 个实例，每个池子 20 条，就是 1000 个服务端线程，超过 <code>max_connections</code>（默认 151）直接报 Too many connections。池子不是越大越好。</p>
       </div>
       <div class="stop" id="s-4" data-stop="4" data-role="pd">
@@ -683,7 +683,7 @@ table.runs td.why code.bad{color:var(--bad)}
         <p>MySQL 给 UPDATE 回一个 OK 包（1 行受影响），给 COMMIT 再回一个。<code>commit()</code> 返回后，事务拦截器把连接还给 HikariCP。Hikari 发现 autocommit 被改过，会在收回前把它恢复成默认值。</p>
         <p class="log"><span class="tag-real">实测</span> <code>close()</code> 0.41～0.76 ms。应用这边借连接、开事务、UPDATE、提交、还连接，一共 7.4～9.3 ms，不算旁边观察用的查询。</p>
         <p class="why"><b>为什么要它</b><code>commit()</code> 返回，就是对用户的承诺：之后不管主库出什么事，9527 都是 PAID。这个承诺靠的是第 9 站已经落盘的 redo 和 binlog，而不是数据文件。</p>
-        <p class="down"><b>往下一层</b><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a> · <a href="pano-j05-request-through-spring.html#s-10">J05 全景第 10、11 站</a></p>
+        <p class="down"><b>往下一层</b><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a> · <a href="../database/db-pool-tx-perf-hot-row.html">下一圈：池子从 10 开到 50，付款一点没快</a>：从借到还这一段多长，决定每秒能付多少笔 · <a href="pano-j05-request-through-spring.html#s-10">J05 全景第 10、11 站</a></p>
         <p class="risk"><b>常出的事</b>OK 包回来之前网络断了：应用收到异常，可事务其实已经提交了。重试付款时，要靠 <code>WHERE status='CREATED'</code> 这样的条件和幂等号挡住重复。</p>
       </div>
       <div class="stop" id="s-11" data-stop="11" data-role="g2">
@@ -720,7 +720,7 @@ table.runs td.why code.bad{color:var(--bad)}
         <tr><td class="st">7、8、9、12</td><td><a href="../database/mysql-redo-undo-binlog.html">日志：redo、undo、binlog 与两阶段提交</a> <span class="dp">懂设计</span></td><td>有页</td><td class="ord"><b>4</b><span class="why">这张全景最核心的一页：“commit 返回就不丢”和“提交后 2 分钟页还是脏的”，要靠它讲通</span></td></tr>
         <tr><td class="st">11</td><td><a href="../database/mysql-replication-lag.html">主从复制、读写分离与复制延迟</a> <span class="dp">懂机制</span></td><td>有页</td><td class="ord"><b>5</b><span class="why">接着 binlog 学：从库拿到的就是第 9 站写下的那 5 个事件</span></td></tr>
         <tr><td class="st">—</td><td><a href="../database/mysql-online-ddl.html">表结构设计与大表变更（Online DDL）</a> <span class="dp">懂机制</span></td><td>有页</td><td class="ord"><b>6</b><span class="why">要用到前面的锁（元数据锁）和复制（DDL 在从库上重放时的延迟）</span></td></tr>
-        <tr><td class="st">1、3、10</td><td><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a> <span class="dp">懂机制</span></td><td>有页 · 另见<a href="../database/hikari-concurrentbag.html">ConcurrentBag</a></td><td class="ord"><b>7</b><span class="why">复习：事务为什么要短，现在能从第 6 站的锁和第 9 站的 fsync 说出原因</span></td></tr>
+        <tr><td class="st">1、3、10</td><td><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a> <span class="dp">懂机制</span></td><td>有页（第一圈） · 另见<a href="../database/hikari-concurrentbag.html">ConcurrentBag</a> · <a href="../database/db-pool-tx-perf-hot-row.html">下一圈：池子从 10 开到 50，付款一点没快</a></td><td class="ord"><b>7</b><span class="why">复习：事务为什么要短，现在能从第 6 站的锁和第 9 站的 fsync 说出原因</span></td></tr>
         <tr><td class="st">11</td><td>版本：8.0 已停止维护，升级到 8.4 LTS 要注意什么 <span class="dp">会用</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>8</b><span class="why">这次实测已经踩到两处：<code>SHOW MASTER STATUS</code> 没了，复制命令全改叫 SOURCE / REPLICA</span></td></tr>
         <tr><td class="st">7</td><td>PostgreSQL 的不同：多版本存在表里、要 VACUUM，索引类型和 JSONB <span class="dp">懂机制</span></td><td>部分有页：<a href="../database/db-pool-tx-perf.html">连接池页</a>里提到过</td><td class="ord"><b>9</b><span class="why">学完 MySQL 的 undo 再看 PG：同一个问题，旧版本放在了另一个地方</span></td></tr>
         <tr><td class="st">—</td><td>怎么选 MySQL 还是 PostgreSQL，pgvector 为什么让 PG 在 AI 项目里更常见 <span class="dp">懂设计</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>10</b><span class="why">放最后：两边都懂了才谈得上选；和 AI 地图站 06 共用</span></td></tr>
