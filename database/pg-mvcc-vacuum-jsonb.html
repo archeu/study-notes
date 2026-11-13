@@ -1,0 +1,1822 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>订单表一行没加，PG 里却胖了一倍：PostgreSQL 的多版本、VACUUM、索引类型和 JSONB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J06 knowledge point 9 "PostgreSQL differences", panorama "an UPDATE from app to disk" station 7. Roles: pd = PostgreSQL heap pages / live tuple, cg = old versions (dead tuples, InnoDB undo), bk = cleanup (prune, VACUUM, autovacuum), g2 = indexes (B-tree, GIN, BRIN), rn = transactions / snapshots / xid, of = application and JSONB documents, other = MySQL habits / old approach, bad = bloat, blocked, wraparound; good = right fix. Interaction: one heap lab (UPDATE status / user_id, read, VACUUM, VACUUM FULL, open report snapshot, fillfactor 100/90, guess first). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+body{overflow-x:clip}
+.lab-h{font-family:var(--font-display);font-weight:400;font-size:20px}
+#eb-res p{margin:0 0 4px}
+#eb-res .note-p{font-size:13px;color:var(--muted)}
+#eb pre{white-space:pre;overflow-x:auto}
+
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2;fill:none}
+.e-warn{stroke:var(--warn);stroke-width:2.5;fill:none}
+.misj{border-collapse:collapse}
+.ev-card{font-family:var(--font-mono);font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--console-bg);color:var(--console-fg);border-radius:12px;padding:10px 12px;margin:0}
+.tr-nav{display:flex;flex-wrap:wrap;gap:6px}
+.tr-nav button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:var(--font-mono)}
+.tr-nav button[aria-current="true"]{border-color:var(--ink);background:var(--ink);color:var(--paper)}
+.tr-nav button.ok{border-color:var(--good)}
+.tr-nav button.ng{border-color:var(--bad)}
+.tr-score{font-size:13.5px;color:var(--muted)}
+
+/* page: budget bench */
+.bud{display:flex;flex-direction:column;gap:6px}
+.bud-bar{position:relative;display:flex;height:34px;border-radius:10px;overflow:hidden;border:1.5px solid var(--line-strong);background:var(--paper)}
+.bud-bar span{display:block;height:100%;min-width:0}
+.bud-bar .h{background:var(--pd)} .bud-bar .m{background:var(--warn);opacity:.55} .bud-bar .c{background:var(--warn);opacity:.7}
+.bud-bar .s{background:var(--warn);opacity:.85} .bud-bar .o{background:var(--neutral);opacity:.6} .bud-bar .d{background:var(--warn)}
+.bud-bar .d.over{background:var(--bad)}
+.bud-lim{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--ink)}
+.bud-cap{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);font-family:var(--font-mono)}
+.bud-lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.bud-lg i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.derive{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.derive > div{padding:8px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--card);font-size:13.5px;min-width:0}
+.derive b{display:block;font-size:12px;color:var(--muted);font-weight:500}
+.derive code{font-size:13px;overflow-wrap:anywhere}
+.ctl select{font:inherit;font-size:14px;padding:5px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:720px){.derive{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.derive{grid-template-columns:1fr}}
+
+/* page: tcp */
+.cap{font-size:13.5px;color:var(--muted);margin-top:8px;line-height:1.55}
+.seq{display:flex;flex-direction:column;gap:12px}
+.seq-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seq-ctl .seg{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;margin-left:auto}
+.seq-box{outline:none}
+.seq svg .msg{opacity:.13;transition:opacity .25s}
+.seq svg .msg.on{opacity:1}
+.seq svg .msg.cur .ln{stroke-width:4}
+.seq svg .msg.cur .lab{font-weight:700}
+.seq svg .lane{stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5}
+.st-chip{font-family:var(--font-mono);font-size:12.5px;font-weight:600}
+.seq-info{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.seq-info > div{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.seq-info .k{font-size:12.5px;color:var(--muted);display:block;margin-bottom:4px}
+.seq-info .sts{display:flex;flex-wrap:wrap;gap:8px 16px}
+.seq-info .sts span{display:inline-flex;gap:6px;align-items:baseline}
+.seq-info .sts b{font-family:var(--font-mono);font-size:14px;padding:1px 8px;border-radius:8px;background:var(--rt);border:1.5px solid var(--rc)}
+.seq-say{grid-column:1 / -1}
+.seq-say p + p{margin-top:6px}
+.seq-num{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.frames{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.frames > div{border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.frames h4{font-size:17px;color:var(--rc)}
+.frames pre{margin:0;font-family:var(--font-mono);font-size:12px;background:var(--code-bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+@media (max-width:760px){.way{overflow-x:auto}.way > svg{min-width:400px}.seq-info{grid-template-columns:minmax(0,1fr)}.frames{grid-template-columns:minmax(0,1fr)}.seq-ctl .seg{margin-left:0}}
+/* ---------- netty page ---------- */
+.lanes{display:flex;flex-direction:column;gap:6px}
+.lane{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.lane .nm{font-family:var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lane .tr{position:relative;height:18px;border-radius:6px;background:var(--neutral-tint)}
+.lane .tr i{position:absolute;top:0;bottom:0;background:var(--bad);border-radius:5px;opacity:.85}
+.lane .tr u{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--bk)}
+.lane .v{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right}
+.lane-axis{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;font-size:11.5px;color:var(--muted);font-family:var(--font-mono)}
+.lane-axis span{display:flex;justify-content:space-between}
+.lanes-more{font-size:12.5px;color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:760px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.ctl-grid{grid-template-columns:1fr}}
+.seg-mode{display:flex;flex-wrap:wrap;gap:6px}
+.seg-mode button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 10px;font-size:13.5px;cursor:pointer;color:var(--ink)}
+.seg-mode button[aria-pressed="true"]{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.verx{width:100%;border-collapse:collapse;font-size:14px}
+.verx th,.verx td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.verx th{font-size:13px;color:var(--muted);font-weight:600;background:var(--code-bg)}
+.verx code{overflow-wrap:anywhere}
+
+/* ---- 本页新增 ---- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2;fill:none}
+.bytes{display:flex;flex-direction:column;gap:10px}
+.brow{display:grid;grid-template-columns:8.5em minmax(0,1fr);gap:10px;align-items:start}
+.brow > b{font-size:14px;line-height:1.3}
+.brow > b small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:3px;min-width:0}
+.chips i{font-style:normal;font-family:var(--font-mono);font-size:11.5px;line-height:1;padding:4px 3px;border-radius:4px;background:var(--rt);border:1px solid var(--rc);min-width:2.1em;text-align:center}
+.chips i.k{background:var(--card);border-style:dashed;color:var(--muted)}
+.chips i.w{padding:4px 6px}
+@media (max-width:560px){.brow{grid-template-columns:minmax(0,1fr)}}
+.hdr{display:grid;grid-template-columns:repeat(17,minmax(0,1fr)) minmax(0,4fr);gap:2px;min-width:620px;font-family:var(--font-mono);font-size:11.5px}
+.hdr > div{border:1.5px solid var(--rc);background:var(--rt);border-radius:6px;padding:6px 4px;text-align:center;display:flex;flex-direction:column;gap:3px;min-width:0}
+.hdr > div small{font-family:var(--font-body);font-size:11.5px;color:var(--ink)}
+.hdr-wrap{overflow-x:auto;padding-bottom:4px}
+.lbt{display:flex;flex-direction:column;gap:10px}
+.lbrow{display:grid;grid-template-columns:6.5em minmax(0,1fr) 15em;gap:10px;align-items:center;font-size:13.5px}
+.lbrow > b{font-size:14px}
+.lbrow.best > b::after{content:" ✓";color:var(--good)}
+.stk{display:flex;height:22px;border-radius:6px;overflow:hidden;background:var(--neutral-tint);min-width:0}
+.stk i{display:block;height:100%;font-style:normal;font-family:var(--font-mono);font-size:10.5px;line-height:22px;text-align:center;overflow:hidden;white-space:nowrap;color:var(--ink);border-right:1.5px solid var(--card)}
+.stk i.n{background:var(--rn-tint)}
+.stk i.n2{background:var(--pd-tint)}
+.stk i.s{background:var(--warn-tint)}
+.stk i.x{background:var(--bad-tint);color:var(--bad)}
+.lbstat{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap}
+.lbstat .e{color:var(--bad);font-weight:600}
+.leg{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.leg span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-2px;background:var(--c)}
+.inst-cfg{display:flex;flex-wrap:wrap;gap:8px}
+.inst-cfg .ic{display:flex;flex-direction:column;gap:4px;border:1.5px solid var(--line-strong);border-radius:10px;padding:6px 8px;font-size:12.5px;background:var(--card);min-width:0}
+.inst-cfg .ic b{font-family:var(--font-mono);font-size:12.5px}
+.inst-cfg select{font:inherit;font-size:12.5px;padding:2px 4px;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){.lbrow{grid-template-columns:minmax(0,1fr)}.lbrow .stk{order:2}}
+
+/* 本页：超时实验台 */
+.hc-ctl{display:flex;flex-direction:column;gap:12px}
+.hc-leg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.hc-leg i{display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:6px;vertical-align:0}
+.hc-out{display:flex;flex-direction:column;gap:8px;min-height:30px}
+.hc-row{display:grid;grid-template-columns:4.2em minmax(0,1fr);gap:4px 10px;align-items:center}
+.hc-lb{font-size:13px;color:var(--muted)}
+.hc-track{height:20px;background:var(--neutral-tint);border-radius:6px;overflow:hidden}
+.hc-fill{display:flex;height:100%}
+.hc-fill i{display:block;height:100%}
+.hc-end{grid-column:2;font-size:13px;font-family:var(--font-mono);min-width:0;overflow-wrap:anywhere}
+.lead code{overflow-wrap:anywhere}
+.good-t{color:var(--good)}
+.dp-h{margin-top:18px}
+
+/* page-specific */
+.esteps{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.esteps code{overflow-wrap:anywhere}
+.code-s{margin:0;padding:10px 12px;background:var(--code-bg);border-radius:10px;font-family:var(--font-mono);font-size:12px;line-height:1.55;overflow-x:auto;white-space:pre}
+.deep .pit .tbl-wrap{margin-top:4px}
+.bx-ver{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.bx-ver .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.bx-ver button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:999px;padding:5px 12px;font-size:13.5px;cursor:pointer}
+.bx-ver button[aria-pressed="true"]{border-color:var(--g2);background:var(--g2-tint);box-shadow:inset 0 0 0 1px var(--g2)}
+.bx-run{display:flex}
+.bx-trace{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.bx-real{font-size:13.5px;color:var(--muted);margin-top:6px}
+.bx-real code{color:var(--ink);overflow-wrap:anywhere}
+.bx-o{display:inline-block;font-weight:700;padding:1px 10px;border-radius:999px;margin-right:6px}
+.bx-o.fail{background:var(--bad-tint);color:var(--bad);border:1.5px solid var(--bad)}
+.bx-o.silent{background:var(--warn-tint);color:var(--ink);border:1.5px solid var(--warn)}
+.bx-o.ok{background:var(--good-tint);color:var(--good);border:1.5px solid var(--good)}
+#bx-out[data-o="fail"]{--rc:var(--bad);--rt:var(--bad-tint)}
+#bx-out[data-o="silent"]{--rc:var(--warn);--rt:var(--warn-tint)}
+#bx-out[data-o="ok"]{--rc:var(--good);--rt:var(--good-tint)}
+@media (max-width:860px){.presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.presets{grid-template-columns:1fr}}
+/* page: AOP chain */
+.duo{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.duo > *{min-width:0}
+.ac-bench{display:flex;flex-direction:column;gap:8px;padding:14px 16px;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+.ac-br{display:grid;grid-template-columns:180px minmax(0,1fr) 64px;gap:10px;align-items:center;font-size:13.5px}
+.ac-br i{display:block;height:20px;width:max(var(--w),3px);border-radius:5px;background:var(--g2-tint);border:1.5px solid var(--g2)}
+.ac-br.rn i{background:var(--rn-tint);border-color:var(--rn)}
+.ac-br b{font-family:var(--font-mono);font-size:12.5px;text-align:right}
+.ac-chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13.5px}
+.ac-chain > span{min-width:0}
+.ac-chip{display:inline-flex;gap:6px;align-items:center;border:1.5px solid var(--rc);background:var(--rt);border-radius:999px;padding:2px 10px;font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ac-chip b{font-family:var(--font-display);font-weight:400}
+.ac-chain .sep{color:var(--muted)}
+.ac-walk{margin:8px 0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.ac-walk li{position:relative;padding-left:2.4em}
+.ac-walk li::before{position:absolute;left:0;font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.ac-walk li.in::before{content:"进 →"}
+.ac-walk li.out::before{content:"← 出"}
+.ac-walk li.mid{font-weight:700}
+.ac-walk li.mid::before{content:"  ●"}
+.ac-walk li code{color:var(--rc)}
+@media (max-width:640px){.ac-br{grid-template-columns:110px minmax(0,1fr) 56px;font-size:12.5px}}
+
+/* dispatch walker */
+.dw-scn{display:flex;flex-wrap:wrap;gap:6px}
+.dw-scn button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:4px 12px;font-size:13.5px;cursor:pointer;font-family:var(--font-body)}
+.dw-scn button[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.dw-scn button:focus-visible,.dw:focus-visible{outline:2px solid var(--pd);outline-offset:2px}
+.dw svg .g{transition:opacity .25s}
+.dw svg .g.idle{opacity:.25}
+.dw svg .g.skip{opacity:.75}
+.dw svg .g.skip rect.box{stroke-dasharray:5 4;fill:var(--card)}
+.dw svg .g.deny rect.box,.dw svg .g.thr rect.box{fill:var(--bad-tint);stroke:var(--bad)}
+.dw svg .g.cur rect.box{stroke-width:4}
+.dw svg .g .tag{font-weight:700;fill:var(--ink)}
+.dw svg .g.deny .tag,.dw svg .g.thr .tag{fill:var(--bad)}
+.dw .seq-info .sts > span:last-child:not(:has(b)){flex-basis:100%;font-weight:700}
+@media (prefers-reduced-motion: reduce){.dw svg .g{transition:none}}
+
+
+/* ---------- this page ---------- */
+.jwt{font-family:var(--font-mono);font-size:13px;line-height:1.6;padding:12px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-wrap:anywhere}
+.jwt .h{color:var(--rn)} .jwt .p{color:var(--cg)} .jwt .s{color:var(--bk)}
+.jwt-parts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.jwt-parts > div{border:2px solid var(--rc);background:var(--rt);border-radius:12px;padding:8px 12px;font-size:13.5px;min-width:0}
+.jwt-parts code{overflow-wrap:anywhere;font-size:12px}
+.walk{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.walk li{display:grid;grid-template-columns:1.6em minmax(0,1fr);gap:8px;font-size:14px;align-items:start;padding:6px 10px;border-radius:10px;background:var(--card);border-left:4px solid var(--rc)}
+.walk li > i{font-style:normal;font-weight:700;color:var(--rc);text-align:center}
+.walk li.stop{background:var(--bad-tint)}
+.walk li.pass > i{color:var(--good)}
+.walk code{overflow-wrap:anywhere}
+.lab-out{font-family:var(--font-mono);font-size:12.5px;line-height:1.55;padding:10px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:pre}
+.lab-out .r{color:#FF9C9A} .lab-out .g{color:#7EE2A8} .lab-out .w{color:var(--console-dim)}
+.statline{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:baseline;font-size:15px}
+.statline b.code{font-family:var(--font-display);font-weight:400;font-size:28px}
+.statline b.code.ok{color:var(--good)} .statline b.code.no{color:var(--bad)}
+@media (max-width:860px){.jwt-parts{grid-template-columns:1fr}}
+pre.console .hi{color:var(--console-hi)}
+.presets.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+#lb-builds{margin-bottom:8px}
+@media (max-width:860px){.presets.c3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.presets.c3{grid-template-columns:1fr}}
+
+/* page-specific: 11-stop strip (real / fake / absent / distorted) */
+.stn{display:grid;grid-template-columns:repeat(11,minmax(0,1fr));gap:4px}
+.stn .c{border:2px solid var(--line-strong);border-radius:10px;padding:6px 4px;text-align:center;background:var(--card);min-width:0;display:flex;flex-direction:column;gap:1px}
+.stn .c b{font-family:var(--font-mono);font-size:13px}
+.stn .c span{font-size:11px;line-height:1.3;color:var(--muted);overflow-wrap:anywhere}
+.stn .c[data-st="real"]{border-color:var(--bk);background:var(--bk-tint)}
+.stn .c[data-st="real"] span{color:var(--ink)}
+.stn .c[data-st="fake"]{border-color:var(--rn);border-style:dashed;background:var(--rn-tint)}
+.stn .c[data-st="part"]{border-color:var(--cg);border-style:dotted}
+.stn .c[data-st="none"]{opacity:.38}
+.stn .c[data-st="warp"]{border-color:var(--bad);background:var(--bad-tint)}
+.stn-leg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.stn-leg i{display:inline-block;width:14px;height:12px;border-radius:3px;border:2px solid var(--line-strong);vertical-align:-1px;margin-right:4px}
+.stn-leg i.real{border-color:var(--bk);background:var(--bk-tint)}
+.stn-leg i.fake{border-color:var(--rn);border-style:dashed;background:var(--rn-tint)}
+.stn-leg i.part{border-color:var(--cg);border-style:dotted}
+.stn-leg i.none{opacity:.38}
+.stn-leg i.warp{border-color:var(--bad);background:var(--bad-tint)}
+.verd{font-family:var(--font-display);font-size:22px;padding:2px 12px;border-radius:10px;border:2px solid var(--line-strong)}
+.verd[data-v="绿"]{border-color:var(--good);background:var(--good-tint);color:var(--good)}
+.verd[data-v="红"]{border-color:var(--bad);background:var(--bad-tint);color:var(--bad)}
+.verd[data-v="测不了"]{border-color:var(--neutral);background:var(--neutral-tint);color:var(--ink)}
+.presets.c5{grid-template-columns:repeat(5,minmax(0,1fr))}
+@media (max-width:720px){
+  .stn{grid-template-columns:repeat(6,minmax(0,1fr))}
+  .presets.c5{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
+.presets.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:720px){.presets.c3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.qt .nd rect{transition:fill .2s,stroke-width .2s}
+.qt .nd.on rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3.5}
+.qt .nd.bad rect{fill:var(--bad-tint);stroke:var(--bad);stroke-width:3.5}
+#qw-back,#qw-backt{opacity:0;transition:opacity .2s}
+#qw-back.on,#qw-backt.on{opacity:1}
+#qw-sql{white-space:pre-wrap;margin:0}
+#qw .codebox pre{padding:10px 14px}
+/* page: explain-tuning */
+.b-of-z{fill:var(--of-tint);stroke:none}
+.g-line{stroke:var(--line);stroke-width:1;fill:none}
+.ln-pd,.ln-cg,.ln-g2{fill:none;stroke-width:2.5;stroke-linejoin:round}
+.ln-pd{stroke:var(--pd)}.ln-cg{stroke:var(--cg)}.ln-g2{stroke:var(--g2)}
+.ln-pd.dash{stroke-dasharray:6 5;stroke-width:2}
+.pt-bad{fill:var(--card);stroke:var(--bad);stroke-width:2.5}
+.dumb{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dumb > div{border:1.5px solid var(--line-strong);border-radius:14px;background:var(--card);padding:12px 16px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.dumb h4{font-size:17px;color:var(--neutral)}
+.dumb p{font-size:14px;margin:0}
+.dumb p.pain{color:var(--bad)}
+.dumb p.pain::before{content:"疼在哪 ";font-weight:700}
+.ladder{display:flex;flex-wrap:wrap;gap:6px;align-items:stretch}
+.ladder > span{flex:1 1 120px;min-width:0;border-radius:12px;padding:8px 10px;border:2px solid var(--rc);background:var(--rt);font-size:13px;display:flex;flex-direction:column;gap:2px}
+.ladder b{font-family:var(--font-mono);font-size:15px}
+.ladder small{color:var(--muted);font-size:12px}
+.cols5{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.cols5 > div{border:1.5px solid var(--line);border-radius:12px;background:var(--card);padding:10px 12px;font-size:13.5px;min-width:0}
+.cols5 b{font-family:var(--font-mono);font-size:14px;display:block;color:var(--of)}
+.bench-sql{font-family:var(--font-mono);font-size:13px;padding:10px 12px;border-radius:10px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.bench .presets{grid-template-columns:repeat(4,minmax(0,1fr))}
+.bench .presets button code{font-size:11.5px;color:var(--muted);overflow-wrap:anywhere}
+.bench .presets button.done{border-style:dashed}
+.score{font-size:13px;color:var(--muted)}
+@media (max-width:720px){.dumb{grid-template-columns:1fr}.bench .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* ---------- race lab (this page) ---------- */
+.race-top{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between}
+.race-body{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:14px;align-items:start}
+.race-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;counter-reset:rs}
+.race-steps li{display:grid;grid-template-columns:2.2em minmax(0,1fr);gap:4px 10px;align-items:start;padding:7px 10px;border-radius:10px;border:1.5px solid var(--line);background:var(--card);font-size:14px;transition:opacity .2s}
+.race-steps li.fut{opacity:.28}
+.race-steps li.now{border-color:var(--rc);background:var(--rt)}
+.race-steps li .who{grid-row:1 / span 2;font-family:var(--font-display);font-size:18px;line-height:1.2;text-align:center;border-radius:8px;color:var(--on-accent);background:var(--rc);padding:2px 0}
+.race-steps li code{overflow-wrap:anywhere;font-size:12.5px}
+.race-steps li .say{color:var(--muted);font-size:13px}
+.race-steps li .say b{color:var(--ink)}
+.race-steps li.blk .say b{color:var(--bad)}
+.race-state{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;border:1.5px solid var(--line);background:var(--paper);font-size:14px}
+.race-state h4{font-size:16px}
+.race-state dl{margin:0;display:grid;grid-template-columns:5.4em minmax(0,1fr);gap:5px 8px}
+.race-state dt{color:var(--muted);font-size:13px}
+.race-state dd{margin:0;min-width:0;font-family:var(--font-mono);font-size:13px}
+.race-state dd.big{font-family:var(--font-display);font-size:24px;line-height:1.1}
+.race-state dd.big.bad-t{color:var(--bad)}
+.race-state dd.big.good-t{color:var(--good)}
+.chip{display:inline-block;padding:0 8px;border-radius:999px;font-size:12px;font-family:var(--font-body);border:1.5px solid var(--rc);background:var(--rt);color:var(--ink);margin:1px 2px 1px 0}
+.bad-t{color:var(--bad)} .good-t{color:var(--good)}
+@media (max-width:760px){.race-body{grid-template-columns:minmax(0,1fr)}}
+@media (prefers-reduced-motion:reduce){.race-steps li{transition:none}}
+
+/* 本页：崩溃点实验台 */
+.cp-ctl{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center}
+.cp-ctl > div{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.cp-ctl small{color:var(--muted);font-size:13px;margin-right:2px}
+.cp-list{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.cp-list button{width:100%;height:100%;text-align:left;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:10px;padding:8px;font-size:13px;line-height:1.35;cursor:pointer;display:flex;flex-direction:column;gap:4px}
+.cp-list button b{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.cp-list button[aria-pressed="true"]{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.cp-list button i{font-style:normal;font-size:11px;color:var(--bk);font-weight:700}
+.cp-list button:focus-visible,.cp-ctl button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+@media (max-width:760px){.cp-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.cp-out{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.cp-out > div{border:1.5px solid var(--line);border-radius:12px;padding:8px 12px;background:var(--card);min-width:0}
+.cp-out small{display:block;font-size:12px;color:var(--muted)}
+.cp-out b{font-size:16px}
+.cp-out .masked b{color:var(--muted);font-weight:400}
+@media (max-width:760px){.cp-out{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.cp-verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--line-strong);background:var(--neutral-tint)}
+.cp-verdict.v-ok{border-color:var(--good);background:var(--good-tint)}
+.cp-verdict.v-unknown{border-color:var(--warn);background:var(--warn-tint)}
+.cp-verdict.v-lost,.cp-verdict.v-split{border-color:var(--bad);background:var(--bad-tint)}
+.logcmp{width:100%}
+
+/* heap lab */
+.hl-ctl{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center}
+.hl-ctl small{font-size:12.5px;color:var(--muted);margin-right:4px}
+.hl-ops{display:flex;flex-wrap:wrap;gap:8px}
+.hl-ops .btn[data-op="report"][aria-pressed="true"]{border-color:var(--rn);background:var(--rn-tint)}
+.hl-body{display:grid;grid-template-columns:minmax(0,1fr) 15em;gap:14px;align-items:start}
+.heap{display:flex;flex-direction:column;gap:6px;min-width:0}
+.hp-row{display:grid;grid-template-columns:3.4em minmax(0,1fr);gap:8px;align-items:center}
+.hp-row > span{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.hp-row.new > span{color:var(--pd);font-weight:600}
+.cells{display:flex;flex-wrap:wrap;gap:4px}
+.cell{width:3.1em;height:2.1em;border-radius:7px;display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:11.5px;border:1.5px solid var(--line-strong);background:var(--neutral-tint);color:var(--muted)}
+.cell.r{background:var(--pd);border-color:var(--pd);color:var(--on-accent);font-weight:600}
+.cell.keep{background:var(--cg-tint);border-color:var(--cg);color:var(--cg)}
+.cell.dead{background:var(--card);border:1.5px dashed var(--cg);color:var(--cg)}
+.cell.stub,.cell.redir{background:var(--card);border:1.5px solid var(--g2);color:var(--g2)}
+.cell.free{background:transparent;border:1.5px dashed var(--line);color:transparent}
+.hl-side{display:flex;flex-direction:column;gap:8px}
+.hl-side .tile b{font-size:21px}
+.hl-leg{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.hl-leg i{display:inline-block;width:1.6em;height:1em;vertical-align:-2px;margin-right:4px;border-radius:4px}
+.hl-leg .k-o{background:var(--neutral-tint);border:1.5px solid var(--line-strong)}
+.hl-leg .k-r{background:var(--pd)}
+.hl-leg .k-keep{background:var(--cg-tint);border:1.5px solid var(--cg)}
+.hl-leg .k-dead{border:1.5px dashed var(--cg)}
+.hl-leg .k-stub{border:1.5px solid var(--g2)}
+.hl-leg .k-free{border:1.5px dashed var(--line)}
+#hl-guess[hidden],#hl-res[hidden]{display:none}
+.chart-row{display:grid;grid-template-columns:11em minmax(0,1fr) 6.5em;gap:8px;align-items:center;font-size:13.5px}
+.chart-row .bar{height:14px;border-radius:4px;background:var(--rc)}
+.chart-row .v{font-family:var(--font-mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+.chart{display:flex;flex-direction:column;gap:6px;background:var(--card);border:1.5px solid var(--line);border-radius:16px;padding:14px}
+.chart h4{font-size:15px}
+.chart small{color:var(--muted);font-size:12.5px}
+@media (max-width:720px){.hl-body{grid-template-columns:minmax(0,1fr)}.chart-row{grid-template-columns:7.5em minmax(0,1fr) 5.5em}}
+@media (prefers-reduced-motion:no-preference){.cell{transition:background .25s,border-color .25s}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>数据库</span><span aria-hidden="true">/</span><span class="tb-here">PG 里的表胖了一倍</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-mut" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-good" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-of" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bk" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-g2" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-cg" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-pd" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-rn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-rn" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+<header class="hero">
+  <p class="kicker">PostgreSQL 18 · 堆表 · xmin / xmax · VACUUM · autovacuum · HOT · fillfactor · B-tree / GIN / BRIN · JSONB</p>
+  <h1>订单表一行没加，PG 里却胖了一倍：PostgreSQL 的多版本、VACUUM、索引类型和 JSONB</h1>
+  <p class="lead">同一张 100 万行的 <code>orders</code>，整表 <code>UPDATE qty = qty + 1</code> 一次：PostgreSQL 里表从 159 MB 涨到 319 MB，两个索引也各涨一倍。因为 PG 从不原地改一行，它写一个新版本，<b>旧版本留在表里</b>，等 <b>VACUUM</b> 来清。MySQL 把旧版本放进 undo，表本身不胖。这一页的精华是：<b>PG 把 MySQL 的 undo 搬进了表本身</b>。回滚和读旧版本因此变得简单，代价是表里会积垃圾，得有人一直扫。不懂这一点，把 MySQL 的习惯原样搬过来（长事务、反复改同一行、哪一列都建索引），表和索引就会越来越胖，查询越来越慢。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j06-update-to-disk.html#s-7">一条 UPDATE 从应用到磁盘 · 第 7 站</a></span><span>地图：<a href="../java/roadmap.html#j06">J06 · PostgreSQL 的不同：多版本存在表里、要 VACUUM，索引类型和 JSONB</a></span><span>整页数字在本机 PostgreSQL 18.7 上跑过 <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：同一条付款 UPDATE，旧值去了哪</h2>
+    <p class="lead">在全景第 7 站，InnoDB 改 9527 之前先把旧值 <code>CREATED</code> 写进 undo，这样别人还能读到旧版本，回滚也有据可查。交易靶场给 J06 的任务里有一句“把同一张表导进 PostgreSQL，跑同样的 SQL”。导过去以后，同一条付款 UPDATE，旧值放在哪？AI 项目里常用的 pgvector、Dify 这类平台，底下都是 PG，迟早要碰上它。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="同一条付款 UPDATE 在两个库里。左边 MySQL：页 75 里 9527 原地改成 PAID，旧值 CREATED 进了 undo 日志，行里的回滚指针指向它，表大小不变。右边 PostgreSQL：页 194 第 21 个槽位的旧版本还在，xmin 756、xmax 759，它的 t_ctid 指向表尾页 20408 第 9 个槽位的新版本 PAID；主键索引里 9527 有两条，分别指向新旧两个版本。">
+  <text class="t-b" x="24" y="28">MySQL InnoDB：原地改，旧值进 undo</text>
+  <text class="t-b" x="504" y="28">PostgreSQL：写新版本，旧版本留在表里</text>
+  <line x1="480" y1="14" x2="480" y2="318" class="e-mut" style="stroke-dasharray:6 5"/>
+  <g data-role="other"><rect class="b-neu" x="24" y="48" width="430" height="108" rx="12"/><text class="t-s" x="40" y="72">页 75 · 主键索引（聚簇索引）的叶子页</text>
+    <rect class="b-pd" x="40" y="86" width="398" height="52" rx="8"/><text class="t-pd" x="54" y="110">9527 · status = PAID</text><text class="t-xs" x="54" y="128">原地改；行里留一个回滚指针</text></g>
+  <g data-role="cg"><rect class="b-cg" x="40" y="196" width="398" height="52" rx="8"/><text class="t-cg" x="54" y="220">undo 日志 · 9527 旧值 CREATED</text><text class="t-xs" x="54" y="238">没人再需要它以后，purge 线程删掉</text></g>
+  <path class="e-cg" d="M240 138 V190" marker-end="url(#ah-cg)"/><text class="t-xs" x="250" y="170">回滚指针</text>
+  <text class="t-s" x="40" y="282">整表改一遍：表的大小基本不变</text>
+  <text class="t-xs" x="40" y="302">旧版本的账记在另一个地方（undo 表空间）</text>
+
+  <g data-role="pd"><rect class="b-neu" x="504" y="48" width="200" height="108" rx="12"/><text class="t-s" x="518" y="72">堆表 · 页 194</text>
+    <rect class="b-cg" x="518" y="86" width="172" height="58" rx="8" style="stroke-dasharray:5 4"/><text class="t-cg" x="530" y="106">(194,21) CREATED</text><text class="t-mono" x="530" y="124" style="font-size:11px">xmin 756 · xmax 759</text><text class="t-xs" x="530" y="139">旧版本，还在</text></g>
+  <g data-role="pd"><rect class="b-neu" x="744" y="48" width="200" height="108" rx="12"/><text class="t-s" x="758" y="72">堆表 · 页 20408（表尾）</text>
+    <rect class="b-pd" x="758" y="86" width="172" height="58" rx="8"/><text class="t-pd" x="770" y="106">(20408,9) PAID</text><text class="t-mono" x="770" y="124" style="font-size:11px">xmin 759 · xmax 0</text><text class="t-xs" x="770" y="139">新版本</text></g>
+  <path class="e-cg" d="M690 112 H752" marker-end="url(#ah-cg)"/><text class="t-xs" x="700" y="104">t_ctid</text>
+  <g data-role="g2"><rect class="b-g2" x="504" y="196" width="440" height="64" rx="10"/><text class="t-g2" x="518" y="218">主键索引 orders_pkey（也是二级索引，存的是 ctid）</text>
+    <text class="t-mono" x="518" y="244" style="font-size:12px">9527 → (194,21)</text><text class="t-mono" x="744" y="244" style="font-size:12px">9527 → (20408,9)</text></g>
+  <path class="e-g2" d="M590 196 V150" marker-end="url(#ah-g2)"/>
+  <path class="e-g2" d="M830 196 V150" marker-end="url(#ah-g2)"/>
+  <text class="t-s" x="504" y="282">整表改一遍：表 159 → 319 MB，两个索引也各翻一倍</text>
+  <text class="t-xs" x="504" y="302">旧版本的账就记在表里，VACUUM 清完空间也不还给操作系统</text>
+</svg>
+  </div>
+  <figcaption class="cap">右边的 ctid、xmin、xmax 都是 <span class="tag-real">实测</span>：付款事务的 xid 是 759，原来的页都满了，新版本只能去表尾新长出的页 20408。</figcaption>
+  </figure>
+  <div class="tiles">
+    <div class="tile" data-role="bad"><small>整表 UPDATE 一次</small><b>159 → 319 MB</b><span>表；主键索引 21 → 43 MB</span></div>
+    <div class="tile" data-role="bk"><small>VACUUM（0.7～1.2 s）</small><b>319 MB</b><span>一点没缩，空出 50.4% 可复用</span></div>
+    <div class="tile" data-role="done"><small>VACUUM FULL（3.8 s，锁表）</small><b>159 MB</b><span>重写整张表才缩回去</span></div>
+    <div class="tile" data-role="rn"><small>报表事务开着时</small><b>2 万个删不掉</b><span>dead but not yet removable</span></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：把 MySQL 的习惯原样搬到 PG</h2>
+    <p class="lead">这里的“老办法”就是你在 MySQL 上养成的用法。它们在 MySQL 上没事，搬到 PG 上各有各的疼法。</p>
+  </div>
+  <div class="design three">
+    <div class="way" data-role="other">
+      <h4>长事务、连接上挂着没提交的事务</h4>
+      <ul class="pains">
+        <li class="ok">MySQL 上也不好，但主要是 undo 变长、旧快照读得慢。</li>
+        <li>PG 上它开着的这段时间里，整个库作废的旧版本 VACUUM 一个都删不掉。实测：报表事务开着，9527 被改 2 万次，VACUUM 报告 <code>20000 are dead but not yet removable</code>。</li>
+        <li>不光它自己慢，新连接按主键读 9527 也要扫 412 个页，平时只要 4 个。</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>反复改同一行、改带索引的列</h4>
+      <ul class="pains">
+        <li class="ok">InnoDB 原地改，计数器、状态字段改多少次，表都不变大。</li>
+        <li>PG 每改一次写一个新元组。页满了，新元组去别的页，每个索引都要再插一条。实测：一行改 2 万次，表多出 409 页（3.2 MB），VACUUM 之后也不还。</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>以为 VACUUM 就是 OPTIMIZE TABLE</h4>
+      <ul class="pains">
+        <li class="ok">想让表变小，跑一下 VACUUM 就行？</li>
+        <li>VACUUM 只是把死元组的位置标成可复用，表的文件一字节不缩（实测 319 MB → 319 MB）。真要缩，得 VACUUM FULL 或 pg_repack，前者整个过程锁表。</li>
+        <li>反过来，把 autovacuum 关掉“省性能”，就是在攒越来越大的账。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict" data-role="pd" style="margin-top:14px">缺的那一块：MySQL 里旧版本放在 undo，由 purge 线程在后台默默清掉，你几乎感觉不到它。PG 里旧版本就在表里，<b>谁来清、什么时候清、什么在挡着清</b>，是用 PG 必须懂的事。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：旧版本可以放在哪</h2>
+    <p class="lead">只要支持“读不挡写”的 MVCC，旧版本就得存在某个地方。主流做法有两种。</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>原地改 + undo<br><small>InnoDB、Oracle</small></th><th>新版本写进表，旧的留着<br><small>PostgreSQL 的堆表</small></th></tr></thead>
+      <tbody>
+        <tr><td>UPDATE 做什么</td><td>改行；旧值写进 undo，行里留回滚指针</td><td>插一个新元组，旧元组写上 <code>xmax</code></td></tr>
+        <tr><td>读旧版本</td><td>沿 undo 链往回拼，越旧越远（MySQL 页实测：链长 2 万时旧快照读要 14.21 ms）</td><td>旧版本就是一个完整的元组，直接读</td></tr>
+        <tr><td>回滚</td><td>按 undo 把改动逐条撤回去，大事务回滚很慢</td><td>只在提交日志（pg_xact）里记一笔“中止”，新元组自然作废，瞬间完成</td></tr>
+        <tr><td>表会不会胖</td><td>基本不会，undo 另算</td><td>会，死元组留在表里，要 VACUUM</td></tr>
+        <tr><td>索引</td><td>二级索引存主键，改非索引列不碰索引</td><td>索引存 ctid，新元组换了位置就要改每个索引（除非 HOT）</td></tr>
+        <tr><td>谁来清</td><td>purge 线程，基本不用管</td><td>页内修剪 + VACUUM / autovacuum，要会调、会监控</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">还有别的做法，比如 SQL Server 的快照隔离把旧版本放进 tempdb 里的 version store。PG 社区也试过 undo 式的存储（zheap 项目），没有进主线。选择规则：你没得选，用 PG 就是堆表这一套。<b>本页学 PG 的这种</b>，并且一直拿 InnoDB 对照。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：元组、可见性、谁来清、HOT、索引和 JSONB</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>堆表</b>（heap）：PG 的表是一堆 8 KB 的页，行按写入的先后放进有空位的页，没有 InnoDB 那样“表就是主键 B+ 树”的聚簇索引。主键索引和别的索引一样，叶子里存的是行的物理位置。InnoDB 的聚簇索引见<a href="mysql-index-bplustree.html">索引与 B+ 树</a>。</li>
+      <li><b>ctid</b>：行的物理位置，写作 <code>(页号, 槽位号)</code>，比如 <code>(194,21)</code>。PG 里一行数据的每个版本叫一个元组（tuple）。</li>
+      <li><b>xid</b>：事务号，32 位，每个写事务领一个。<code>pg_xact</code>（以前叫 clog）记着每个 xid 是提交了还是中止了。</li>
+      <li><b>快照</b>：和 InnoDB 的 ReadView 一回事，记下“拍快照那一刻，哪些事务已经提交”。见<a href="mysql-mvcc-lock.html">事务、MVCC 与锁</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-tuple">④-1 每个元组自带“出生”和“死亡”的事务号</h3>
+  <p>页的开头是一排槽位指针（line pointer），从前往后长；元组从页尾往前放。每个元组头上有三样东西：<code>t_xmin</code> 是插入它的事务，<code>t_xmax</code> 是删除或取代它的事务（0 表示还活着），<code>t_ctid</code> 指向它的下一个版本（自己就是最新版时指向自己）。UPDATE 等于“给旧元组写上 xmax，再插一个新元组”。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="一个 8 KB 堆页的布局：最前面是 24 字节的页头，然后是一排槽位指针 lp1、lp2 直到 lp21 等，从前往后长；中间是空闲空间；元组从页尾往前放。下面放大第 21 个槽位指向的元组：元组头里有 t_xmin 756、t_xmax 759、t_ctid (20408,9)，后面才是 id 9527、order_no、status CREATED 等列的数据。">
+  <rect class="b-neu" x="20" y="20" width="920" height="64" rx="10"/>
+  <rect class="b-card" x="28" y="30" width="70" height="44" rx="6"/><text class="t-xs" x="38" y="56">页头 24B</text>
+  <g data-role="g2"><rect class="b-g2" x="104" y="30" width="44" height="44" rx="6"/><text class="t-mono" x="112" y="57" style="font-size:11px">lp1</text>
+  <rect class="b-g2" x="152" y="30" width="44" height="44" rx="6"/><text class="t-mono" x="160" y="57" style="font-size:11px">lp2</text>
+  <text class="t-s" x="204" y="57">…</text>
+  <rect class="b-g2" x="222" y="30" width="50" height="44" rx="6" style="stroke-width:2.5"/><text class="t-mono" x="228" y="57" style="font-size:11px">lp21</text>
+  <text class="t-s" x="280" y="57">…</text></g>
+  <text class="t-xs" x="310" y="50">槽位指针 → 往后长</text>
+  <rect class="b-dash" x="420" y="30" width="190" height="44" rx="6"/><text class="t-xs" x="470" y="57">空闲空间</text>
+  <text class="t-xs" x="622" y="50">← 元组往前放</text>
+  <g data-role="pd"><rect class="b-pd" x="720" y="30" width="60" height="44" rx="6"/><rect class="b-pd" x="786" y="30" width="60" height="44" rx="6"/><rect class="b-cg" x="852" y="30" width="80" height="44" rx="6" style="stroke-dasharray:5 4"/><text class="t-cg" x="860" y="57" style="font-size:12px">9527 旧</text></g>
+  <path class="e-g2" d="M247 74 C 247 110, 892 110, 892 78" marker-end="url(#ah-g2)"/>
+  <text class="t-xs" x="520" y="118">lp21 记着元组在页里的偏移和长度</text>
+  <g data-role="rn"><rect class="b-rn" x="20" y="140" width="430" height="92" rx="10"/><text class="t-rn" x="34" y="164">元组头（23 字节起）</text>
+    <text class="t-mono" x="34" y="188" style="font-size:12.5px">t_xmin = 756   谁插入的</text>
+    <text class="t-mono" x="34" y="206" style="font-size:12.5px">t_xmax = 759   谁取代了它</text>
+    <text class="t-mono" x="34" y="224" style="font-size:12.5px">t_ctid = (20408,9)  下一个版本</text></g>
+  <g data-role="pd"><rect class="b-pd" x="470" y="140" width="470" height="92" rx="10"/><text class="t-pd" x="484" y="164">列数据</text>
+    <text class="t-mono" x="484" y="190" style="font-size:12.5px">id 9527 · order_no 2026110100009527</text>
+    <text class="t-mono" x="484" y="210" style="font-size:12.5px">status CREATED · paid_at NULL · ext {…}</text></g>
+  <path class="e-mut" d="M892 84 C 892 120, 450 120, 300 138" marker-end="url(#ah-mut)"/>
+</svg>
+  </div>
+  <figcaption class="cap">数字来自 ⑤ 的 <code>pageinspect</code>：付款事务还没提交时，页 194 第 21 个槽位就是这个样子。InnoDB 的行头也记着“最后改它的事务”（<code>DB_TRX_ID</code>），但只有一份，旧的在 undo 里；PG 每个版本都是带着自己的 xmin、xmax 的完整元组。</figcaption>
+  </figure>
+
+  <h3 id="m-vis">④-2 看得见哪个版本：拿 xmin、xmax 对快照</h3>
+  <div class="two">
+    <div>
+      <p>读一行时，PG 把这一行能找到的每个元组都拿来对一遍快照：</p>
+      <ul class="pains">
+        <li class="ok"><code>xmin</code> 已提交，并且在我的快照之前，这个元组对我“出生”了。</li>
+        <li class="ok"><code>xmax</code> 是 0，或者那个事务中止了，或者它在我的快照里还没提交，这个元组对我还“活着”。</li>
+        <li>两条都满足才看得见。所以付款事务（xid 759）没提交时，另一个连接读到的是 <code>(194,21) CREATED</code>：xmax 759 还没提交。</li>
+      </ul>
+    </div>
+    <div class="verdict" data-role="rn"><b>回滚为什么瞬间完成</b><br>事务中止，只需要在 <code>pg_xact</code> 里把 759 标成“中止”。新元组的 xmin 是中止的事务，谁也看不见；旧元组的 xmax 是中止的事务，等于没被删。表里一个字节都不用改回去。InnoDB 回滚要按 undo 一条条撤，MySQL 那页实测 30 万行的事务崩溃后要在后台回滚很久。</div>
+  </div>
+
+  <h3 id="m-clean">④-3 谁来清：页内修剪、VACUUM、VACUUM FULL</h3>
+  <p>一个旧元组什么时候能清？要等到<b>所有还开着的快照</b>都不可能再看它。PG 只用一个数字判断：所有会话里最老的那个快照的 xmin，叫 xmin horizon。旧元组的 xmax 比它还早，就是“死透了”，能清；否则就是 <code>dead but not yet removable</code>。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 190" role="img" aria-label="事务号轴：报表事务在 xid 775 拍了快照，这之后 9527 被改了 2 万次，产生 2 万个旧版本，xid 从 776 到 20775。VACUUM 的 removable cutoff 停在 775，比当前 xid 落后 2 万，所以这 2 万个旧版本一个也删不掉。报表事务提交后，cutoff 跳到 20775，2 万个全部可删。">
+  <line x1="40" y1="96" x2="920" y2="96" class="e-axis"/>
+  <text class="t-xs" x="40" y="124">xid 小</text><text class="t-xs" x="868" y="124">xid 大</text>
+  <g data-role="rn"><line x1="200" y1="44" x2="200" y2="140" class="e-rn" style="stroke-width:3"/><text class="t-rn" x="120" y="36">报表事务的快照 · 775</text><text class="t-xs" x="96" y="160">removable cutoff 停在这里</text></g>
+  <g data-role="cg"><rect class="b-cg" x="210" y="80" width="560" height="32" rx="6"/><text class="t-cg" x="300" y="101">9527 的 2 万个旧版本 · xmax 776 … 20775</text></g>
+  <text class="t-bad" x="230" y="148">都比 cutoff 新 → dead but not yet removable</text>
+  <g data-role="bk"><line x1="780" y1="44" x2="780" y2="140" class="e-bk" style="stroke-dasharray:6 4;stroke-width:2.5"/><text class="t-bk" x="700" y="36">报表事务提交后 · 20775</text><text class="t-xs" x="716" y="160">cutoff 跳过来，2 万个全能删</text></g>
+</svg>
+  </div>
+  <figcaption class="cap"><span class="tag-real">实测</span> VACUUM VERBOSE 原话：<code>tuples: 0 removed, 1019959 remain, 20000 are dead but not yet removable</code>，<code>removable cutoff: 775, which was 20000 XIDs old</code>。提交后再跑：<code>20000 removed</code>。</figcaption>
+  </figure>
+  <div class="facts">
+    <div class="fact" data-role="bk"><h4>页内修剪 prune</h4><p>读或改到一个快满的页时，顺手把页里死透了的元组腾空。只动这一页，不碰索引；有索引条目指着的，只剩一个槽位指针。<span class="tag-real">实测</span> COMMIT 后另一个连接读一次 9527，旧槽位就从“正常”变成了“死”。</p></div>
+    <div class="fact" data-role="bk"><h4>VACUUM</h4><p>扫表（只扫有变动的页），把死透的元组标成空位，删掉指向它们的索引条目，更新空闲空间图（FSM）和可见性图（VM）。不锁读写，<b>不缩文件</b>，只截掉表尾整页空的部分。</p></div>
+    <div class="fact" data-role="bk"><h4>autovacuum</h4><p>后台进程自动跑 VACUUM 和 ANALYZE。死元组数超过 <code>50 + 0.2 × 行数</code> 就触发，100 万行的表要攒到约 20 万个。18 起多一个上限 <code>autovacuum_vacuum_max_threshold</code>（默认 1 亿）。</p></div>
+    <div class="fact" data-role="bad"><h4>VACUUM FULL</h4><p>把活着的元组拷到一个新文件，索引全部重建，旧文件扔掉，表才真的变小。整个过程拿 ACCESS EXCLUSIVE 锁，这张表读写全停。<span class="tag-real">实测</span> 100 万行 3.8 s。</p></div>
+  </div>
+
+  <div class="lab" id="heaplab" data-role="pd" tabindex="0" aria-label="堆表实验台">
+    <div class="lab-h">实验台：9527 的版本住在哪</div>
+    <div class="hl-ctl">
+      <div class="seg-mode" role="group" aria-label="fillfactor"><small>建表 fillfactor</small>
+        <button type="button" data-ff="100" aria-pressed="true">100（默认，页装满）</button>
+        <button type="button" data-ff="90" aria-pressed="false">90（每页留一点空）</button>
+      </div>
+      <div class="seg-mode" role="group" aria-label="先猜"><small>先猜再看</small>
+        <button type="button" id="hl-guessmode" aria-pressed="true">开</button>
+      </div>
+    </div>
+    <div class="hl-ops">
+      <button type="button" class="btn" data-op="updStatus">付款：改 status</button>
+      <button type="button" class="btn" data-op="updUser">改 user_id（有索引的列）</button>
+      <button type="button" class="btn" data-op="read">按主键读一次 9527</button>
+      <button type="button" class="btn" data-op="vacuum">VACUUM</button>
+      <button type="button" class="btn" data-op="full">VACUUM FULL</button>
+      <button type="button" class="btn" data-op="report" aria-pressed="false">报表事务：开始</button>
+    </div>
+    <div class="guess" id="hl-guess" hidden>
+      <p id="hl-q"></p>
+      <div class="opts" id="hl-opts"></div>
+    </div>
+    <div class="hl-body">
+      <div class="heap" id="hl-heap" aria-live="polite"></div>
+      <div class="hl-side">
+        <div class="tile" data-role="pd"><small>表的页数</small><b id="hl-pages">4</b></div>
+        <div class="tile" data-role="cg"><small>9527 在表里的元组</small><b id="hl-tuples">1</b><span id="hl-dead"></span></div>
+        <div class="tile" data-role="g2"><small>主键索引里指向 9527 的条目</small><b id="hl-idx">1</b></div>
+        <div class="tile" data-role="rn"><small>HOT 更新 / 全部更新</small><b id="hl-hot">0 / 0</b></div>
+      </div>
+    </div>
+    <div class="hl-leg"><span><i class="k-o"></i>别的订单</span><span><i class="k-r"></i>9527 当前版本</span><span><i class="k-keep"></i>旧版本 · 还有快照要，删不掉</span><span><i class="k-dead"></i>旧版本 · 死透了，可清</span><span><i class="k-stub"></i>只剩槽位指针（× 等 VACUUM，→ HOT 重定向）</span><span><i class="k-free"></i>空位</span></div>
+    <div class="lab-res" id="hl-res" data-role="pd">点上面的按钮。示意：一页按 6 个元组画，真实的 orders 一页约 49 行；fillfactor 90 在这里画成每页空一格。</div>
+  </div>
+  <p class="cap">按 ⑤ 的实测和 PG 的规则做的简化模型：HOT 链、修剪、xmin horizon、VACUUM 只截表尾空页、VACUUM FULL 要等锁，都和真实行为一致；页的大小、修剪的触发阈值是简化过的。试试：fillfactor 100 下连改三次 status；再开着报表事务改五次，然后 VACUUM。</p>
+
+  <h3 id="m-hot">④-4 HOT：新版本留在同一页、索引一条都不加</h3>
+  <p>每次 UPDATE 都给每个索引插一条，代价太大。PG 8.3 起有 HOT（heap-only tuple）：<b>没改任何索引列</b>，并且<b>旧元组所在的页还放得下新元组</b>，新元组就放在同一页，索引不动；顺着页内的 <code>t_ctid</code> 链就能从索引指着的老元组走到新元组。两个条件缺一个，就退回普通更新。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 240" role="img" aria-label="左边：普通更新。fillfactor 100，页满了，新版本去了另一页，主键索引和 user_id 索引各加一条。实测改 1 万行 status，HOT 0 次，表从 16328 KB 涨到 18280 KB。右边：HOT 更新。fillfactor 90，页里留了空位，新版本放在同一页，索引条目还指着老元组，顺着页内链走到新元组。实测 1 万次里 9092 次是 HOT，表只涨 200 KB。">
+  <text class="t-b" x="24" y="26">普通更新 · fillfactor 100</text>
+  <text class="t-b" x="504" y="26">HOT 更新 · fillfactor 90</text>
+  <line x1="480" y1="12" x2="480" y2="228" class="e-mut" style="stroke-dasharray:6 5"/>
+  <g data-role="g2"><rect class="b-g2" x="24" y="40" width="200" height="44" rx="8"/><text class="t-g2" x="36" y="67">主键 + user_id 索引</text></g>
+  <g data-role="pd"><rect class="b-neu" x="24" y="120" width="200" height="56" rx="8"/><text class="t-xs" x="34" y="138">页 A（满）</text><rect class="b-cg" x="120" y="132" width="92" height="34" rx="6" style="stroke-dasharray:5 4"/><text class="t-cg" x="132" y="154" style="font-size:12px">旧版本</text>
+    <rect class="b-neu" x="260" y="120" width="200" height="56" rx="8"/><text class="t-xs" x="270" y="138">页 B（别处有空的页）</text><rect class="b-pd" x="356" y="132" width="92" height="34" rx="6"/><text class="t-pd" x="368" y="154" style="font-size:12px">新版本</text></g>
+  <path class="e-g2" d="M120 84 V126" marker-end="url(#ah-g2)"/>
+  <path class="e-bad" d="M200 84 C 300 90, 390 100, 400 126" marker-end="url(#ah-bad)"/><text class="t-bad" x="270" y="98" style="font-size:12px">每个索引 +1 条</text>
+  <text class="t-s" x="24" y="204">实测改 1 万行 status：HOT 0 次</text><text class="t-xs" x="24" y="222">表 16328 → 18280 KB</text>
+  <g data-role="g2"><rect class="b-g2" x="504" y="40" width="200" height="44" rx="8"/><text class="t-g2" x="516" y="67">主键 + user_id 索引</text></g>
+  <g data-role="pd"><rect class="b-neu" x="504" y="120" width="300" height="56" rx="8"/><text class="t-xs" x="514" y="138">页 A（留了 10%）</text><rect class="b-cg" x="600" y="132" width="88" height="34" rx="6" style="stroke-dasharray:5 4"/><text class="t-cg" x="610" y="154" style="font-size:12px">旧版本</text><rect class="b-pd" x="704" y="132" width="88" height="34" rx="6"/><text class="t-pd" x="714" y="154" style="font-size:12px">新版本</text></g>
+  <path class="e-g2" d="M604 84 V126" marker-end="url(#ah-g2)"/>
+  <path class="e-pd" d="M688 149 H698" marker-end="url(#ah-pd)"/><text class="t-xs" x="820" y="146">页内 t_ctid 链</text><text class="t-good" x="820" y="166" style="font-size:12px">索引不动</text>
+  <text class="t-s" x="504" y="204">实测 1 万次里 9092 次是 HOT</text><text class="t-xs" x="504" y="222">表 18184 → 18384 KB · 改 user_id 的 1 万次：HOT 0 次</text>
+</svg>
+  </div>
+  <figcaption class="cap"><span class="tag-real">实测</span> 各 10 万行的两张表，每 10 行改一行 status。HOT 链上的旧元组在页内修剪时就能腾空，不用等 VACUUM，所以 HOT 也是让频繁更新的表不胖的主要手段。fillfactor 怎么定放到 <a href="#s6">⑥</a>。</figcaption>
+  </figure>
+
+  <h3 id="m-freeze">④-5 xid 只有 32 位：冻结和“回卷”</h3>
+  <p>xid 是 32 位的，转一圈约 42 亿，PG 按“前 21 亿算过去、后 21 亿算未来”来比大小。一个很老的元组，它的 xmin 迟早会从“过去”转到“未来”，突然对所有人不可见。所以 VACUUM 还有一件事：把足够老的元组<b>冻结</b>（freeze），标成“对谁都算过去”。某张表最老的未冻结 xid 超过 <code>autovacuum_freeze_max_age</code>（默认 2 亿），哪怕关着 autovacuum，也会强制跑一次防回卷的 VACUUM；真要逼近 21 亿，PG 会拒绝再分配新 xid，库只能读不能写。InnoDB 的事务号是 48 位，没有这件事。</p>
+
+  <h3 id="m-design">④-6 为什么这样设计</h3>
+  <div class="design">
+    <div class="way" data-role="pd">
+      <h4>PG：多版本放在堆里 <small>选了它</small></h4>
+      <ul class="pains">
+        <li class="ok">源头：1980 年代的 POSTGRES 存储系统本来就是“不覆盖写”的设计，旧数据不覆盖，还能按时间回查（time travel，后来去掉了）。PG 在 2001 年的 7.1 才加上 WAL。</li>
+        <li class="ok">回滚和崩溃恢复都简单：不用 undo，中止的事务在 pg_xact 记一笔就完事。</li>
+        <li class="ok">任何版本都是完整元组，读旧版本不用往回拼。</li>
+        <li>代价：表和索引会胖，要一直有 VACUUM 跟着清；每次非 HOT 更新要改所有索引，写放大。2016 年 Uber 从 PG 换回 MySQL 的那篇文章，主要理由之一就是这个写放大。</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>InnoDB：原地改 + undo <small>没选的那种</small></h4>
+      <ul class="pains">
+        <li class="ok">表紧凑，改非索引列不碰二级索引（二级索引存的是主键，不是物理位置）。</li>
+        <li>旧版本要沿 undo 链往回拼，链越长越慢；回滚要真的去撤；undo 本身也要 purge，长事务一样会让它胀起来。</li>
+        <li>多一套日志（undo 也要写 redo）、多一个后台线程，实现更复杂。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="verdict" data-role="pd" style="margin-top:12px">决定胜负的约束：<b>旧版本总得有地方放，也总得有人清</b>。InnoDB 把它放进一个专门的地方，自动清；PG 放在原处，把“清”这件事交给 VACUUM。所以用 PG 时，“什么挡住了 VACUUM”是头号问题，用 MySQL 时它藏在 History list length 后面。</p>
+
+  <h3 id="m-index">④-7 索引类型：不止 B-tree</h3>
+  <p>InnoDB 基本只有 B+ 树（另有全文、空间索引）。PG 的索引是可插拔的“访问方法”，自带 6 种，扩展还能加（pgvector 的 HNSW、IVFFlat 就是这样加进来的）。下表的大小和耗时都是 100 万行 orders 上的 <span class="tag-real">实测</span>。</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>类型</th><th>擅长什么</th><th>本机实测</th></tr></thead>
+      <tbody>
+        <tr><td><b>B-tree</b>（默认）</td><td>等值、范围、排序、唯一约束。18 起支持 skip scan，多列索引不带前导列也能用一部分</td><td><code>created_at</code> 上 21.4 MB；查一小时内的订单 0.86 ms（Index Only Scan，读 14 个页）。不建索引全表扫 67 ms</td></tr>
+        <tr><td><b>BRIN</b></td><td>数据按顺序写入的大表（时间、自增 id）：每一段页只记最小值和最大值</td><td>同一列只有 <b>24 KB</b>，是 B-tree 的约 1/900；查询 2.59 ms，要多读 313 个页再过滤掉 11696 行</td></tr>
+        <tr><td><b>GIN</b></td><td>一个值里有很多“元素”：JSONB、数组、全文检索</td><td>JSONB 包含查询从 165 ms 到 2.17 ms，见 ④-8</td></tr>
+        <tr><td><b>GiST / SP-GiST</b></td><td>几何、范围类型、排除约束（比如“同一会议室时间段不能重叠”）、最近邻</td><td>没测</td></tr>
+        <tr><td><b>Hash</b></td><td>只有等值；10 起才写 WAL，一般用 B-tree 就够</td><td>没测</td></tr>
+        <tr><td><b>部分索引</b><br><small>任何类型都能加 WHERE</small></td><td>只给一小部分行建索引，比如只索引待付款订单</td><td><code>(user_id) WHERE status='CREATED'</code>，1% 的行：<b>136 KB</b>，全量的 user_id 索引 11.1 MB</td></tr>
+        <tr><td><b>表达式索引</b></td><td>索引一个表达式的结果，比如 <code>lower(email)</code>、JSONB 里的某个字段。MySQL 8.0.13 起也有（函数索引）</td><td><code>((ext-&gt;'coupon'-&gt;&gt;'code'))</code>：6.6 MB，查询 1.71 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="m-jsonb">④-8 JSONB：拆开存的 JSON，配 GIN 查</h3>
+  <p><code>json</code> 类型原样存文本，每次查都要重新解析。<code>jsonb</code> 写入时就解析成二进制：去掉空白，键排好序，重复的键只留最后一个，查的时候直接定位。GIN 索引把每个文档拆成很多“键”，查询时先在 GIN 里找到含这些键的行，再回表核对。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 230" role="img" aria-label="一行的 ext 文档：tags 是空数组，coupon 里 code 是 C14，channel 是 app。jsonb_ops 把每个键和每个值各算一个 GIN 键：tags、coupon、code、channel、C14、app，所以既能查包含，也能查某个键在不在，实测 4.3 MB。jsonb_path_ops 把每条路径连同值算成一个哈希：hash(coupon.code=C14)、hash(channel=app)，只支持包含查询，实测 2.0 MB。查询 ext 包含 coupon.code=C7，就去 GIN 里找对应的键，得到 1031 行。">
+  <g data-role="of"><rect class="b-of" x="20" y="70" width="270" height="90" rx="10"/><text class="t-of" x="34" y="94">orders.ext（id 9520）</text>
+    <text class="t-mono" x="34" y="120" style="font-size:12px">{"tags": [],</text><text class="t-mono" x="34" y="138" style="font-size:12px"> "coupon": {"code": "C14"},</text><text class="t-mono" x="34" y="154" style="font-size:12px"> "channel": "app"}</text></g>
+  <g data-role="g2"><rect class="b-g2" x="340" y="24" width="300" height="84" rx="10"/><text class="t-g2" x="354" y="48">GIN · jsonb_ops（默认）· 4.3 MB</text>
+    <text class="t-mono" x="354" y="72" style="font-size:12px">键：tags coupon code channel</text><text class="t-mono" x="354" y="92" style="font-size:12px">值：C14 app</text>
+    <rect class="b-g2" x="340" y="128" width="300" height="84" rx="10"/><text class="t-g2" x="354" y="152">GIN · jsonb_path_ops · 2.0 MB</text>
+    <text class="t-mono" x="354" y="176" style="font-size:12px">hash(coupon.code = "C14")</text><text class="t-mono" x="354" y="196" style="font-size:12px">hash(channel = "app")</text></g>
+  <path class="e-of" d="M290 100 L334 70" marker-end="url(#ah-of)"/><path class="e-of" d="M290 130 L334 168" marker-end="url(#ah-of)"/>
+  <g data-role="pd"><rect class="b-pd" x="690" y="24" width="250" height="84" rx="10"/><text class="t-pd" x="704" y="48">能查</text><text class="t-s" x="704" y="72">@&gt; 包含、? 有没有这个键</text><text class="t-s" x="704" y="92">?| ?&amp; 有其中一个 / 全部</text>
+    <rect class="b-pd" x="690" y="128" width="250" height="84" rx="10"/><text class="t-pd" x="704" y="152">只能查</text><text class="t-s" x="704" y="176">@&gt; 包含，以及 jsonpath 的</text><text class="t-s" x="704" y="196">@? @@；更小、更快</text></g>
+  <path class="e-mut" d="M640 66 H684" marker-end="url(#ah-mut)"/><path class="e-mut" d="M640 170 H684" marker-end="url(#ah-mut)"/>
+</svg>
+  </div>
+  <figcaption class="cap"><span class="tag-real">实测</span> 100 万行里找 <code>ext @&gt; '{"coupon":{"code":"C7"}}'</code>（1031 行）：不建索引并行全表扫 165 ms，有 GIN 后 2.17 ms（Bitmap Index Scan on gin_path）。同样的条件写成 <code>ext-&gt;'coupon'-&gt;&gt;'code' = 'C7'</code>，GIN 用不上，还是全表扫 112 ms，见 ⑥ 坑 4。MySQL 的 JSON 类型也是二进制存储，但不能直接给整个文档建索引，要靠生成列或多值索引（8.0.17 起）。</figcaption>
+  </figure>
+
+  <div class="codebox" data-role="pd">
+    <div class="code-bar"><b>最少的语法</b><span>PostgreSQL 18；<code>pageinspect</code>、<code>pgstattuple</code> 是自带的扩展，要 <code>CREATE EXTENSION</code></span></div>
+<pre><code>SELECT ctid, xmin, xmax, * FROM orders WHERE id = 9527;     -- 每行都有这几个隐藏列
+SELECT n_live_tup, n_dead_tup, last_autovacuum
+  FROM pg_stat_user_tables WHERE relname = 'orders';         -- 死元组多不多、上次什么时候清的
+VACUUM (VERBOSE) orders;                                      -- 手动清，看 removed / not yet removable
+ALTER TABLE orders SET (fillfactor = 90);                     -- 给 HOT 留空间（之后写入的页才生效）
+CREATE INDEX ON orders USING gin (ext jsonb_path_ops);        -- JSONB 包含查询
+SELECT count(*) FROM orders WHERE ext @&gt; '{"channel":"app"}';
+CREATE INDEX ON orders USING brin (created_at);               -- 按时间追加的大表
+CREATE INDEX ON orders (user_id) WHERE status = 'CREATED';    -- 部分索引</code></pre>
+  </div>
+  <p class="cap">放到 ⑥ 的细节：长事务怎么防、autovacuum 怎么调、fillfactor 定多少、JSONB 查询怎么写才能走索引、回卷怎么监控、版本差异。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：同一条付款 UPDATE，在 PG 的页里留下两个元组</h2>
+    <p class="lead">Docker 里起一个 PostgreSQL 18.7，灌和 MySQL 那几页同一份 100 万行 <code>orders</code>（多一列 <code>ext jsonb</code>），用 JDBC 做一次付款，再用 <code>pageinspect</code> 直接看页。为了数字可复现，表上关了 autovacuum，VACUUM 都是手动发的。<a href="https://github.com/archeu/study-labs/tree/main/java/database/pg-mvcc-vacuum-jsonb">完整代码 →</a></p>
+  </div>
+  <div class="two">
+    <div class="codebox" data-role="pd">
+      <div class="code-bar"><b>跑起来</b><span>要 Docker（拉 <code>postgres:18.7-alpine</code>，约 110 MB）、JDK 8+、Maven</span></div>
+<pre><code>git clone https://github.com/archeu/study-labs
+cd study-labs/java/database/pg-mvcc-vacuum-jsonb
+./run.sh          # 起容器 → 灌 100 万行 → see bloat longtx hot index
+./run.sh again    # 容器留着，只重跑实验
+./run.sh clean    # 删容器（连同数据卷）
+# 不在 docker 组里：DOCKER="sudo docker" ./run.sh
+
+&lt;dependency&gt;
+  &lt;groupId&gt;org.postgresql&lt;/groupId&gt;
+  &lt;artifactId&gt;postgresql&lt;/artifactId&gt;
+  &lt;version&gt;42.7.14&lt;/version&gt;   &lt;!-- 支持 Java 8 --&gt;
+&lt;/dependency&gt;</code></pre>
+    </div>
+    <div class="codebox" data-role="pd">
+      <div class="code-bar"><b>PgLab.see()</b><span>按 JDK 8 写法，节选</span></div>
+<pre><code>String q = "SELECT ctid, xmin, xmax, status FROM orders WHERE id = 9527";
+a.setAutoCommit(false);                       // 付款事务
+sa.executeUpdate("UPDATE orders SET status = 'PAID',"
+    + " paid_at = now() WHERE id = 9527");
+print(row(sa, q));                            // 自己读到新版本
+print(row(sb, q));                            // 另一个连接读到旧版本
+// 不经过修剪，直接读页：两个元组都在
+dumpSlot(sb, oldPage, oldSlot);  // heap_page_items(get_raw_page('orders', 194))
+dumpSlot(sb, newPage, newSlot);
+a.commit();
+row(sb, q);                                   // 读一次：页 194 被顺手修剪
+dumpSlot(sb, oldPage, oldSlot);
+vacuum(sb, "VACUUM (VERBOSE) orders");        // INFO 消息从 getWarnings() 里拿</code></pre>
+    </div>
+  </div>
+  <div class="codebox" data-role="pd" style="margin-top:14px">
+    <div class="code-bar"><b>预期输出</b><span>本机 2 核 ARM，JDK 17.0.21（<code>--release 8</code> 编译），pgJDBC 42.7.14，Docker 里 PostgreSQL 18.7</span></div>
+<pre><code>[setup] 100 万行，9.0 s | 表 159.4 MB，主键索引 21.4 MB，user_id 索引 11.1 MB
+[see] 改之前      ctid=(194,21) xmin=756 xmax=0 status=CREATED
+[see] 付款事务 xid=759，UPDATE 后、未提交：
+      付款连接读到   ctid=(20408,9) xmin=759 xmax=0 status=PAID
+      另一个连接读到 ctid=(194,21) xmin=756 xmax=759 status=CREATED
+      两个版本都在表里（lp_flags 0=空闲 1=正常 2=重定向 3=死）：
+        (194,21) lp_flags=1 t_xmin=756 t_xmax=759 t_ctid=(20408,9)
+        (20408,9) lp_flags=1 t_xmin=759 t_xmax=0 t_ctid=(20408,9)
+      新版本那一页有 9 个元组；表一共 20409 页（原来的页都满了，新版本只能去表尾）
+[see] COMMIT 之后，还没有人读过页 194：
+        (194,21) lp_flags=1 t_xmin=756 t_xmax=759 t_ctid=(20408,9)
+[see] 另一个连接读一次 9527：ctid=(20408,9) xmin=759 xmax=0 status=PAID，再看旧槽位：
+        (194,21) lp_flags=3 t_xmin=null t_xmax=null t_ctid=null
+[see] VACUUM：... index scan bypassed: 1 pages from table (0.00% of total) have 1 dead item identifiers
+[bloat] 整表 UPDATE 1000000 行 14.8 s → 表 318.9 MB，主键索引 42.9 MB，user_id 索引 22.3 MB | live=1000000 dead=1000000
+[bloat] VACUUM 1.2 s → 表 318.9 MB，主键索引 42.9 MB，user_id 索引 22.3 MB | live=1000000 dead=0 free_pct=50.4
+[bloat] 再整表 UPDATE 一遍 11.1 s → 表 318.9 MB ...（用的是 VACUUM 腾出来的空位）
+[bloat] VACUUM FULL 3.8 s → 表 159.4 MB，主键索引 21.4 MB，user_id 索引 11.1 MB</code></pre>
+  </div>
+  <p class="cap">读输出：UPDATE 没碰旧元组的数据，只给它写上 <code>t_xmax=759</code> 和指向新版本的 <code>t_ctid</code>。提交后旧元组还在，直到有人读到这一页，修剪才把它腾空，留下一个状态为“死”（3）的槽位指针，因为主键索引里还有一条指着它。VACUUM 发现整张表只有 1 个这样的指针，<b>跳过了索引清理</b>（14 起的优化，见 ⑥ 第三圈），所以这个指针还留着。</p>
+  <p class="verdict" data-role="done"><b>到这里已经能交差了：</b>你能说清 PG 的 UPDATE 在表里留下了什么、谁来清，会用 <code>ctid / xmin / xmax</code>、<code>pg_stat_user_tables</code>、<code>VACUUM VERBOSE</code> 看一张表的状态。<br><b>还没处理的细节：</b>长事务挡住清理（<a href="#p-long">坑 1</a>），以为 VACUUM 会缩表（<a href="#p-shrink">坑 2</a>），热点行和 HOT（<a href="#p-hot">坑 3</a>），JSONB 查询走不上索引（<a href="#p-jsonb">坑 4</a>），回卷（<a href="#p-wrap">坑 5</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：先避坑，再立规范，最后往深处挖</h2>
+  </div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-long"><b><em>坑 1</em>一个没提交的事务，让整个库的旧版本都清不掉<a class="root" href="#m-clean">← ④-3 xmin horizon</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd><code>n_dead_tup</code> 一直涨，autovacuum 跑了又跑，表还是越来越大；热点行的查询越来越慢。</dd>
+      <dt>根源</dt><dd>VACUUM 只能清比最老快照更早死掉的版本。实测报表事务开着、9527 被改 2 万次：<code>20000 are dead but not yet removable</code>；新连接按主键读 9527 从 4 个页涨到 412 个页（下图）。挡住 horizon 的不只是长事务，还有忘了提交的 <code>idle in transaction</code> 连接、没人消费的复制槽、从库开了 <code>hot_standby_feedback</code> 时从库上的长查询、没处理的两阶段提交事务。</dd>
+      <dt>做法</dt><dd class="fix">设 <code>idle_in_transaction_session_timeout</code>（比如 60s），17 起还有 <code>transaction_timeout</code>；监控 <code>pg_stat_activity</code> 里 <code>age(backend_xmin)</code> 最大的会话，以及 <code>pg_replication_slots</code>；报表走从库或用短事务。Java 里别在事务中间等外部调用。</dd></dl></div>
+    <div class="pit" id="p-shrink"><b><em>坑 2</em>以为 VACUUM 跑完表会变小<a class="root" href="#m-clean">← ④-3 VACUUM 只标空位</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>一次大批量 UPDATE / DELETE 之后，磁盘报警；手动 VACUUM，大小纹丝不动。</dd>
+      <dt>根源</dt><dd>VACUUM 只把死元组的位置记进空闲空间图，留给以后的写入复用；只有表尾整页都空了才截掉。实测 319 MB → 319 MB，<code>free_percent</code> 50.4%，再整表改一遍，大小还是 319 MB。</dd>
+      <dt>做法</dt><dd class="fix">平时不需要缩：表在稳定的大小上复用空间就好。真要缩：VACUUM FULL（锁表，实测 100 万行 3.8 s，按表大小涨）或者 <code>pg_repack</code> 扩展（只在开头和结尾短暂加锁）。大批量删除改成分区表直接 DROP 分区。</dd></dl></div>
+    <div class="pit" id="p-hot"><b><em>坑 3</em>热点行、计数器、索引太多：表和索引一直长<a class="root" href="#m-hot">← ④-4 HOT 的两个条件</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>库存、余额、计数器这类一行被改成千上万次的表，体积远大于行数应有的大小，索引也一样。</dd>
+      <dt>根源</dt><dd>默认 fillfactor 100，页装满了，新版本只能去别的页，每个索引都要加一条。实测 fillfactor 100 改 1 万行 status，HOT 0 次；90 时 9092 次。改了有索引的列（user_id），HOT 一次都没有。</dd>
+      <dt>做法</dt><dd class="fix">频繁更新的表设 <code>fillfactor</code> 80～90；不给经常变的列建索引；看 <code>pg_stat_user_tables</code> 的 <code>n_tup_hot_upd / n_tup_upd</code>。高频计数先在 Redis 或内存里攒，再批量写回。</dd></dl></div>
+    <div class="pit" id="p-jsonb"><b><em>坑 4</em>JSONB 建了 GIN，查询还是全表扫<a class="root" href="#m-jsonb">← ④-8 GIN 只认特定操作符</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>建了 <code>USING gin (ext)</code>，可 <code>WHERE ext-&gt;'coupon'-&gt;&gt;'code' = 'C7'</code> 还是 Parallel Seq Scan，112 ms。</dd>
+      <dt>根源</dt><dd>GIN 的 jsonb 操作符类只支持 <code>@&gt; ? ?| ?&amp; @? @@</code>。<code>-&gt;&gt;</code> 取出来的是普通文本，GIN 里没有这样的键。</dd>
+      <dt>做法</dt><dd class="fix">写成 <code>ext @&gt; '{"coupon":{"code":"C7"}}'</code>（实测 2.17 ms）；或者给这个字段建表达式索引（实测 1.71 ms）。天天按它查、按它排序的字段，干脆拆成普通列。</dd></dl></div>
+    <div class="pit" id="p-wrap"><b><em>坑 5</em>xid 回卷：库突然只能读不能写<a class="root" href="#m-freeze">← ④-5 32 位 xid 和冻结</a><span class="seen">按文档</span></b>
+      <dl><dt>现象</dt><dd>日志里先出现 “must be vacuumed within N transactions” 的警告，最后写入全部报错，库进入只读保护。</dd>
+      <dt>根源</dt><dd>冻结跟不上 xid 的消耗：autovacuum 被关、被长事务或复制槽挡住，或者大表的防回卷 VACUUM 太慢。</dd>
+      <dt>做法</dt><dd class="fix">别关 autovacuum；监控 <code>SELECT datname, age(datfrozenxid) FROM pg_database</code>，超过 10 亿就要查原因；写入量大的库给 autovacuum 更多资源（<code>autovacuum_vacuum_cost_limit</code>、worker 数）。</dd></dl></div>
+    <div class="pit" id="p-conn"><b><em>坑 6</em>连接开得和 MySQL 一样多<a class="root env" href="db-pool-tx-perf.html">历史原因 · 每连接一个进程</a><span class="seen">按文档</span></b>
+      <dl><dt>现象</dt><dd>几十个服务实例各开 50 个连接，PG 内存吃紧，<code>FATAL: sorry, too many clients already</code>（默认 <code>max_connections=100</code>）。</dd>
+      <dt>根源</dt><dd>PG 每个连接 fork 一个后端进程，不是线程；这和多版本无关，是早年的架构选择。见<a href="db-pool-tx-perf.html">连接池与事务性能</a>。</dd>
+      <dt>做法</dt><dd class="fix">应用侧池子开小（核数 × 2 起步），实例多时前面加 PgBouncer（事务模式下注意服务端预编译语句的限制）。</dd></dl></div>
+  </div>
+
+  <div class="chart" style="margin-top:16px">
+    <h4>坑 1 的实测：开着报表事务时，按主键读 9527 一次要读多少个页</h4>
+    <small>PostgreSQL 18.7，9527 被改了 2 万次（每次自动提交）。数字是 <code>EXPLAIN (ANALYZE, BUFFERS)</code> 的 shared hit。</small>
+    <div class="chart-row" data-role="bk"><span>改之前</span><div><div class="bar" style="width:1%"></div></div><span class="v">4 页 · 0.59 ms</span></div>
+    <div class="chart-row" data-role="bad"><span>报表事务自己读</span><div><div class="bar" style="width:100%"></div></div><span class="v">412 页 · 1.11 ms</span></div>
+    <div class="chart-row" data-role="bad"><span>新连接读</span><div><div class="bar" style="width:100%"></div></div><span class="v">412 页 · 0.89 ms</span></div>
+    <div class="chart-row" data-role="bad"><span>报表开着时 VACUUM 后</span><div><div class="bar" style="width:100%"></div></div><span class="v">412 页 · 0.87 ms</span></div>
+    <div class="chart-row" data-role="bk"><span>报表提交、VACUUM 后</span><div><div class="bar" style="width:1%"></div></div><span class="v">4 页 · 0.34 ms</span></div>
+    <small>对照 <a href="mysql-redo-undo-binlog.html">MySQL 那页</a>同样的实验：只有报表事务自己慢（沿 undo 链往回走 2 万步，14.21 ms），新连接直接读最新版，0.88 ms。PG 里新版本散在 409 个页上，索引里有 409 条指向 9527 的条目，谁来读都得一条条走过去、一个个判断可见性。整张表在这里都在内存里，所以毫秒数差得不多；数据大于内存时，这 412 个页就是 412 次可能的读盘。</small>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <div class="rules-list">
+    <div class="rl"><b>autovacuum 不关，大表单独调</b><p>默认按 20% 的行数触发，10 亿行的表要攒 2 亿个死元组才动。大表设 <code>ALTER TABLE … SET (autovacuum_vacuum_scale_factor = 0.01)</code>，或者靠 18 的 <code>autovacuum_vacuum_max_threshold</code> 封顶。</p><p class="guard">表胖了才清、一清就清很久。</p></div>
+    <div class="rl"><b>连接上设超时</b><p><code>idle_in_transaction_session_timeout</code>、<code>statement_timeout</code>，17 起再加 <code>transaction_timeout</code>；HikariCP 的 <code>leakDetectionThreshold</code> 帮你找借了连接不还的代码。</p><p class="guard">忘了提交的连接挡住整个库的 VACUUM。</p></div>
+    <div class="rl"><b>频繁更新的表留 fillfactor</b><p>80～90，配合“经常变的列不建索引”。改完 fillfactor 只影响之后写入的页，老页要 VACUUM FULL 或 pg_repack 重写一遍才生效。</p><p class="guard">非 HOT 更新的写放大和表膨胀。</p></div>
+    <div class="rl"><b>按查询选索引类型</b><p>等值和范围用 B-tree；按时间追加的日志、流水用 BRIN；JSONB、数组用 GIN（只查包含就用 <code>jsonb_path_ops</code>）；热的小子集用部分索引。</p><p class="guard">索引比表还大，或者建了却用不上。</p></div>
+    <div class="rl"><b>JSONB 放扩展字段，不放核心字段</b><p>金额、状态、用户 id 这类要约束、要关联、要排序的，用普通列；渠道、优惠券、标签这类结构多变的，放 JSONB。查询写成 <code>@&gt;</code>。</p><p class="guard">没有类型和约束的核心数据，和走不上索引的查询。</p></div>
+    <div class="rl"><b>盯这几个指标</b><p><code>n_dead_tup</code> 和 <code>last_autovacuum</code>、<code>n_tup_hot_upd / n_tup_upd</code>、<code>age(backend_xmin)</code> 最大的会话、<code>age(datfrozenxid)</code>、复制槽的 <code>restart_lsn</code>。</p><p class="guard">膨胀、回卷都是慢慢攒出来的，等报错就晚了。</p></div>
+  </div>
+
+  <h3>第三圈 · 往深处挖</h3>
+  <div class="facts">
+    <div class="fact" data-role="bk"><h4>VACUUM 会跳过索引清理</h4><p>14 起，有死槽位指针的页少于表的 2% 时（<code>vacuumlazy.c</code> 里的 <code>BYPASS_THRESHOLD_PAGES</code>），VACUUM 不扫索引，留到下次。⑤ 里的 <code>index scan bypassed</code> 就是它，所以那个死槽位指针还在。扫一遍 21 MB 的主键索引只为删一条，不划算。</p></div>
+    <div class="fact" data-role="g2"><h4>可见性图让 Index Only Scan 成立</h4><p>索引里没有 xmin/xmax，光看索引不知道行对你可不可见。VACUUM 维护可见性图（VM），标出“整页都对所有人可见”的页，这些页就不用回表。④-7 里 B-tree 查一小时只读了 14 个页，靠的就是刚 VACUUM 过。频繁更新的表 VM 常被打掉，Index Only Scan 会退化。</p></div>
+    <div class="fact" data-role="g2"><h4>GIN 的 pending list</h4><p>GIN 一行要插很多个键，很贵。默认 <code>fastupdate=on</code>：新条目先追加进一个待处理列表（<code>gin_pending_list_limit</code> 默认 4 MB），VACUUM 或列表满了再批量并进索引。代价是查询要多扫这个列表，偶尔某次插入要负责合并而变慢。</p></div>
+    <div class="fact" data-role="rn"><h4>17、18 里的 VACUUM</h4><p>17 换了 VACUUM 存死元组位置的内存结构（TidStore），内存少得多，大表不再因为内存不够而反复扫索引；17 去掉了 <code>old_snapshot_threshold</code>。18 加了异步 I/O（顺序扫描、VACUUM 都能用），VACUUM 会“顺手多冻结一些”全可见的页（VACUUM VERBOSE 输出里的 <code>eagerly scanned</code>），减轻以后的防回卷扫描。</p></div>
+  </div>
+  <div class="tbl-wrap" style="margin-top:14px">
+    <table class="t">
+      <thead><tr><th>版本</th><th>和这一页有关的变化</th><th>出处</th></tr></thead>
+      <tbody>
+        <tr><td>7.1（2001）</td><td>加上 WAL，之前每次提交都要把改过的数据页强制刷盘</td><td>7.1 发行说明</td></tr>
+        <tr><td>8.3</td><td>HOT 更新</td><td>8.3 发行说明</td></tr>
+        <tr><td>13</td><td>B-tree 去重（重复值多的索引变小）；VACUUM 可以并行处理多个索引</td><td>13 发行说明</td></tr>
+        <tr><td>14</td><td>死索引条目很少时 VACUUM 跳过索引清理；<code>idle_session_timeout</code></td><td>14 发行说明</td></tr>
+        <tr><td>17</td><td>VACUUM 新的内存结构；<code>transaction_timeout</code>；删掉 <code>old_snapshot_threshold</code>；SQL/JSON 的 <code>JSON_TABLE</code> 等</td><td>17 发行说明</td></tr>
+        <tr><td>18（本页用 18.7）</td><td>异步 I/O；B-tree skip scan；<code>uuidv7()</code>；<code>autovacuum_vacuum_max_threshold</code>；VACUUM 提前冻结（<code>vacuum_max_eager_freeze_failure_rate</code>）；<code>autovacuum_worker_slots</code></td><td>18 发行说明</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>怎么选 MySQL 还是 PostgreSQL，pgvector 为什么让 PG 在 AI 项目里更常见（J06 下一个知识点）</li>
+    <li>同一张表、同样三条慢 SQL，在两边各看一次执行计划（交易靶场 J06 任务）</li>
+    <li>pg_repack 怎么做到在线缩表：触发器 + 影子表，和 MySQL 的 gh-ost 对照</li>
+    <li>PG 的 WAL、流复制、逻辑复制，对照 MySQL 的 redo + binlog</li>
+    <li>TOAST：大的 JSONB 和文本被切块存到另一张表，更新时怎么连带膨胀</li>
+    <li>分区表：按月分区、DROP 旧分区代替大批量 DELETE</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：拿刚学的东西改靶场</h2>
+    <p class="lead">都在 <code>PgLab.java</code> 上改，<code>./run.sh again</code> 重跑。先写下猜测再跑。</p>
+  </div>
+  <div class="rules-list">
+    <div class="rl"><b>1. 把报表事务换成 READ COMMITTED</b><p>在 <code>longtx()</code> 里把隔离级别改成 <code>TRANSACTION_READ_COMMITTED</code>，其余不变。猜：VACUUM 还会报 2 万个 not yet removable 吗？<code>age(backend_xmin)</code> 是多少？</p><p class="guard">坑 1：RC 下快照只活一条语句。</p></div>
+    <div class="rl"><b>2. 给 orders 设 fillfactor 再做一遍 longtx</b><p><code>setup()</code> 建表时加 <code>fillfactor = 90</code>，重跑全部。猜：没有报表事务时，9527 改 2 万次，表还会多出 409 页吗？</p><p class="guard">坑 3：HOT 链上的旧版本修剪就能清。</p></div>
+    <div class="rl"><b>3. 打开 autovacuum，看它什么时候来</b><p>把 <code>autovacuum_enabled</code> 去掉，整表 UPDATE 一次，每 5 秒查一次 <code>n_dead_tup</code> 和 <code>last_autovacuum</code>。猜：多久以后会被清？（提示：<code>autovacuum_naptime</code> 默认 60 s）</p><p class="guard">第二圈：autovacuum 的触发阈值。</p></div>
+  </div>
+
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>PG 不原地改行，每次 UPDATE 写一个新元组，旧元组带着 xmin/xmax 留在表里，等 VACUUM 在没有快照需要它时清掉；相当于把 InnoDB 的 undo 搬进了表本身，换来简单的回滚和读，代价是膨胀和清理。</p></details>
+    <details><summary>2. 把 MySQL 的习惯搬到 PG，最疼的是哪几个？</summary><p>长事务或 idle in transaction 挡住整个库的 VACUUM；反复改同一行、改有索引的列让表和索引一直长；以为 VACUUM 会缩表；关掉 autovacuum 攒出回卷风险。</p></details>
+    <details><summary>3. 为什么一个开着的报表事务会让别的表也清不掉？</summary><p>PG 用一个全局的 xmin horizon 判断能不能清：所有会话里最老的快照。它不区分你的快照会不会读那张表，只要它开着，之后死掉的版本都算“可能还有人要”（④-3）。</p></details>
+    <details><summary>4. 预测：fillfactor 90 的表，把 status 列也建上索引，再每 10 行改一行 status，HOT 会有几次？</summary><p>0 次。HOT 的条件之一是没改任何索引列，status 有了索引，每次更新都要给所有索引加条目。空出来的那 10% 只能让新元组放在同一页，省不掉索引写入（④-4）。</p></details>
+    <details><summary>5. 预测：报表事务开着时发 VACUUM FULL orders，会发生什么？</summary><p>它会一直等锁。报表事务读过 orders，持有 ACCESS SHARE 锁直到事务结束；VACUUM FULL 要 ACCESS EXCLUSIVE。更糟的是，它排在队列里以后，后面所有读写 orders 的请求都排在它后面，整张表看起来像卡死了（④-3，实验台里可以试）。</p></details>
+    <details><summary>6. 预测：一个只在表尾追加、从不更新的日志表（按时间写入），死元组和 VACUUM 还重要吗？BRIN 合适吗？</summary><p>几乎没有死元组，VACUUM 主要还要做冻结和维护可见性图（13 起插入也会触发 autovacuum，就是为了这个）。数据按时间顺序落在连续的页里，正是 BRIN 的最好情况：几十 KB 的索引就能把一个时间范围缩到少数几段页（④-5、④-7）。</p></details>
+    <details><summary>7. 放回全景：第 7 站在 PG 里换成什么？这一步坏了，整条链路会怎样？</summary><p>第 6 站拿到行锁后，第 7 站不再写 undo，而是在堆里插入新元组、给旧元组写 xmax；第 8 站写的是 PG 的 WAL，第 9 站提交只在 pg_xact 记一笔。这一步“坏”的典型样子是膨胀：长事务挡住清理，第 5 站沿索引找行要走越来越多的版本，第 12 站要写回磁盘的页也越来越多，所有经过这张表的 SQL 一起变慢。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>标准档。<span class="tag-real">实测</span> 的数字来自本机：2 核 ARM，JDK 17.0.21（<code>--release 8</code>），pgJDBC 42.7.14，Docker 里的 PostgreSQL 18.7（<code>shared_buffers=512MB</code>，其余默认，orders 表关了 autovacuum 方便复现），交易靶场 100 万行 <code>orders</code>；代码在 <a href="https://github.com/archeu/study-labs/tree/main/java/database/pg-mvcc-vacuum-jsonb">study-labs</a>。MySQL 一侧的对照数字来自<a href="mysql-redo-undo-binlog.html">日志那页</a>的实测。autovacuum 阈值、冻结、回卷、GIN pending list 按 PostgreSQL 18 文档；版本变化按各版本发行说明（7.1、13、14、17、18 已核对原文）。实验台是简化模型。</p>
+  <p>相关：<a href="../java/pano-j06-update-to-disk.html">全景：一条 UPDATE 从应用到磁盘</a> · <a href="mysql-mvcc-lock.html">事务、MVCC 与锁</a> · <a href="mysql-redo-undo-binlog.html">redo、undo、binlog 与两阶段提交</a> · <a href="mysql-index-bplustree.html">索引与 B+ 树</a> · <a href="mysql-online-ddl.html">表结构设计与大表变更</a> · <a href="db-pool-tx-perf.html">连接池与事务性能</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 堆表示意模型：一页按 CAP 个元组画（真实的 orders 一页约 49 行）。9527 记作 R，其余是别的订单。
+// 规则（按 PostgreSQL 的实现简化）：
+//  · UPDATE 不原地改：写一个新元组，旧元组标上 xmax（这里记 sup = 被取代的时刻）。
+//  · 新元组优先放在旧元组同一页；放得下且没改索引列 → HOT：索引不加条目，靠页内的链找到它。
+//    放不下（或者改了索引列）→ 每个索引都要加一条指向新元组的条目；同页放不下就去有空位的页，再没有就在表尾长一页。
+//  · UPDATE 和读都会先“顺手修剪”（prune）它碰到的、快满了的页：可回收的旧元组腾出空间；
+//    有索引条目指着的只剩一个槽位指针（stub），等 VACUUM 删掉索引条目后才能复用。
+//  · 可回收 = 被取代的时刻早于所有还开着的快照（xmin horizon）。报表事务开着，它之后被取代的版本一个也删不掉。
+//  · VACUUM：可回收的元组和 stub 变空位，删掉指向它们的索引条目；表只在尾部整页空了时才截短。
+//  · VACUUM FULL：重写整张表，要 ACCESS EXCLUSIVE 锁；读过这张表、还没结束的事务持有 ACCESS SHARE，会把它挡住。
+var CAP = 6;
+function initState(ff){
+  var fill = ff === 90 ? CAP - 1 : CAP, pages = [];
+  for (var p = 0; p < 4; p++){
+    var slots = [];
+    for (var i = 0; i < fill; i++) slots.push(p === 1 && i === 2 ? {k:'r', v:0} : {k:'o'});
+    pages.push(slots);
+  }
+  return {ff:ff, pages:pages, t:0, snap:null,
+    vers:[{v:0, page:1, slot:2, created:0, sup:null, idx:true, st:'live'}],
+    upd:0, hot:0, nextV:1};
+}
+function clone(s){ return JSON.parse(JSON.stringify(s)); }
+function used(s, p){ var n = 0; s.pages[p].forEach(function(c){ if (c.k === 'o' || c.k === 'r') n++; }); return n; }
+function verOf(s, v){ for (var i = 0; i < s.vers.length; i++) if (s.vers[i].v === v) return s.vers[i]; return null; }
+function latest(s){ for (var i = s.vers.length - 1; i >= 0; i--) if (s.vers[i].st === 'live') return s.vers[i]; return null; }
+function removable(s, ver){ return ver.sup !== null && (s.snap === null || ver.sup <= s.snap); }
+// HOT 链：根元组（有索引条目）后面跟着的、没有索引条目的版本。只要链上还有元组在，根的槽位就得留着当“重定向”
+function chainAlive(s, ver){
+  var i = s.vers.indexOf(ver) + 1;
+  for (; i < s.vers.length && !s.vers[i].idx; i++) if (s.vers[i].st !== 'gone') return true;
+  return false;
+}
+function setSlot(s, ver, st){
+  ver.st = st;
+  s.pages[ver.page][ver.slot] = st === 'gone' ? {k:'free'} : {k:st, v:ver.v};
+}
+// 清一页里可回收的版本。atVacuum=false 是修剪（prune）：有索引条目指着的只能剩 stub；true 是 VACUUM：连同索引条目一起删
+function clean(s, p, atVacuum){
+  var n = 0;
+  s.vers.forEach(function(ver){   // 先清 HOT 链上的成员（没有索引条目，可以直接腾空）
+    if ((p === null || ver.page === p) && !ver.idx && ver.st === 'dead' && removable(s, ver)){ setSlot(s, ver, 'gone'); n++; }
+  });
+  s.vers.forEach(function(ver){   // 再处理有索引条目的根
+    if ((p !== null && ver.page !== p) || !ver.idx) return;
+    var dead = ver.st === 'dead' && removable(s, ver);
+    if (dead) n++;
+    if (dead || ver.st === 'redir' || ver.st === 'stub'){
+      if (chainAlive(s, ver)) setSlot(s, ver, 'redir');
+      else setSlot(s, ver, atVacuum ? 'gone' : 'stub');
+    }
+  });
+  return n;
+}
+// 修剪：页里放不下新元组时才做（真实条件：空闲空间低于 fillfactor 预留和 10% 中较大的那个）
+function prune(s, p){ return used(s, p) < CAP ? 0 : clean(s, p, false); }
+function placeIn(s, p, v){
+  var slots = s.pages[p];
+  for (var i = 0; i < slots.length; i++) if (slots[i].k === 'free'){ slots[i] = {k:'r', v:v}; return i; }
+  slots.push({k:'r', v:v}); return slots.length - 1;
+}
+function update(s, indexedCol){
+  var cur = latest(s), p = cur.page, pruned = prune(s, p), where, hot = false, np;
+  var v = s.nextV++;
+  if (used(s, p) < CAP){ np = p; hot = !indexedCol; where = hot ? 'hot' : 'same'; }
+  else {
+    np = -1;
+    for (var q = 0; q < s.pages.length; q++) if (q !== p && used(s, q) < CAP){ np = q; break; }
+    if (np < 0){ s.pages.push([]); np = s.pages.length - 1; }
+    where = 'other';
+  }
+  var slot = placeIn(s, np, v);
+  s.t++;
+  cur.st = 'dead'; cur.sup = s.t;
+  s.vers.push({v:v, page:np, slot:slot, created:s.t, sup:null, idx:!hot, st:'live'});
+  s.upd++; if (hot) s.hot++;
+  return {op: indexedCol ? 'updUser' : 'updStatus', where:where, page:np, pruned:pruned, grew: np === s.pages.length - 1 && s.pages[np].length === 1};
+}
+// 按主键读一次：沿每个还在的索引条目进页，再顺着页内的链往后走；数一共看了几个元组
+function read(s){
+  var examined = 0, pages = {}, pruned = 0;
+  s.vers.forEach(function(ver){
+    if (ver.st === 'live' || ver.st === 'dead'){ examined++; pages[ver.page] = 1; }
+    else if (ver.st === 'stub') pages[ver.page] = 1;
+  });
+  Object.keys(pages).forEach(function(p){ pruned += prune(s, +p); });
+  return {op:'read', examined:examined, pages:Object.keys(pages).length, pruned:pruned};
+}
+function vacuum(s){
+  var kept = 0;
+  s.vers.forEach(function(ver){ if (ver.st === 'dead' && !removable(s, ver)) kept++; });
+  var removed = clean(s, null, true);
+  var before = s.pages.length;
+  while (s.pages.length > 4 && used(s, s.pages.length - 1) === 0) s.pages.pop();
+  return {op:'vacuum', removed:removed, kept:kept, truncated: before - s.pages.length};
+}
+function vacuumFull(s){
+  if (s.snap !== null) return {op:'full', blocked:true};
+  var before = s.pages.length, cur = latest(s), fresh = initState(s.ff);
+  fresh.pages[1][2] = {k:'r', v:cur.v};
+  s.pages = fresh.pages; s.vers = [{v:cur.v, page:1, slot:2, created:cur.created, sup:null, idx:true, st:'live'}];
+  // 版本号继续往后数，免得和以前的混淆
+  return {op:'full', blocked:false, before:before, after:s.pages.length};
+}
+function toggleReport(s){ s.snap = s.snap === null ? s.t : null; return {op:'report', open: s.snap !== null}; }
+function stats(s){
+  var tuples = 0, deadOk = 0, deadKept = 0, idx = 0;
+  s.vers.forEach(function(ver){
+    if (ver.idx && ver.st !== 'gone') idx++;
+    if (ver.st === 'live' || ver.st === 'dead') tuples++;
+    if (ver.st === 'dead'){ if (removable(s, ver)) deadOk++; else deadKept++; }
+  });
+  return {pages:s.pages.length, tuples:tuples, deadOk:deadOk, deadKept:deadKept, idx:idx, upd:s.upd, hot:s.hot};
+}
+var OPS = {updStatus:function(s){ return update(s, false); }, updUser:function(s){ return update(s, true); },
+  read:read, vacuum:vacuum, full:vacuumFull, report:toggleReport};
+/*SIM-END*/
+
+// ---------- 实验台的 DOM 绑定 ----------
+(function(){
+  var lab = document.getElementById('heaplab');
+  if (!lab) return;
+  var ff = 100, S = initState(ff), guessOn = true, pending = null;
+  var $ = function(id){ return document.getElementById(id); };
+  var QS = {
+    updStatus: {q:'改 status（不在任何索引里）。新版本会放在哪？', opts:[['hot','同一页，索引不加条目（HOT）'],['same','同一页，但每个索引要加一条'],['other','别的页，每个索引要加一条']]},
+    updUser:   {q:'改 user_id（它有索引）。新版本会放在哪？', opts:[['hot','同一页，索引不加条目（HOT）'],['same','同一页，但每个索引要加一条'],['other','别的页，每个索引要加一条']]},
+    read:      {q:'按主键读一次 9527。这次读会顺手腾空 9527 的旧版本吗？', opts:[['yes','会'],['no','不会']]},
+    vacuum:    {q:'VACUUM 能清掉几个 9527 的旧版本？', opts:[['all','全部'],['some','一部分'],['none','一个也清不掉']]},
+    full:      {q:'现在发 VACUUM FULL，会怎样？', opts:[['ok','表重写，缩回原来大小'],['wait','一直等锁']]}
+  };
+  function answerOf(op, r, before){
+    if (op === 'updStatus' || op === 'updUser') return r.where;
+    if (op === 'read') return r.pruned > 0 ? 'yes' : 'no';
+    if (op === 'vacuum'){ var tot = before.deadOk + before.deadKept; return r.removed === 0 ? 'none' : (r.removed === tot ? 'all' : 'some'); }
+    if (op === 'full') return r.blocked ? 'wait' : 'ok';
+  }
+  function cellHtml(c){
+    var cls = 'cell', txt = '';
+    if (c.k === 'o') { txt = '订单'; }
+    else if (c.k === 'r'){
+      var ver = verOf(S, c.v);
+      if (ver.st === 'live'){ cls += ' r'; txt = 'v' + c.v; }
+      else if (removable(S, ver)){ cls += ' dead'; txt = 'v' + c.v; }
+      else { cls += ' keep'; txt = 'v' + c.v; }
+    }
+    else if (c.k === 'stub'){ cls += ' stub'; txt = '×'; }
+    else if (c.k === 'redir'){ cls += ' redir'; txt = '→'; }
+    else { cls += ' free'; txt = '·'; }
+    return '<span class="' + cls + '">' + txt + '</span>';
+  }
+  function render(){
+    var h = '';
+    S.pages.forEach(function(slots, p){
+      h += '<div class="hp-row' + (p >= 4 ? ' new' : '') + '"><span>页 ' + p + (p >= 4 ? ' 新' : '') + '</span><div class="cells">';
+      slots.forEach(function(c){ h += cellHtml(c); });
+      for (var i = slots.length; i < CAP; i++) h += '<span class="cell free">·</span>';
+      h += '</div></div>';
+    });
+    $('hl-heap').innerHTML = h;
+    var st = stats(S);
+    $('hl-pages').textContent = st.pages;
+    $('hl-tuples').textContent = st.tuples;
+    $('hl-dead').textContent = st.deadKept ? '其中 ' + st.deadKept + ' 个删不掉' : (st.deadOk ? '其中 ' + st.deadOk + ' 个可清' : '');
+    $('hl-idx').textContent = st.idx;
+    $('hl-hot').textContent = st.hot + ' / ' + st.upd;
+    var rb = lab.querySelector('[data-op="report"]');
+    rb.setAttribute('aria-pressed', S.snap !== null ? 'true' : 'false');
+    rb.textContent = S.snap !== null ? '报表事务：提交' : '报表事务：开始';
+  }
+  function say(html, role){ var r = $('hl-res'); r.hidden = false; r.setAttribute('data-role', role || 'pd'); r.innerHTML = html; }
+  function explain(op, r, before){
+    if (op === 'report') return [r.open ? '报表事务开始（REPEATABLE READ），拍下快照。从现在起被取代的版本，VACUUM 都删不掉。' : '报表事务提交，xmin horizon 往前跳，之前删不掉的旧版本现在都可以清了。', 'rn'];
+    if (op === 'updStatus' || op === 'updUser'){
+      var m = r.where === 'hot' ? '<b>HOT 更新</b>：新版本放在同一页，索引没加条目，靠页内链从老元组走到它。'
+        : r.where === 'same' ? '新版本放在同一页，但改的是索引列，<b>不能 HOT</b>：主键索引和 user_id 索引各加一条。'
+        : '同一页放不下，新版本去了页 ' + r.page + (r.grew ? '（表尾新长出来的页）' : '') + '：<b>每个索引都要加一条</b>。';
+      if (r.pruned) m += ' 改之前先修剪了旧元组所在的页，腾出 ' + r.pruned + ' 个位置。';
+      return [m, r.where === 'hot' ? 'done' : 'g2'];
+    }
+    if (op === 'read') return ['顺着 ' + stats(S).idx + ' 条索引条目进了 ' + r.pages + ' 个页，一共检查了 <b>' + r.examined + ' 个元组</b>才找到对自己可见的那个。' + (r.pruned ? ' 页快满了，顺手修剪掉 ' + r.pruned + ' 个死透了的旧版本。' : ' 没有修剪：' + (before.deadKept ? '旧版本还有快照要。' : '页没满或没有可清的。')), r.examined > 3 ? 'bad' : 'pd'];
+    if (op === 'vacuum') return ['VACUUM 清掉 ' + r.removed + ' 个旧版本' + (r.kept ? '，<b>' + r.kept + ' 个删不掉</b>（dead but not yet removable：报表事务的快照还在）' : '') + '，主键索引里指向 9527 的条目 ' + before.idx + ' → ' + stats(S).idx + '。' + (r.truncated ? ' 表尾 ' + r.truncated + ' 页整页空了，截掉。' : ' 表的页数不变：空出来的位置留给以后复用。'), r.kept ? 'bad' : 'bk'];
+    if (op === 'full') return r.blocked ? ['<b>VACUUM FULL 在等锁</b>：报表事务读过 orders，持有 ACCESS SHARE 锁；VACUUM FULL 要 ACCESS EXCLUSIVE。它排上队以后，后面所有读写 orders 的请求都排在它后面。先提交报表事务。', 'bad'] : ['VACUUM FULL 把活着的元组拷到新文件、重建索引：表 ' + r.before + ' → ' + r.after + ' 页，9527 只剩 1 个元组、1 条索引条目。真实环境里这段时间整张表不能读写。', 'done'];
+  }
+  function apply(op){
+    var before = stats(S), r = OPS[op](S);
+    render();
+    var e = explain(op, r, before);
+    say(e[0], e[1]);
+    return {r:r, before:before};
+  }
+  function ask(op){
+    var q = QS[op];
+    var trial = clone(S), before = stats(trial), tr = OPS[op](trial);
+    pending = {op:op, ans:answerOf(op, tr, before)};
+    $('hl-q').textContent = '先猜：' + q.q;
+    $('hl-opts').innerHTML = q.opts.map(function(o){ return '<button type="button" data-a="' + o[0] + '">' + o[1] + '</button>'; }).join('');
+    $('hl-guess').hidden = false;
+    $('hl-res').hidden = true;
+  }
+  $('hl-opts').addEventListener('click', function(ev){
+    var b = ev.target.closest('button'); if (!b || !pending) return;
+    var pick = b.getAttribute('data-a'), right = pick === pending.ans;
+    Array.prototype.forEach.call($('hl-opts').children, function(x){
+      if (x.getAttribute('data-a') === pending.ans) x.className = 'right';
+      else if (x === b) x.className = 'wrong';
+    });
+    var op = pending.op; pending = null;
+    apply(op);
+    var r = $('hl-res'); r.innerHTML = (right ? '✓ 猜对了。' : '✕ 猜错了。') + ' ' + r.innerHTML;
+  });
+  lab.querySelectorAll('.hl-ops .btn').forEach(function(b){
+    b.addEventListener('click', function(){
+      var op = b.getAttribute('data-op');
+      if (guessOn && QS[op]) ask(op);
+      else { $('hl-guess').hidden = true; pending = null; apply(op); }
+    });
+  });
+  lab.querySelectorAll('[data-ff]').forEach(function(b){
+    b.addEventListener('click', function(){
+      ff = +b.getAttribute('data-ff'); S = initState(ff); pending = null; $('hl-guess').hidden = true;
+      lab.querySelectorAll('[data-ff]').forEach(function(x){ x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+      render(); say('重新建表：fillfactor ' + ff + (ff === 90 ? '，每页空一格留给更新。' : '，每页装满。'), 'pd');
+    });
+  });
+  $('hl-guessmode').addEventListener('click', function(){
+    guessOn = !guessOn; this.setAttribute('aria-pressed', guessOn ? 'true' : 'false'); this.textContent = guessOn ? '开' : '关';
+    if (!guessOn){ $('hl-guess').hidden = true; pending = null; }
+  });
+  lab.addEventListener('keydown', function(ev){
+    if (ev.target !== lab) return;
+    var map = {u:'updStatus', i:'updUser', r:'read', v:'vacuum'};
+    if (map[ev.key]){ ev.preventDefault(); lab.querySelector('[data-op="' + map[ev.key] + '"]').click(); }
+  });
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

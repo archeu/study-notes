@@ -84,6 +84,7 @@
 | 09 | [orders 加一列，支付接口全卡住了：表结构设计与大表变更（Online DDL）](https://archeu.github.io/study-notes/database/mysql-online-ddl.html) | 建表时每个类型的改表代价、INSTANT / INPLACE / COPY 三种算法、元数据锁排队、DDL 到从库再做一遍、gh-ost 影子表对照，一边付款一边改表的实测，改表计划台 |
 | 10 | [池子从 10 开到 50，付款一点没快：连接池与事务性能（下一圈）](https://archeu.github.io/study-notes/database/db-pool-tx-perf-hot-row.html) | 热点行吞吐 ≈ 1 ÷ 持锁时间、队伍从 HikariCP 挪进 InnoDB、组提交为什么在热点行上凑不成组、8 组靶场实测和池子 1～64 曲线，三开关实验台 |
 | 11 | [换上 8.4，付款服务连不上库了：MySQL 8.0 升级 8.4 LTS](https://archeu.github.io/study-notes/database/mysql-84-upgrade.html) | 8.0 停更与 LTS 发布模型、启动时自动升级且单向、先升从库再切换、账号插件 / MASTER-SLAVE 语法 / 默认值 / 外键四类变化、caching_sha2_password 缓存、交易靶场全程实测，连接实验台 |
+| 12 | [订单表一行没加，PG 里却胖了一倍：PostgreSQL 的多版本、VACUUM、索引类型和 JSONB](https://archeu.github.io/study-notes/database/pg-mvcc-vacuum-jsonb.html) | PG 不原地改行、旧版本留在表里、可见性与回滚、页内修剪 / VACUUM / autovacuum / VACUUM FULL、长事务挡住清理、HOT 与 fillfactor、xid 冻结、B-tree / BRIN / GIN / 部分索引与表达式索引、JSONB 与 GIN，全部在 PG 18.7 上实测，堆表实验台 |
 
 ## 性能
 
