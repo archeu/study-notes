@@ -83,6 +83,7 @@
 | 08 | [付完款跳回订单页，还是待付款：主从复制、读写分离与复制延迟](https://archeu.github.io/study-notes/database/mysql-replication-lag.html) | 三个线程两份日志、GTID、延迟拆成传排队回放、大事务与心跳曲线、从库被写停在 1032、读写分离三种写后读，路由实验台 |
 | 09 | [orders 加一列，支付接口全卡住了：表结构设计与大表变更（Online DDL）](https://archeu.github.io/study-notes/database/mysql-online-ddl.html) | 建表时每个类型的改表代价、INSTANT / INPLACE / COPY 三种算法、元数据锁排队、DDL 到从库再做一遍、gh-ost 影子表对照，一边付款一边改表的实测，改表计划台 |
 | 10 | [池子从 10 开到 50，付款一点没快：连接池与事务性能（下一圈）](https://archeu.github.io/study-notes/database/db-pool-tx-perf-hot-row.html) | 热点行吞吐 ≈ 1 ÷ 持锁时间、队伍从 HikariCP 挪进 InnoDB、组提交为什么在热点行上凑不成组、8 组靶场实测和池子 1～64 曲线，三开关实验台 |
+| 11 | [换上 8.4，付款服务连不上库了：MySQL 8.0 升级 8.4 LTS](https://archeu.github.io/study-notes/database/mysql-84-upgrade.html) | 8.0 停更与 LTS 发布模型、启动时自动升级且单向、先升从库再切换、账号插件 / MASTER-SLAVE 语法 / 默认值 / 外键四类变化、caching_sha2_password 缓存、交易靶场全程实测，连接实验台 |
 
 ## 性能
 
