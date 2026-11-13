@@ -1,0 +1,1625 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>100 万行里找 9527，只读了 3 页：索引与 B+ 树</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J06 knowledge point 1 (InnoDB B+ tree indexes: clustered, secondary, covering, leftmost prefix), panorama "an UPDATE from app to disk" stations 4/5/12. Roles: pd = PRIMARY clustered index, cg = secondary index idx_user / idx_user_created, of = current search path highlight, bk = measured output, other = old approaches, bad = full scans and pitfalls. Interaction: one query walker in 4-5 (pick query, guess pages, step through both trees). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+body{overflow-x:clip}
+.lab-h{font-family:var(--font-display);font-weight:400;font-size:20px}
+#eb-res p{margin:0 0 4px}
+#eb-res .note-p{font-size:13px;color:var(--muted)}
+#eb pre{white-space:pre;overflow-x:auto}
+
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2;fill:none}
+.e-warn{stroke:var(--warn);stroke-width:2.5;fill:none}
+.misj{border-collapse:collapse}
+.ev-card{font-family:var(--font-mono);font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--console-bg);color:var(--console-fg);border-radius:12px;padding:10px 12px;margin:0}
+.tr-nav{display:flex;flex-wrap:wrap;gap:6px}
+.tr-nav button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:var(--font-mono)}
+.tr-nav button[aria-current="true"]{border-color:var(--ink);background:var(--ink);color:var(--paper)}
+.tr-nav button.ok{border-color:var(--good)}
+.tr-nav button.ng{border-color:var(--bad)}
+.tr-score{font-size:13.5px;color:var(--muted)}
+
+/* page: budget bench */
+.bud{display:flex;flex-direction:column;gap:6px}
+.bud-bar{position:relative;display:flex;height:34px;border-radius:10px;overflow:hidden;border:1.5px solid var(--line-strong);background:var(--paper)}
+.bud-bar span{display:block;height:100%;min-width:0}
+.bud-bar .h{background:var(--pd)} .bud-bar .m{background:var(--warn);opacity:.55} .bud-bar .c{background:var(--warn);opacity:.7}
+.bud-bar .s{background:var(--warn);opacity:.85} .bud-bar .o{background:var(--neutral);opacity:.6} .bud-bar .d{background:var(--warn)}
+.bud-bar .d.over{background:var(--bad)}
+.bud-lim{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--ink)}
+.bud-cap{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);font-family:var(--font-mono)}
+.bud-lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.bud-lg i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.derive{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.derive > div{padding:8px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--card);font-size:13.5px;min-width:0}
+.derive b{display:block;font-size:12px;color:var(--muted);font-weight:500}
+.derive code{font-size:13px;overflow-wrap:anywhere}
+.ctl select{font:inherit;font-size:14px;padding:5px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:720px){.derive{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.derive{grid-template-columns:1fr}}
+
+/* page: tcp */
+.cap{font-size:13.5px;color:var(--muted);margin-top:8px;line-height:1.55}
+.seq{display:flex;flex-direction:column;gap:12px}
+.seq-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seq-ctl .seg{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;margin-left:auto}
+.seq-box{outline:none}
+.seq svg .msg{opacity:.13;transition:opacity .25s}
+.seq svg .msg.on{opacity:1}
+.seq svg .msg.cur .ln{stroke-width:4}
+.seq svg .msg.cur .lab{font-weight:700}
+.seq svg .lane{stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5}
+.st-chip{font-family:var(--font-mono);font-size:12.5px;font-weight:600}
+.seq-info{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.seq-info > div{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.seq-info .k{font-size:12.5px;color:var(--muted);display:block;margin-bottom:4px}
+.seq-info .sts{display:flex;flex-wrap:wrap;gap:8px 16px}
+.seq-info .sts span{display:inline-flex;gap:6px;align-items:baseline}
+.seq-info .sts b{font-family:var(--font-mono);font-size:14px;padding:1px 8px;border-radius:8px;background:var(--rt);border:1.5px solid var(--rc)}
+.seq-say{grid-column:1 / -1}
+.seq-say p + p{margin-top:6px}
+.seq-num{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.frames{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.frames > div{border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.frames h4{font-size:17px;color:var(--rc)}
+.frames pre{margin:0;font-family:var(--font-mono);font-size:12px;background:var(--code-bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+@media (max-width:760px){.way{overflow-x:auto}.way > svg{min-width:400px}.seq-info{grid-template-columns:minmax(0,1fr)}.frames{grid-template-columns:minmax(0,1fr)}.seq-ctl .seg{margin-left:0}}
+/* ---------- netty page ---------- */
+.lanes{display:flex;flex-direction:column;gap:6px}
+.lane{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.lane .nm{font-family:var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lane .tr{position:relative;height:18px;border-radius:6px;background:var(--neutral-tint)}
+.lane .tr i{position:absolute;top:0;bottom:0;background:var(--bad);border-radius:5px;opacity:.85}
+.lane .tr u{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--bk)}
+.lane .v{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right}
+.lane-axis{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;font-size:11.5px;color:var(--muted);font-family:var(--font-mono)}
+.lane-axis span{display:flex;justify-content:space-between}
+.lanes-more{font-size:12.5px;color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:760px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.ctl-grid{grid-template-columns:1fr}}
+.seg-mode{display:flex;flex-wrap:wrap;gap:6px}
+.seg-mode button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 10px;font-size:13.5px;cursor:pointer;color:var(--ink)}
+.seg-mode button[aria-pressed="true"]{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.verx{width:100%;border-collapse:collapse;font-size:14px}
+.verx th,.verx td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.verx th{font-size:13px;color:var(--muted);font-weight:600;background:var(--code-bg)}
+.verx code{overflow-wrap:anywhere}
+
+/* ---- 本页新增 ---- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2;fill:none}
+.bytes{display:flex;flex-direction:column;gap:10px}
+.brow{display:grid;grid-template-columns:8.5em minmax(0,1fr);gap:10px;align-items:start}
+.brow > b{font-size:14px;line-height:1.3}
+.brow > b small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:3px;min-width:0}
+.chips i{font-style:normal;font-family:var(--font-mono);font-size:11.5px;line-height:1;padding:4px 3px;border-radius:4px;background:var(--rt);border:1px solid var(--rc);min-width:2.1em;text-align:center}
+.chips i.k{background:var(--card);border-style:dashed;color:var(--muted)}
+.chips i.w{padding:4px 6px}
+@media (max-width:560px){.brow{grid-template-columns:minmax(0,1fr)}}
+.hdr{display:grid;grid-template-columns:repeat(17,minmax(0,1fr)) minmax(0,4fr);gap:2px;min-width:620px;font-family:var(--font-mono);font-size:11.5px}
+.hdr > div{border:1.5px solid var(--rc);background:var(--rt);border-radius:6px;padding:6px 4px;text-align:center;display:flex;flex-direction:column;gap:3px;min-width:0}
+.hdr > div small{font-family:var(--font-body);font-size:11.5px;color:var(--ink)}
+.hdr-wrap{overflow-x:auto;padding-bottom:4px}
+.lbt{display:flex;flex-direction:column;gap:10px}
+.lbrow{display:grid;grid-template-columns:6.5em minmax(0,1fr) 15em;gap:10px;align-items:center;font-size:13.5px}
+.lbrow > b{font-size:14px}
+.lbrow.best > b::after{content:" ✓";color:var(--good)}
+.stk{display:flex;height:22px;border-radius:6px;overflow:hidden;background:var(--neutral-tint);min-width:0}
+.stk i{display:block;height:100%;font-style:normal;font-family:var(--font-mono);font-size:10.5px;line-height:22px;text-align:center;overflow:hidden;white-space:nowrap;color:var(--ink);border-right:1.5px solid var(--card)}
+.stk i.n{background:var(--rn-tint)}
+.stk i.n2{background:var(--pd-tint)}
+.stk i.s{background:var(--warn-tint)}
+.stk i.x{background:var(--bad-tint);color:var(--bad)}
+.lbstat{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap}
+.lbstat .e{color:var(--bad);font-weight:600}
+.leg{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.leg span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-2px;background:var(--c)}
+.inst-cfg{display:flex;flex-wrap:wrap;gap:8px}
+.inst-cfg .ic{display:flex;flex-direction:column;gap:4px;border:1.5px solid var(--line-strong);border-radius:10px;padding:6px 8px;font-size:12.5px;background:var(--card);min-width:0}
+.inst-cfg .ic b{font-family:var(--font-mono);font-size:12.5px}
+.inst-cfg select{font:inherit;font-size:12.5px;padding:2px 4px;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){.lbrow{grid-template-columns:minmax(0,1fr)}.lbrow .stk{order:2}}
+
+/* 本页：超时实验台 */
+.hc-ctl{display:flex;flex-direction:column;gap:12px}
+.hc-leg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.hc-leg i{display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:6px;vertical-align:0}
+.hc-out{display:flex;flex-direction:column;gap:8px;min-height:30px}
+.hc-row{display:grid;grid-template-columns:4.2em minmax(0,1fr);gap:4px 10px;align-items:center}
+.hc-lb{font-size:13px;color:var(--muted)}
+.hc-track{height:20px;background:var(--neutral-tint);border-radius:6px;overflow:hidden}
+.hc-fill{display:flex;height:100%}
+.hc-fill i{display:block;height:100%}
+.hc-end{grid-column:2;font-size:13px;font-family:var(--font-mono);min-width:0;overflow-wrap:anywhere}
+.lead code{overflow-wrap:anywhere}
+.good-t{color:var(--good)}
+.dp-h{margin-top:18px}
+
+/* page-specific */
+.esteps{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.esteps code{overflow-wrap:anywhere}
+.code-s{margin:0;padding:10px 12px;background:var(--code-bg);border-radius:10px;font-family:var(--font-mono);font-size:12px;line-height:1.55;overflow-x:auto;white-space:pre}
+.deep .pit .tbl-wrap{margin-top:4px}
+.bx-ver{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.bx-ver .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.bx-ver button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:999px;padding:5px 12px;font-size:13.5px;cursor:pointer}
+.bx-ver button[aria-pressed="true"]{border-color:var(--g2);background:var(--g2-tint);box-shadow:inset 0 0 0 1px var(--g2)}
+.bx-run{display:flex}
+.bx-trace{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.bx-real{font-size:13.5px;color:var(--muted);margin-top:6px}
+.bx-real code{color:var(--ink);overflow-wrap:anywhere}
+.bx-o{display:inline-block;font-weight:700;padding:1px 10px;border-radius:999px;margin-right:6px}
+.bx-o.fail{background:var(--bad-tint);color:var(--bad);border:1.5px solid var(--bad)}
+.bx-o.silent{background:var(--warn-tint);color:var(--ink);border:1.5px solid var(--warn)}
+.bx-o.ok{background:var(--good-tint);color:var(--good);border:1.5px solid var(--good)}
+#bx-out[data-o="fail"]{--rc:var(--bad);--rt:var(--bad-tint)}
+#bx-out[data-o="silent"]{--rc:var(--warn);--rt:var(--warn-tint)}
+#bx-out[data-o="ok"]{--rc:var(--good);--rt:var(--good-tint)}
+@media (max-width:860px){.presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.presets{grid-template-columns:1fr}}
+/* page: AOP chain */
+.duo{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.duo > *{min-width:0}
+.ac-bench{display:flex;flex-direction:column;gap:8px;padding:14px 16px;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+.ac-br{display:grid;grid-template-columns:180px minmax(0,1fr) 64px;gap:10px;align-items:center;font-size:13.5px}
+.ac-br i{display:block;height:20px;width:max(var(--w),3px);border-radius:5px;background:var(--g2-tint);border:1.5px solid var(--g2)}
+.ac-br.rn i{background:var(--rn-tint);border-color:var(--rn)}
+.ac-br b{font-family:var(--font-mono);font-size:12.5px;text-align:right}
+.ac-chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13.5px}
+.ac-chain > span{min-width:0}
+.ac-chip{display:inline-flex;gap:6px;align-items:center;border:1.5px solid var(--rc);background:var(--rt);border-radius:999px;padding:2px 10px;font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ac-chip b{font-family:var(--font-display);font-weight:400}
+.ac-chain .sep{color:var(--muted)}
+.ac-walk{margin:8px 0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.ac-walk li{position:relative;padding-left:2.4em}
+.ac-walk li::before{position:absolute;left:0;font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.ac-walk li.in::before{content:"进 →"}
+.ac-walk li.out::before{content:"← 出"}
+.ac-walk li.mid{font-weight:700}
+.ac-walk li.mid::before{content:"  ●"}
+.ac-walk li code{color:var(--rc)}
+@media (max-width:640px){.ac-br{grid-template-columns:110px minmax(0,1fr) 56px;font-size:12.5px}}
+
+/* dispatch walker */
+.dw-scn{display:flex;flex-wrap:wrap;gap:6px}
+.dw-scn button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:4px 12px;font-size:13.5px;cursor:pointer;font-family:var(--font-body)}
+.dw-scn button[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.dw-scn button:focus-visible,.dw:focus-visible{outline:2px solid var(--pd);outline-offset:2px}
+.dw svg .g{transition:opacity .25s}
+.dw svg .g.idle{opacity:.25}
+.dw svg .g.skip{opacity:.75}
+.dw svg .g.skip rect.box{stroke-dasharray:5 4;fill:var(--card)}
+.dw svg .g.deny rect.box,.dw svg .g.thr rect.box{fill:var(--bad-tint);stroke:var(--bad)}
+.dw svg .g.cur rect.box{stroke-width:4}
+.dw svg .g .tag{font-weight:700;fill:var(--ink)}
+.dw svg .g.deny .tag,.dw svg .g.thr .tag{fill:var(--bad)}
+.dw .seq-info .sts > span:last-child:not(:has(b)){flex-basis:100%;font-weight:700}
+@media (prefers-reduced-motion: reduce){.dw svg .g{transition:none}}
+
+
+/* ---------- this page ---------- */
+.jwt{font-family:var(--font-mono);font-size:13px;line-height:1.6;padding:12px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-wrap:anywhere}
+.jwt .h{color:var(--rn)} .jwt .p{color:var(--cg)} .jwt .s{color:var(--bk)}
+.jwt-parts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.jwt-parts > div{border:2px solid var(--rc);background:var(--rt);border-radius:12px;padding:8px 12px;font-size:13.5px;min-width:0}
+.jwt-parts code{overflow-wrap:anywhere;font-size:12px}
+.walk{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.walk li{display:grid;grid-template-columns:1.6em minmax(0,1fr);gap:8px;font-size:14px;align-items:start;padding:6px 10px;border-radius:10px;background:var(--card);border-left:4px solid var(--rc)}
+.walk li > i{font-style:normal;font-weight:700;color:var(--rc);text-align:center}
+.walk li.stop{background:var(--bad-tint)}
+.walk li.pass > i{color:var(--good)}
+.walk code{overflow-wrap:anywhere}
+.lab-out{font-family:var(--font-mono);font-size:12.5px;line-height:1.55;padding:10px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:pre}
+.lab-out .r{color:#FF9C9A} .lab-out .g{color:#7EE2A8} .lab-out .w{color:var(--console-dim)}
+.statline{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:baseline;font-size:15px}
+.statline b.code{font-family:var(--font-display);font-weight:400;font-size:28px}
+.statline b.code.ok{color:var(--good)} .statline b.code.no{color:var(--bad)}
+@media (max-width:860px){.jwt-parts{grid-template-columns:1fr}}
+pre.console .hi{color:var(--console-hi)}
+.presets.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+#lb-builds{margin-bottom:8px}
+@media (max-width:860px){.presets.c3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.presets.c3{grid-template-columns:1fr}}
+
+/* page-specific: 11-stop strip (real / fake / absent / distorted) */
+.stn{display:grid;grid-template-columns:repeat(11,minmax(0,1fr));gap:4px}
+.stn .c{border:2px solid var(--line-strong);border-radius:10px;padding:6px 4px;text-align:center;background:var(--card);min-width:0;display:flex;flex-direction:column;gap:1px}
+.stn .c b{font-family:var(--font-mono);font-size:13px}
+.stn .c span{font-size:11px;line-height:1.3;color:var(--muted);overflow-wrap:anywhere}
+.stn .c[data-st="real"]{border-color:var(--bk);background:var(--bk-tint)}
+.stn .c[data-st="real"] span{color:var(--ink)}
+.stn .c[data-st="fake"]{border-color:var(--rn);border-style:dashed;background:var(--rn-tint)}
+.stn .c[data-st="part"]{border-color:var(--cg);border-style:dotted}
+.stn .c[data-st="none"]{opacity:.38}
+.stn .c[data-st="warp"]{border-color:var(--bad);background:var(--bad-tint)}
+.stn-leg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.stn-leg i{display:inline-block;width:14px;height:12px;border-radius:3px;border:2px solid var(--line-strong);vertical-align:-1px;margin-right:4px}
+.stn-leg i.real{border-color:var(--bk);background:var(--bk-tint)}
+.stn-leg i.fake{border-color:var(--rn);border-style:dashed;background:var(--rn-tint)}
+.stn-leg i.part{border-color:var(--cg);border-style:dotted}
+.stn-leg i.none{opacity:.38}
+.stn-leg i.warp{border-color:var(--bad);background:var(--bad-tint)}
+.verd{font-family:var(--font-display);font-size:22px;padding:2px 12px;border-radius:10px;border:2px solid var(--line-strong)}
+.verd[data-v="绿"]{border-color:var(--good);background:var(--good-tint);color:var(--good)}
+.verd[data-v="红"]{border-color:var(--bad);background:var(--bad-tint);color:var(--bad)}
+.verd[data-v="测不了"]{border-color:var(--neutral);background:var(--neutral-tint);color:var(--ink)}
+.presets.c5{grid-template-columns:repeat(5,minmax(0,1fr))}
+@media (max-width:720px){
+  .stn{grid-template-columns:repeat(6,minmax(0,1fr))}
+  .presets.c5{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
+.presets.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:720px){.presets.c3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.qt .nd rect{transition:fill .2s,stroke-width .2s}
+.qt .nd.on rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3.5}
+.qt .nd.bad rect{fill:var(--bad-tint);stroke:var(--bad);stroke-width:3.5}
+#qw-back,#qw-backt{opacity:0;transition:opacity .2s}
+#qw-back.on,#qw-backt.on{opacity:1}
+#qw-sql{white-space:pre-wrap;margin:0}
+#qw .codebox pre{padding:10px 14px}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>数据库</span><span aria-hidden="true">/</span><span class="tb-here">100 万行里找 9527，只读了 3 页</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-mut" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-of" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+<header class="hero">
+  <p class="kicker">InnoDB · 页 16 KB · B+ 树 · 聚簇索引 · 二级索引 · 回表 · 覆盖索引 · 联合索引与最左前缀 · EXPLAIN · MySQL 8.4</p>
+  <h1>100 万行里找 9527，只读了 3 页：索引与 B+ 树</h1>
+  <p class="lead">交易靶场的 <code>orders</code> 表有 100 万行，表空间文件 7680 个页、120 MB。按主键找订单 9527，InnoDB 只拿了 <b>3 个页</b>；按一个没索引的列找，要拿 <b>5430 次</b>（本页实测）。索引的精华是两句话：<b>索引是一棵按键排好序、以 16 KB 的页为节点的矮胖树，一次查找只读树高那么几页；InnoDB 里表本身就是主键那棵树，二级索引的叶子只存主键值。</b>回表、覆盖索引、最左前缀，都能从这两句推出来。不懂这两句，就会建了索引却越查越慢。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j06-update-to-disk.html">一条 UPDATE 从应用到磁盘 · 第 4、5、12 站</a></span><span>地图：<a href="../java/roadmap.html#j06">J06 · 索引与 B+ 树：聚簇索引、回表、覆盖索引、最左前缀</a></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：在 120 MB 里找一行 71 字节</h2>
+    <p class="lead">在全景第 5 站，这一步要解决：<code>UPDATE … WHERE id = 9527</code> 到了 InnoDB，要从 100 万行里找到这一行。麻烦在于，磁盘和内存缓存（buffer pool）都不按行存取，只按<b>页</b>：一次至少 16 KB。所以问题变成了：<b>最少读几个页，才能找到它？</b></p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="全景第 4、5、6、12 站都在和 B+ 树上的页打交道：第 4 站优化器决定走哪棵树，第 5 站从根页 4 经页 134 下降到叶子页 75，第 6 站把锁加在叶子页的这条记录上，第 12 站把改过的整页 16 KB 写回磁盘。下面是 orders.ibd 文件：7680 个页，每页 16 KB，共 120 MB，主键树 4533 页，idx_user 2053 页，要找的只是其中一行。">
+  <text class="t-h" x="20" y="26">全景里的四站，打交道的都是同一样东西：B+ 树上的页</text>
+  <g data-role="of"><rect class="b-of" x="20" y="44" width="210" height="70" rx="10"/>
+    <text class="t-b" x="34" y="68">④ 优化器：走哪棵树</text><text class="t-monos" x="34" y="90">id 是主键 → PRIMARY</text><text class="t-xs" x="34" y="106">别的树：idx_user</text></g>
+  <g><rect class="b-pd" x="255" y="44" width="210" height="70" rx="10"/>
+    <text class="t-b" x="269" y="68">⑤ 从根往下找到这一行</text><text class="t-monos" x="269" y="90">根页 4 → 页 134 → 页 75</text><text class="t-xs" x="269" y="106">本页的主角</text></g>
+  <g><rect class="b-neu" x="490" y="44" width="210" height="70" rx="10"/>
+    <text class="t-b" x="504" y="68">⑥ 加行锁</text><text class="t-xs" x="504" y="90">锁挂在索引记录上</text><text class="t-xs" x="504" y="106">没索引就锁一大片</text></g>
+  <g><rect class="b-neu" x="725" y="44" width="215" height="70" rx="10"/>
+    <text class="t-b" x="739" y="68">⑫ 刷脏页</text><text class="t-xs" x="739" y="90">改了一行 71 字节</text><text class="t-xs" x="739" y="106">写回去的是整页 16 KB</text></g>
+  <path class="e-mut" d="M232 79H252" marker-end="url(#ah-mut)"/><path class="e-mut" d="M467 79H487" marker-end="url(#ah-mut)"/><path class="e-mut" d="M702 79H722" marker-end="url(#ah-mut)"/>
+  <rect class="b-dash" x="20" y="136" width="920" height="100" rx="12"/>
+  <text class="t-mono" x="36" y="160">orders.ibd</text>
+  <text class="t-xs" x="130" y="160">7680 个页 × 16 KB = 120 MB（实测）</text>
+  <g id="f1-pages"><rect class="b-pd" x="36" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="51" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="66" y="172" width="13" height="24" rx="2"/><rect class="b-of" x="81" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="96" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="111" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="126" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="141" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="156" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="171" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="186" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="201" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="216" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="231" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="246" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="261" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="276" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="291" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="306" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="321" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="336" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="351" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="366" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="381" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="396" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="411" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="426" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="441" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="456" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="471" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="486" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="501" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="516" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="531" y="172" width="13" height="24" rx="2"/><rect class="b-pd" x="546" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="561" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="576" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="591" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="606" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="621" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="636" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="651" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="666" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="681" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="696" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="711" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="726" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="741" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="756" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="771" y="172" width="13" height="24" rx="2"/><rect class="b-cg" x="786" y="172" width="13" height="24" rx="2"/><rect class="b-neu" x="801" y="172" width="13" height="24" rx="2"/><rect class="b-neu" x="816" y="172" width="13" height="24" rx="2"/><rect class="b-neu" x="831" y="172" width="13" height="24" rx="2"/><rect class="b-neu" x="846" y="172" width="13" height="24" rx="2"/><rect class="b-neu" x="861" y="172" width="13" height="24" rx="2"/><rect class="b-neu" x="876" y="172" width="13" height="24" rx="2"/><rect class="b-neu" x="891" y="172" width="13" height="24" rx="2"/><rect class="b-neu" x="906" y="172" width="13" height="24" rx="2"/><rect class="b-neu" x="921" y="172" width="13" height="24" rx="2"/></g>
+  <text class="t-s" x="36" y="222">主键树 4533 页 · idx_user 2053 页 · 其余是空闲区和文件管理页。要找的只是其中一行，约 71 字节。</text>
+</svg>
+  </div>
+  <figcaption class="cap">“页”是 InnoDB 读写磁盘、在 buffer pool 里缓存、加锁定位、刷回磁盘的单位。所以衡量一次查找贵不贵，数的是拿了几个页，不是比较了几次。</figcaption>
+  </figure>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：一页页翻，或者排好序二分</h2>
+    <p class="lead">先用已经会的办法想一遍。最直接的是从头翻到尾；聪明一点，把行按 id 排好序存成一个大文件，二分查找。两种都能找到，但都不够好。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 270" role="img" aria-label="左：全表扫描。按 sku_id 找，没有索引，要从第一个数据页读到最后一个，实测拿页 5430 次、345 毫秒；按主键找只拿 3 次、0.74 毫秒，其中大部分是网络往返。右：排好序的大文件二分查找。100 万行要二分约 20 次，每次落在不同的页，就是 20 次随机读；插入一行要把后面所有数据往后挪。">
+  <g data-role="other">
+    <text class="t-h" x="20" y="26">老办法 1：全表扫描</text>
+    <text class="t-xs" x="20" y="46">WHERE sku_id = 88 AND qty = 2（sku_id 没有索引）</text>
+    <g id="f2-scan"><rect class="b-bad" x="20" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="36" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="52" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="68" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="84" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="100" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="116" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="132" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="148" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="164" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="180" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="196" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="212" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="228" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="244" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="260" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="276" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="292" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="308" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="324" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="340" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="356" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="372" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="388" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="404" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="420" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="436" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="452" y="60" width="13" height="15" rx="2"/><rect class="b-bad" x="20" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="36" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="52" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="68" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="84" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="100" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="116" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="132" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="148" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="164" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="180" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="196" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="212" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="228" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="244" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="260" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="276" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="292" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="308" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="324" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="340" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="356" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="372" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="388" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="404" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="420" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="436" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="452" y="80" width="13" height="15" rx="2"/><rect class="b-bad" x="20" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="36" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="52" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="68" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="84" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="100" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="116" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="132" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="148" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="164" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="180" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="196" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="212" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="228" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="244" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="260" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="276" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="292" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="308" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="324" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="340" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="356" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="372" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="388" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="404" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="420" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="436" y="100" width="13" height="15" rx="2"/><rect class="b-bad" x="452" y="100" width="13" height="15" rx="2"/><text class="t-xs" x="20" y="132">每一格代表约 54 个叶子页，一页不落地读完</text></g>
+    <text class="t-bad" x="20" y="150">拿页 5430 次 · 345 ms</text>
+    <rect class="b-pd" x="20" y="170" width="6" height="22" rx="2"/>
+    <text class="t-good" x="34" y="186">按主键：拿页 3 次 · 0.74 ms（大头是网络往返）</text>
+    <text class="t-xs" x="20" y="218">更糟的是在 UPDATE 里：可重复读下扫过的每一行都要加锁，</text>
+    <text class="t-xs" x="20" y="236">等于锁住整张表（全景第 6 站）。</text>
+  </g>
+  <line class="e-mut" x1="480" y1="16" x2="480" y2="250" stroke-dasharray="4 4"/>
+  <g data-role="other">
+    <text class="t-h" x="510" y="26">老办法 2：排好序的大文件 + 二分</text>
+    <g id="f2-bin"><text class="t-xs" x="510" y="50">一个按 id 排好序的大文件，每 21 像素一页</text><rect class="b-neu" x="510" y="84" width="420" height="24" rx="3"/><line class="e-mut" x1="531" y1="84" x2="531" y2="108" stroke-width="1"/><line class="e-mut" x1="552" y1="84" x2="552" y2="108" stroke-width="1"/><line class="e-mut" x1="573" y1="84" x2="573" y2="108" stroke-width="1"/><line class="e-mut" x1="594" y1="84" x2="594" y2="108" stroke-width="1"/><line class="e-mut" x1="615" y1="84" x2="615" y2="108" stroke-width="1"/><line class="e-mut" x1="636" y1="84" x2="636" y2="108" stroke-width="1"/><line class="e-mut" x1="657" y1="84" x2="657" y2="108" stroke-width="1"/><line class="e-mut" x1="678" y1="84" x2="678" y2="108" stroke-width="1"/><line class="e-mut" x1="699" y1="84" x2="699" y2="108" stroke-width="1"/><line class="e-mut" x1="720" y1="84" x2="720" y2="108" stroke-width="1"/><line class="e-mut" x1="741" y1="84" x2="741" y2="108" stroke-width="1"/><line class="e-mut" x1="762" y1="84" x2="762" y2="108" stroke-width="1"/><line class="e-mut" x1="783" y1="84" x2="783" y2="108" stroke-width="1"/><line class="e-mut" x1="804" y1="84" x2="804" y2="108" stroke-width="1"/><line class="e-mut" x1="825" y1="84" x2="825" y2="108" stroke-width="1"/><line class="e-mut" x1="846" y1="84" x2="846" y2="108" stroke-width="1"/><line class="e-mut" x1="867" y1="84" x2="867" y2="108" stroke-width="1"/><line class="e-mut" x1="888" y1="84" x2="888" y2="108" stroke-width="1"/><line class="e-mut" x1="909" y1="84" x2="909" y2="108" stroke-width="1"/><circle class="f-bad" cx="720" cy="96" r="4"/><circle class="f-bad" cx="615" cy="96" r="4"/><path class="e-bad" d="M720 84Q667.5 64 615 84" marker-end="url(#ah-bad)" stroke-width="1.5"/><circle class="f-bad" cx="667" cy="96" r="4"/><path class="e-bad" d="M615 84Q641.0 58 667 84" marker-end="url(#ah-bad)" stroke-width="1.5"/><circle class="f-bad" cx="641" cy="96" r="4"/><path class="e-bad" d="M667 84Q654.0 52 641 84" marker-end="url(#ah-bad)" stroke-width="1.5"/><circle class="f-bad" cx="654" cy="96" r="4"/><path class="e-bad" d="M641 84Q647.5 46 654 84" marker-end="url(#ah-bad)" stroke-width="1.5"/><text class="t-bad" x="760" y="76">每一跳都可能换一页</text></g>
+    <text class="t-s" x="510" y="140">100 万行，二分 log₂(10⁶) ≈ 20 次</text>
+    <text class="t-bad" x="510" y="164">每次落在不同的页 → 最多 20 次随机读盘</text>
+    <text class="t-bad" x="510" y="188">插入 id=500000 的一行：后面一半数据都要往后挪</text>
+    <text class="t-xs" x="510" y="218">差的不是“排序”，而是：一次只排除一半太少，</text>
+    <text class="t-xs" x="510" y="236">而且整块连续存放，改不动。</text>
+  </g>
+</svg>
+  </div>
+  <figcaption class="cap">缺的那一块就是索引的精华：<b>每读一个页，就排除掉绝大部分候选</b>（一页里放几百个分界点，而不是二分的 1 个），<b>而且数据分散在许多页里，插入只改一个页</b>。典型误用：以为“建了索引就快”。⑤ 里有一条查询走了索引，反而比全表扫慢了 40%。</figcaption>
+  </figure>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：哈希、二叉树、B 树、LSM 树</h2>
+    <p class="lead">能“快速找到一行”的结构不止一种。比的是三件事：等值查、范围查和排序、放在磁盘上一次查找读几页。</p>
+  </div>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>结构</th><th>等值查</th><th>范围查、ORDER BY</th><th>100 万行查一次读几页</th><th>写入</th><th>谁在用</th></tr></thead>
+    <tbody>
+      <tr><th>哈希表</th><td class="good">1 次</td><td class="bad">不行：哈希后顺序就乱了</td><td class="num">≈ 1</td><td>快</td><td>Memory 引擎；InnoDB 的自适应哈希索引（8.4 默认关）</td></tr>
+      <tr><th>平衡二叉树（红黑树）</th><td>log₂N</td><td>可以</td><td class="num bad">≈ 20</td><td>快</td><td>内存里：Java 的 <code>TreeMap</code></td></tr>
+      <tr><th>B 树</th><td>log<sub>m</sub>N</td><td>可以，但要在层间上上下下</td><td class="num">3（行一长就变高）</td><td>中</td><td>老一代文件系统、部分数据库</td></tr>
+      <tr class="hl"><th>B+ 树</th><td>log<sub>m</sub>N</td><td class="good">叶子连成链表，顺着走</td><td class="num good">3（实测）</td><td>中</td><td>InnoDB、PostgreSQL、Oracle、SQL Server 的默认索引</td></tr>
+      <tr><th>LSM 树</th><td>要查好几层</td><td>可以，要合并多层</td><td class="num">不定</td><td class="good">很快（顺序写）</td><td>RocksDB、MyRocks、TiKV、HBase</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tip"><b>选择规则：</b>数据在磁盘上、既要等值又要范围和排序、读多写少，用 B+ 树；只有等值、全在内存里，用哈希；写入量远大于读、能接受读放大，看 LSM 树。订单表三条都符合第一种，<b>本页学 InnoDB 的 B+ 树</b>。为什么不是 B 树、为什么叶子要连成链表，放到 ④-6 讲。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：一棵矮胖树，两种叶子</h2>
+    <p class="lead">先看一棵树长什么样、为什么只有 3 层；再看页里面怎么找；然后是 InnoDB 的两种树（聚簇索引、二级索引），回表、覆盖索引、最左前缀都从这里来；最后说为什么非这样设计不可。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>页（page）</b>：InnoDB 存数据的最小单位，默认 16 KB（<code>innodb_page_size</code>）。读一行，也要把它所在的整页读进来。</li>
+      <li><b>buffer pool</b>：InnoDB 在内存里缓存页的地方，命中就不读盘。全景第 5 站冷启动时读了 3 次盘，就是这里没命中。见 <a href="../java/pano-j06-update-to-disk.html">全景 J06</a>。</li>
+      <li><b>贵的是“拿页”，不是比较</b>：在一页里比较几百个键是微秒级，拿一个不在内存里的页要一次随机 IO（SSD 上约 0.1 ms，机械盘约 10 ms）。所以设计目标只有一个：少拿页。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-tree">④-1 一棵 B+ 树：上面几层只放路标，数据全在最底层</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 360" role="img" aria-label="orders 表的主键 B+ 树，实测 3 层。第 2 层是根页 4，只有 6 条记录，每条是“键 + 子页号”。第 1 层是 6 个内节点页，平均每页 754 条“键 + 子页号”，比如页 134。第 0 层是 4526 个叶子页，平均每页 221 行完整数据，比如页 75 里有 id 9527。叶子页之间用前后指针连成双向链表。找 9527：根页 4 → 页 134 → 页 75，共 3 页。">
+  <g data-role="pd">
+  <text class="t-xs" x="14" y="52">第 2 层 · 根</text><text class="t-xs" x="14" y="152">第 1 层 · 内节点</text><text class="t-xs" x="14" y="262">第 0 层 · 叶子</text>
+  <text class="t-monos" x="14" y="68">1 页 · 6 条</text><text class="t-monos" x="14" y="168">6 页 · 平均 754 条</text><text class="t-monos" x="14" y="278">4526 页 · 平均 221 行</text>
+  <rect class="b-of" x="400" y="30" width="260" height="46" rx="8"/>
+  <text class="t-b" x="412" y="50">根页 4</text>
+  <text class="t-mono" x="412" y="68">1 │ 166k │ 333k │ 499k │ …</text>
+  <rect class="b-of" x="190" y="130" width="250" height="46" rx="8"/>
+  <text class="t-b" x="202" y="150">页 134</text>
+  <text class="t-mono" x="202" y="168">… │ 9330 │ 9551 │ …</text>
+  <rect class="b-pd" x="470" y="130" width="120" height="46" rx="8"/><text class="t-xs" x="482" y="158">页 …（第 2 个）</text>
+  <rect class="b-pd" x="620" y="130" width="120" height="46" rx="8"/><text class="t-xs" x="632" y="158">页 …</text>
+  <text class="t-s" x="760" y="158">… 共 6 页</text>
+  <path class="e-of" d="M450 76L330 128" marker-end="url(#ah-of)"/><path class="e-mut" d="M530 76L530 128" marker-end="url(#ah-mut)"/><path class="e-mut" d="M610 76L670 128" marker-end="url(#ah-mut)"/>
+  <rect class="b-pd" x="160" y="236" width="120" height="58" rx="8"/><text class="t-xs" x="172" y="258">页 74</text><text class="t-monos" x="172" y="278">…9329 整行</text>
+  <rect class="b-of" x="300" y="236" width="160" height="58" rx="8"/><text class="t-b" x="312" y="258">页 75 · 221 行</text><text class="t-mono" x="312" y="280">9527 │1024│88│2…</text>
+  <rect class="b-pd" x="480" y="236" width="120" height="58" rx="8"/><text class="t-xs" x="492" y="258">页 …</text><text class="t-monos" x="492" y="278">9551… 整行</text>
+  <text class="t-s" x="620" y="270">… 共 4526 页</text>
+  <path class="e-of" d="M330 176L380 234" marker-end="url(#ah-of)"/><path class="e-mut" d="M240 176L220 234" marker-end="url(#ah-mut)"/><path class="e-mut" d="M410 176L530 234" marker-end="url(#ah-mut)"/>
+  <path class="e-mut" d="M282 265H298M462 265H478" marker-start="url(#ah-mut)" marker-end="url(#ah-mut)"/>
+  <text class="t-xs" x="160" y="316">叶子页前后互相指着：双向链表，范围查询顺着走，不用回上层</text>
+  </g>
+  <rect class="b-dash" x="760" y="196" width="186" height="148" rx="10"/>
+  <text class="t-b" x="772" y="218">一条记录多大</text>
+  <text class="t-xs" x="772" y="240">内节点：键 8 + 子页号 4</text>
+  <text class="t-xs" x="772" y="256">　　　＋记录头 5 ≈ 17 字节</text>
+  <text class="t-xs" x="772" y="276">叶子：整行 ≈ 71 字节</text>
+  <text class="t-xs" x="772" y="292">（含事务 id、回滚指针）</text>
+  <text class="t-b" x="772" y="318">一页放的条数 = 扇出</text>
+  <text class="t-xs" x="772" y="336">内节点几百、叶子两百多</text>
+</svg>
+  </div>
+  <figcaption class="cap">图中层数、页数、每页条数都读自本机 <code>orders.ibd</code>（⑤）；页 4、134、75 来自<a href="../java/pano-j06-update-to-disk.html">全景</a>的实测，内节点里的分界键是示意。<b>为什么只有 3 层：</b>内节点一条只有十几字节，一页能放几百个分界点（扇出），每往下一层，候选范围就缩小几百倍：6 × 754 × 221 已经装得下 100 万行。</figcaption>
+  </figure>
+  <p class="tip">真名对一下：最上面那页叫<b>根页</b>，中间叫<b>非叶子节点</b>（内节点），最底层叫<b>叶子节点</b>；页头里有个 <code>PAGE_LEVEL</code> 字段，叶子是 0，往上加 1。根页的位置是固定的，建索引时定下来，写在数据字典里（<code>INNODB_INDEXES.PAGE_NO</code>：主键是 4，idx_user 是 5）。</p>
+
+  <h3 id="m-page">④-2 到了页里：页目录二分，再走几步链表</h3>
+  <figure>
+  <div class="fig-box">
+<svg class="sv" viewBox="0 0 960 220" role="img" aria-label="页 75 内部：记录按主键从小到大用单向链表串起来，从 infimum 到 supremum。页尾有页目录，每个槽指向一组 4 到 8 条记录里的最后一条。找 9527：先在槽里二分，定位到它所在的组，再沿链表走几步。">
+  <g data-role="pd">
+  <rect class="b-neu" x="20" y="20" width="920" height="186" rx="12"/>
+  <text class="t-b" x="36" y="44">页 75（16 KB）</text><text class="t-xs" x="150" y="44">页头 · 记录区 · 空闲区 · 页目录 · 页尾校验</text>
+  <g id="f3-recs"><rect class="b-neu" x="36" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="42" y="84">infimum</text><path class="e-mut" d="M94 79H102" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-neu" x="104" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="110" y="84">…</text><path class="e-mut" d="M162 79H170" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-pd" x="172" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="178" y="84">9522</text><path class="e-mut" d="M230 79H238" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-pd" x="240" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="246" y="84">9523</text><path class="e-mut" d="M298 79H306" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-pd" x="308" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="314" y="84">9524</text><path class="e-mut" d="M366 79H374" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-pd" x="376" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="382" y="84">9525</text><path class="e-mut" d="M434 79H442" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-pd" x="444" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="450" y="84">9526</text><path class="e-mut" d="M502 79H510" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-of" x="512" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="518" y="84">9527</text><path class="e-mut" d="M570 79H578" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-pd" x="580" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="586" y="84">9528</text><path class="e-mut" d="M638 79H646" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-pd" x="648" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="654" y="84">9529</text><path class="e-mut" d="M706 79H714" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-pd" x="716" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="722" y="84">9530</text><path class="e-mut" d="M774 79H782" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-neu" x="784" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="790" y="84">…</text><path class="e-mut" d="M842 79H850" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-neu" x="852" y="64" width="58" height="30" rx="5"/><text class="t-monos" x="858" y="84">supremum</text><path class="e-mut" d="M65 128V96" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-cg" x="40" y="128" width="50" height="22" rx="4"/><text class="t-xs" x="46" y="144">槽 0</text><path class="e-mut" d="M405 128V96" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-cg" x="380" y="128" width="50" height="22" rx="4"/><text class="t-xs" x="386" y="144">槽 k</text><path class="e-mut" d="M677 128V96" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-cg" x="652" y="128" width="50" height="22" rx="4"/><text class="t-xs" x="658" y="144">槽 k+1</text><path class="e-mut" d="M881 128V96" marker-end="url(#ah-mut)" stroke-width="1.5"/><rect class="b-cg" x="856" y="128" width="50" height="22" rx="4"/><text class="t-xs" x="862" y="144">槽 n</text><text class="t-xs" x="36" y="170">找 9527：先在页目录的槽里二分，定位到“槽 k+1”这一组，再从“槽 k”指的 9525 往后走 2 步</text></g>
+  <text class="t-xs" x="36" y="192">记录按主键排好，用“下一条”指针串成单向链表；页目录每个槽管一组（4～8 条），指向组里最后一条</text>
+  </g>
+</svg>
+  </div>
+  <figcaption class="cap">页内找一行：先在页目录（几十个槽）里二分，定位到组，再沿链表最多走 8 步。页里的比较全在内存里，便宜。所以“B+ 树查找”= 每层拿 1 个页 + 页内二分。</figcaption>
+  </figure>
+
+  <h3 id="m-two">④-3 两种树：聚簇索引存整行，二级索引存主键</h3>
+  <p class="lead">InnoDB 每张表至少一棵树：主键那棵，叶子里是<b>整行</b>，表就是这棵树，所以叫<b>聚簇索引</b>（clustered index）。另外每建一个索引就多一棵树，比如 <code>idx_user(user_id)</code>，它的叶子里只有 <b>(user_id, id)</b>：索引列加主键值，叫<b>二级索引</b>（secondary index）。</p>
+  <div class="two">
+    <div class="codebox" data-role="pd"><div class="code-bar"><b>PRIMARY（聚簇索引）</b><span>实测 3 层</span></div>
+<pre>叶子：4526 页，每页 221 行
+内容：id, user_id, sku_id, qty, amount_cents,
+      status, created_at, paid_at
+      <span class="cm">+ 事务 id、回滚指针（MVCC 用）</span>
+排序：按 id</pre></div>
+    <div class="codebox" data-role="cg"><div class="code-bar"><b>idx_user（二级索引）</b><span>实测 3 层</span></div>
+<pre>叶子：2048 页，每页平均 488 条
+内容：user_id, id   <span class="cm">← 只有这两列</span>
+排序：先按 user_id，相同再按 id
+要别的列：拿 id 回主键树再找一次</pre></div>
+  </div>
+  <p class="tip">“拿 id 回主键树再找一次”就叫<b>回表</b>。二级索引查到几条，就回表几次，每次都是从主键根页重新下降 3 页。反过来，如果要的列二级索引的叶子里都有，就不用回表，这叫<b>覆盖索引</b>，EXPLAIN 的 Extra 里显示 <code>Using index</code>。下面的演示把这几种走法放在一起走一遍。</p>
+
+  <h3 id="m-prefix">④-4 联合索引：先按第一列排，第一列相同再按第二列</h3>
+  <figure>
+  <div class="fig-box">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="联合索引 idx_user_created(user_id, created_at) 的叶子：先按 user_id 排序，user_id 相同的再按 created_at 排序。user_id = 1024 的 6 条挨在一起，而且已经按时间排好。只看 created_at，同一个时间分散在各个 user_id 里，没法二分。">
+  <g data-role="cg">
+  <text class="t-h" x="20" y="26">idx_user_created (user_id, created_at) 的叶子，从左往右是排好的顺序</text>
+  <g id="f4-cells"><rect class="b-cg" x="20" y="44" width="86" height="50" rx="6"/><text class="t-mono" x="28" y="64">1023</text><text class="t-monos" x="28" y="84">11-02 04:10</text><rect class="b-cg" x="112" y="44" width="86" height="50" rx="6"/><text class="t-mono" x="120" y="64">1023</text><text class="t-monos" x="120" y="84">11-09 21:33</text><rect class="b-of" x="204" y="44" width="86" height="50" rx="6"/><text class="t-mono" x="212" y="64">1024</text><text class="t-monos" x="212" y="84">11-01 02:38</text><rect class="b-of" x="296" y="44" width="86" height="50" rx="6"/><text class="t-mono" x="304" y="64">1024</text><text class="t-monos" x="304" y="84">11-03 14:05</text><rect class="b-of" x="388" y="44" width="86" height="50" rx="6"/><text class="t-mono" x="396" y="64">1024</text><text class="t-monos" x="396" y="84">11-05 09:47</text><rect class="b-of" x="480" y="44" width="86" height="50" rx="6"/><text class="t-mono" x="488" y="64">1024</text><text class="t-monos" x="488" y="84">11-07 18:20</text><rect class="b-of" x="572" y="44" width="86" height="50" rx="6"/><text class="t-mono" x="580" y="64">1024</text><text class="t-monos" x="580" y="84">11-09 06:12</text><rect class="b-of" x="664" y="44" width="86" height="50" rx="6"/><text class="t-mono" x="672" y="64">1024</text><text class="t-monos" x="672" y="84">11-11 23:58</text><rect class="b-cg" x="756" y="44" width="86" height="50" rx="6"/><text class="t-mono" x="764" y="64">1025</text><text class="t-monos" x="764" y="84">11-01 08:41</text><rect class="b-cg" x="848" y="44" width="86" height="50" rx="6"/><text class="t-mono" x="856" y="64">1025</text><text class="t-monos" x="856" y="84">11-04 12:09</text><path class="e-of" d="M204 104V114H750V104"/><text class="t-xs" x="300" y="130">user_id = 1024 的 6 条挨在一起，内部按 created_at 排好（第一条就是订单 9527）</text></g>
+  <text class="t-good" x="20" y="150">✓ user_id = 1024：6 条挨在一起，能二分定位</text>
+  <text class="t-good" x="20" y="174">✓ user_id = 1024 AND created_at ≥ …：在这 6 条里再按时间二分</text>
+  <text class="t-good" x="20" y="198">✓ … ORDER BY created_at DESC：倒着读，不用排序</text>
+  <text class="t-bad" x="500" y="150">✗ 只有 created_at = …：时间散在各个 user_id 里</text>
+  <text class="t-bad" x="500" y="174">　 整体不按 created_at 有序，没法二分</text>
+  <text class="t-s" x="500" y="198">△ user_id 范围 + created_at = …：只有 user_id</text>
+  <text class="t-s" x="500" y="222">　 能缩小范围，created_at 只能在索引里逐条过滤</text>
+  </g>
+</svg>
+  </div>
+  <figcaption class="cap">这就是<b>最左前缀</b>：联合索引能用来定位的，只有“从最左列开始、连续的等值列，加最多一个范围列”。像电话簿先按姓、再按名排：知道姓能翻到，只知道名翻不到。</figcaption>
+  </figure>
+
+  <h3 id="lab">④-5 走一遍：这条查询要拿几个页？</h3>
+  <p class="lead">选一条查询，先猜要拿几个页，再一步步看它在两棵树上怎么走。“理论最少”是按树高算的，“实测”是 ⑤ 里 <code>Innodb_buffer_pool_read_requests</code> 的增量。</p>
+  <div class="lab" data-role="of" tabindex="0" id="qw" aria-label="查询走法演示，左右方向键切换步骤">
+    <div class="presets c3" id="qw-scn" role="group" aria-label="选一条查询"></div>
+    <div class="codebox" data-role="of"><pre id="qw-sql"></pre></div>
+    <div class="guess" id="qw-guess">
+      <p>先猜：这条查询大约要拿几个页？</p>
+      <div class="opts" role="group" aria-label="猜结果">
+        <button type="button" data-g="a" aria-pressed="false">3 页左右</button>
+        <button type="button" data-g="b" aria-pressed="false">十几到几十页</button>
+        <button type="button" data-g="c" aria-pressed="false">几千页</button>
+      </div>
+    </div>
+    <div class="fig-box qt">
+<svg class="sv" id="qw-svg" viewBox="0 0 960 330" role="img" aria-label="左边是二级索引树，右边是主键索引树，各三层：根页、内节点、叶子。演示时高亮当前读到的页；回表时，从二级索引叶子画一条箭头到主键树的根页；全表扫时，主键树的整排叶子高亮。">
+  <g data-role="cg">
+    <text class="t-h" x="20" y="24" id="qw-ltitle">idx_user (user_id)</text>
+    <g class="nd" id="n-s-root"><rect class="b-cg" x="160" y="40" width="120" height="38" rx="8"/><text class="t-b" x="172" y="64">根页 5</text></g>
+    <g class="nd" id="n-s-int"><rect class="b-cg" x="160" y="118" width="120" height="38" rx="8"/><text class="t-b" x="172" y="142">内节点</text></g>
+    <rect class="b-cg" x="40" y="118" width="96" height="38" rx="8" opacity=".5"/><rect class="b-cg" x="304" y="118" width="96" height="38" rx="8" opacity=".5"/>
+    <g class="nd" id="n-s-leaf"><rect class="b-cg" x="150" y="200" width="140" height="44" rx="8"/><text class="t-b" x="160" y="218">叶子</text><text class="t-monos" x="160" y="236" id="qw-lleaf">(1024, 9527) ×6</text></g>
+    <rect class="b-cg" x="40" y="200" width="96" height="44" rx="8" opacity=".5"/><rect class="b-cg" x="304" y="200" width="96" height="44" rx="8" opacity=".5"/>
+    <path class="e-mut" d="M220 78V116M220 156V198"/>
+    <text class="t-xs" x="40" y="272" id="qw-lcap">叶子存 (user_id, id)，平均每页 488 条</text>
+  </g>
+  <g data-role="pd">
+    <text class="t-h" x="500" y="24">PRIMARY（表本身）</text>
+    <g class="nd" id="n-p-root"><rect class="b-pd" x="650" y="40" width="120" height="38" rx="8"/><text class="t-b" x="662" y="64">根页 4</text></g>
+    <g class="nd" id="n-p-int"><rect class="b-pd" x="650" y="118" width="120" height="38" rx="8"/><text class="t-b" x="662" y="142">页 134</text></g>
+    <rect class="b-pd" x="530" y="118" width="96" height="38" rx="8" opacity=".5"/><rect class="b-pd" x="794" y="118" width="96" height="38" rx="8" opacity=".5"/>
+    <g class="nd" id="n-p-leaf"><rect class="b-pd" x="640" y="200" width="140" height="44" rx="8"/><text class="t-b" x="650" y="218">页 75</text><text class="t-monos" x="650" y="236">9527 整行</text></g>
+    <g class="nd scanrow" id="n-p-leaves"><rect class="b-pd" x="510" y="200" width="106" height="44" rx="8"/><text class="t-xs" x="520" y="226">最左的叶子</text><rect class="b-pd" x="804" y="200" width="106" height="44" rx="8"/><text class="t-xs" x="814" y="226">… 第 4526 页</text></g>
+    <path class="e-mut" d="M710 78V116M710 156V198"/>
+    <text class="t-xs" x="510" y="272">叶子存整行，平均每页 221 行</text>
+  </g>
+  <path id="qw-back" class="e-bad" d="M290 222C420 222 470 60 646 59" marker-end="url(#ah-bad)"/>
+  <text class="t-bad" x="380" y="110" id="qw-backt">回表：拿 id 从根再下降</text>
+  <text class="t-s" x="20" y="310" id="qw-count">拿页：0</text>
+</svg>
+    </div>
+    <div class="seq-ctl">
+      <button type="button" class="btn" id="qw-prev">← 上一步</button>
+      <button type="button" class="btn primary" id="qw-next">下一步 →</button>
+      <button type="button" class="btn" id="qw-auto">自动播放</button>
+      <button type="button" class="btn" id="qw-reset">从头来</button>
+      <span class="tip" id="qw-pos"></span>
+    </div>
+    <p class="lab-res" id="qw-say" data-role="of"></p>
+    <div id="qw-out" hidden>
+      <div class="statline"><b class="verd" id="qw-verd"></b><span id="qw-sum"></span></div>
+    </div>
+  </div>
+  <p class="tip">实测比理论多：<code>Innodb_buffer_pool_read_requests</code> 数的是 InnoDB 每一次“拿页”，同一个页被拿两次就算两次，逐行返回结果时也会再拿。所以看量级：3、几十、几千、几十万，差的是数量级。</p>
+
+  <h3 id="m-why">④-6 为什么这样设计</h3>
+  <p class="lead">两个问题：为什么是 B+ 树而不是 B 树；为什么二级索引存主键值，而不是行在磁盘上的地址。</p>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>B 树 <small>每个节点都放整行</small></h4>
+<svg viewBox="0 0 420 210" role="img" aria-label="B 树：内节点里也放整行数据，一页只能放约 221 个分界点，扇出小；行越长扇出越小，树越高。范围查询要在层间上上下下，中序遍历。">
+  <rect class="b-neu" x="150" y="12" width="120" height="34" rx="6"/><text class="t-xs" x="160" y="34">键 + 整行 + 子页</text>
+  <rect class="b-neu" x="40" y="80" width="110" height="34" rx="6"/><rect class="b-neu" x="270" y="80" width="110" height="34" rx="6"/>
+  <path class="e-mut" d="M180 46L110 78M240 46L320 78"/>
+  <text class="t-bad" x="10" y="148">扇出 ≈ 一页能放的行数（本表约 221）</text>
+  <text class="t-bad" x="10" y="172">行长 1 KB 时扇出只剩约 16，树就高了</text>
+  <text class="t-bad" x="10" y="196">范围查要上上下下地中序遍历</text>
+</svg>
+    </div>
+    <div class="way" data-role="pd">
+      <h4>B+ 树 <small>上面只放路标，数据都在叶子</small></h4>
+<svg viewBox="0 0 420 210" role="img" aria-label="B+ 树：内节点只放键和子页号，一页放几百个，扇出大，树矮；所有数据在叶子，叶子连成链表，范围查询找到起点后顺着链表读。">
+  <rect class="b-pd" x="150" y="12" width="120" height="34" rx="6"/><text class="t-xs" x="160" y="34">只有键 + 子页号</text>
+  <rect class="b-pd" x="30" y="80" width="100" height="34" rx="6"/><rect class="b-pd" x="160" y="80" width="100" height="34" rx="6"/><rect class="b-pd" x="290" y="80" width="100" height="34" rx="6"/>
+  <path class="e-mut" d="M132 97H158M262 97H288" marker-end="url(#ah-mut)"/>
+  <path class="e-mut" d="M180 46L80 78M210 46L210 78M240 46L340 78"/>
+  <text class="t-good" x="10" y="148">扇出只看键长：本表内节点平均 754 条</text>
+  <text class="t-good" x="10" y="172">行再长，上面几层也不变高</text>
+  <text class="t-good" x="10" y="196">范围查：找到起点，顺着叶子链表读</text>
+</svg>
+    </div>
+  </div>
+  <p class="tip"><b>决定胜负的约束：</b>磁盘按页读，一次查找的成本 ≈ 树高。树高由扇出决定，扇出 = 一页能放几条记录。把数据挪出内节点，内节点就只剩“键 + 子页号”，扇出最大、树最矮；代价是每次查找都要走到叶子，但反正要读那一行，本来就得到叶子。</p>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>堆表 + 索引存地址 <small>PostgreSQL、MyISAM 的做法</small></h4>
+<svg viewBox="0 0 420 210" role="img" aria-label="堆表：行按插入顺序放在堆里，每个索引的叶子都存行的物理地址，比如 PostgreSQL 的 ctid（页号，槽号）。查一次索引后直接按地址取一页。行一挪动，所有索引都要改。">
+  <rect class="b-neu" x="20" y="20" width="150" height="40" rx="6"/><text class="t-xs" x="30" y="44">索引叶子：(1024, 页 812 槽 5)</text>
+  <rect class="b-neu" x="250" y="20" width="150" height="100" rx="6"/><text class="t-xs" x="262" y="44">堆：行按插入顺序放</text>
+  <path class="e-mut" d="M172 40H248" marker-end="url(#ah-mut)"/>
+  <text class="t-good" x="10" y="148">查完索引直接按地址取，只多 1 页</text>
+  <text class="t-bad" x="10" y="172">行一挪（换页、更新变长），每个索引都要改</text>
+  <text class="t-bad" x="10" y="196">按主键的范围查，行散在各处</text>
+</svg>
+    </div>
+    <div class="way" data-role="pd">
+      <h4>聚簇 + 二级索引存主键 <small>InnoDB 的做法</small></h4>
+<svg viewBox="0 0 420 210" role="img" aria-label="聚簇：表就是主键树，二级索引叶子存主键值 9527，回表时再查一次主键树。页分裂时行换了页，二级索引不用改。按主键的范围查，行在相邻的叶子里。">
+  <rect class="b-cg" x="20" y="20" width="150" height="40" rx="6"/><text class="t-xs" x="30" y="44">idx_user 叶子：(1024, 9527)</text>
+  <rect class="b-pd" x="250" y="20" width="150" height="100" rx="6"/><text class="t-xs" x="262" y="44">主键树：按 id 排好</text>
+  <path class="e-mut" d="M172 40H248" marker-end="url(#ah-mut)"/>
+  <text class="t-good" x="10" y="148">行在页之间挪动，二级索引一个字不用改</text>
+  <text class="t-good" x="10" y="172">按主键查和范围查最快：行就在叶子里</text>
+  <text class="t-bad" x="10" y="196">代价：回表要再走一遍主键树（3 页）</text>
+</svg>
+    </div>
+  </div>
+  <p class="tip"><b>决定胜负的约束：</b>B+ 树的行不是钉死在某个位置的：页满了要分裂，一半的行搬到新页。如果二级索引存的是物理地址，每搬一行，所有二级索引都要跟着改。InnoDB 让二级索引存主键这个“逻辑地址”，用回表多读几页换来写入时的稳定；也因此，<b>主键越短、越有序越好</b>（⑥ 坑 4）。PostgreSQL 走另一条路，用 HOT 更新等手段减少改索引，下钻第 9 步再对照。</p>
+
+  <h3 id="m-syntax">④-7 最少的语法</h3>
+  <div class="codebox" data-role="pd">
+    <div class="code-bar"><b>建、看、用</b><span>参数和边角放到第⑥步</span></div>
+<pre>CREATE TABLE orders (
+  id BIGINT NOT NULL PRIMARY KEY,          <span class="cm">-- 聚簇索引：表就是这棵树</span>
+  user_id BIGINT NOT NULL, created_at DATETIME(6) NOT NULL, …,
+  KEY idx_user (user_id)                   <span class="cm">-- 二级索引：叶子存 (user_id, id)</span>
+);
+ALTER TABLE orders ADD INDEX idx_user_created (user_id, created_at);   <span class="cm">-- 联合索引</span>
+
+EXPLAIN SELECT id FROM orders WHERE user_id = 1024;
+<span class="cm">-- 看五列：type（const/ref/range 好，ALL 是全表扫）、key（用了哪棵树）、</span>
+<span class="cm">-- key_len（联合索引用到几列）、rows（估计扫几行）、Extra（Using index = 覆盖，不回表）</span></pre>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：拆开 orders.ibd 数页，再数每条查询拿了几页</h2>
+    <p class="lead">交易靶场同一份数据：一个 MySQL 8.4 容器，<code>orders</code> 灌 100 万行（和全景 J06 一样，订单 9527 属于用户 1024）。一个 Java 类分三段：直接读表空间文件数树的形状；跑 7 条查询，数每条拿了几页；加一个联合索引，看最左前缀。<a href="https://github.com/archeu/study-labs/tree/main/java/database/mysql-index-bplustree">完整代码 →</a></p>
+  </div>
+  <div class="two">
+    <div class="codebox" data-role="bk">
+      <div class="code-bar"><b>怎么跑</b><span>要 Docker，拉 mysql:8.4 约 800 MB</span></div>
+<pre>cd java/database/mysql-index-bplustree
+./run.sh          <span class="cm"># 起容器 → 灌 100 万行 → shape → reads → prefix</span>
+./run.sh again    <span class="cm"># 容器留着，只重跑后两段</span>
+./run.sh clean    <span class="cm"># 删容器和数据卷</span>
+<span class="cm"># 不在 docker 组里：DOCKER="sudo docker" ./run.sh</span>
+<span class="cm"># 依赖：mysql-connector-j 9.7.0；按 JDK 8 写法，--release 8</span></pre>
+    </div>
+    <div class="codebox" data-role="bk">
+      <div class="code-bar"><b>读页头的三个字段</b><span>IndexLab.shape</span></div>
+<pre><span class="cm">// FLUSH TABLES orders FOR EXPORT 把脏页刷回 .ibd，再拷出来</span>
+byte[] p = new byte[16384];                 <span class="cm">// 一页</span>
+while (f.read(p) == p.length) {
+  if (u16(p, 24) != 17855) continue;        <span class="cm">// 页类型 INDEX</span>
+  long indexId = u64(p, 38 + 28);           <span class="cm">// 属于哪棵树</span>
+  int level    = u16(p, 38 + 26);           <span class="cm">// PAGE_LEVEL，叶子 0</span>
+  int nRecs    = u16(p, 38 + 16);           <span class="cm">// PAGE_N_RECS</span>
+  …按 (indexId, level) 累加页数和记录数
+}</pre>
+    </div>
+  </div>
+  <div class="codebox" data-role="bk">
+    <div class="code-bar"><b>第 1 段 shape：树有几层</b><span class="tag-real">实测</span></div>
+<pre class="console">[shape] target/orders.ibd：<b>7680</b> 个页 × 16 KB
+  idx_user（根页 5）
+    第 2 层        ：     1 页         4 条记录  平均每页     4 条
+    第 1 层        ：     4 页      2048 条记录  平均每页   512 条
+    第 0 层（叶子）：  <b>2048</b> 页   1000000 条记录  平均每页   <b>488</b> 条
+  PRIMARY（根页 4）
+    第 2 层        ：     1 页         6 条记录  平均每页     6 条
+    第 1 层        ：     6 页      4526 条记录  平均每页   <b>754</b> 条
+    第 0 层（叶子）：  <b>4526</b> 页   1000000 条记录  平均每页   <b>221</b> 条</pre>
+  </div>
+  <p class="tip">两棵树都是 3 层。注意内节点的记录数正好等于下一层的页数（6 → 4526，4 → 2048）：每条内节点记录就是一个“键 + 子页号”路标。</p>
+  <div class="codebox" data-role="bk">
+    <div class="code-bar"><b>第 2 段 reads：每条查询拿了几页</b><span class="tag-real">实测 · 预热后跑 5 次取最小</span></div>
+<pre class="console">① 主键等值                    读页       <b>3</b> 次   0.74 ms  type=const key=PRIMARY rows=1
+② 二级索引 + 回表              读页      <b>34</b> 次   0.81 ms  type=ref key=idx_user rows=6
+③ 覆盖索引                    读页      <b>10</b> 次   0.59 ms  type=ref key=idx_user rows=6 Extra=Using index
+④ 没索引：全表扫               读页    <b>5430</b> 次 345.09 ms  type=ALL key=null rows=995720
+<span class="r">⑤ 10 万行：走 idx_user + 回表  读页  400228 次 258.03 ms  type=range key=idx_user rows=209916</span>
+⑥ 10 万行：不用索引，全表扫     读页    4812 次 185.47 ms  type=ALL key=null rows=995720
+⑦ 同一范围但只要索引里有的列     读页     <b>236</b> 次  18.69 ms  type=range key=idx_user Extra=Using index</pre>
+  </div>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>看哪两行</th><th>说明了什么</th><th>对应原理</th></tr></thead>
+    <tbody>
+      <tr><td>① 3 次</td><td>树高 3，按主键找一行就拿 3 页。0.74 ms 里大部分是 JDBC 往返</td><td><a href="#m-tree">④-1</a></td></tr>
+      <tr><td>② 34 次 vs ③ 10 次</td><td>只差 SELECT 的列：要 <code>*</code> 就得 6 次回表，要 <code>id</code> 二级索引里就有</td><td><a href="#m-two">④-3</a></td></tr>
+      <tr class="hl"><td>⑤ vs ⑥</td><td><b>10 万次回表 = 40 万次拿页，比全表扫慢 39%</b>；优化器估计 21 万行，还是选了索引</td><td><a href="#m-two">④-3</a> · <a href="#p-back">⑥ 坑 1</a></td></tr>
+      <tr><td>⑤ vs ⑦</td><td>同一个范围，不回表只要 236 次、18.7 ms，快 14 倍</td><td><a href="#m-two">④-3</a></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="codebox" data-role="bk">
+    <div class="code-bar"><b>第 3 段 prefix：联合索引 (user_id, created_at)</b><span class="tag-real">实测 EXPLAIN</span></div>
+<pre class="console">只有 idx_user：我的订单按时间倒序  key=idx_user          Extra=<span class="r">Using filesort</span>
+[prefix] 加联合索引 idx_user_created(user_id, created_at)：2.8 s；idx_user 先设成 INVISIBLE
+我的订单按时间倒序                 key=idx_user_created  key_len=8   rows=6       Extra=<b>Backward index scan</b>
+user_id 等值                     key=idx_user_created  key_len=8   rows=6
+user_id 等值 + created_at 范围    key=idx_user_created  key_len=16  rows=6       Extra=Using index condition
+<span class="r">只有 created_at（缺最左列）        type=ALL key=null                 rows=995720  Extra=Using where</span>
+user_id 范围 + created_at 等值    key=idx_user_created  key_len=16  rows=<b>381</b>     Extra=Using index condition</pre>
+  </div>
+  <p class="tip"><code>key_len</code> 是用到的索引列的字节数：BIGINT 8 + DATETIME(6) 8，所以 8 是只用了 user_id，16 是两列都用上了。最后一行 key_len 也是 16，可 rows 是 381（77 个用户 × 约 5 单）：created_at 只参与了区间的边界，没把范围缩下来，真正的过滤靠索引条件下推（ICP，<code>Using index condition</code>）在索引里逐条比。</p>
+  <p class="tip"><b>到这里已经能交差了：</b>会看一棵树几层、一条查询走哪棵树、要不要回表、联合索引能用到第几列。<b>已知还没处理的细节：</b>回表太多时索引反而慢（<a href="#p-back">坑 1</a>），联合索引的列序（<a href="#p-order">坑 2、3</a>），主键选 UUID 会怎样（<a href="#p-uuid">坑 4</a>），对列用函数让索引失效（<a href="#p-func">坑 5</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：建了索引，不等于用上了</h2>
+    <p class="lead">第一圈是不知道就会出事的坑，每条都能指回 ④；第二圈是团队里怎么建索引；第三圈往下挖：树高怎么算、页为什么不满、8.0 以来的版本变化。</p>
+  </div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-back"><b><em>坑 1</em>回表太多，走索引比全表扫还慢<a class="root" href="#m-two">← ④-3 每次回表都从根下降</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>⑤ 的第 ⑤ 条：<code>user_id BETWEEN 1 AND 20000</code> 命中 10 万行，走 idx_user 拿页 40 万次、258 ms；不用索引全表扫只拿 4812 次、185 ms。优化器估计 21 万行，还是选了索引。</dd>
+      <dt>根源</dt><dd>每条二级索引记录回表一次，就是一次从主键根页开始的 3 页下降，而且 id 是乱序的，前后两次很少落在同一页。全表扫是顺着叶子链表一页一页读，每页 221 行一次拿完。</dd>
+      <dt>做法</dt><dd class="fix">命中行数占比大的查询，要么让索引覆盖（第 ⑦ 条，236 次、18.7 ms），要么分批、加更有区分度的条件；上线前看 EXPLAIN 的 rows，别默认“走索引就快”。</dd></dl>
+    </div>
+    <div class="pit" id="p-order"><b><em>坑 2</em>联合索引缺了最左列，整棵树用不上<a class="root" href="#m-prefix">← ④-4 先按第一列排</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>有了 <code>(user_id, created_at)</code>，按 <code>created_at = …</code> 查，EXPLAIN 是 <code>type=ALL rows=995720</code>：全表扫。</dd>
+      <dt>根源</dt><dd>树整体只按 user_id 有序，created_at 只在同一个 user_id 里有序，单看 created_at 没法二分。</dd>
+      <dt>做法</dt><dd class="fix">按查询建索引：哪些查询要用，就让它们的等值列排在最左。8.0.13 起有跳跃扫描（skip scan），但条件很窄：查询只用到索引里的列、最左列取值很少；本例 user_id 有 20 万个值，没选它。</dd></dl>
+    </div>
+    <div class="pit"><b><em>坑 3</em>范围列放在前面，后面的列只能过滤<a class="root" href="#m-prefix">← ④-4 最多一个范围列</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd><code>user_id BETWEEN 1024 AND 1100 AND created_at = …</code>：key_len=16 看起来两列都用了，rows 却是 381。</dd>
+      <dt>根源</dt><dd>user_id 一取范围，范围内各个 user_id 的 created_at 各自有序，合起来不有序，第二列没法再二分，只能在索引里逐条比（ICP）。</dd>
+      <dt>做法</dt><dd class="fix">联合索引按“等值列在前、范围列和排序列在后”排。这条查询该建的是 <code>(created_at, user_id)</code>。</dd></dl>
+    </div>
+    <div class="pit" id="p-uuid"><b><em>坑 4</em>主键用随机 UUID：页分裂、页半满、二级索引变胖<a class="root" href="#m-why">← ④-6 二级索引存主键</a><span class="seen">实测一半</span></b>
+      <dl><dt>现象</dt><dd>插入变慢、表和索引变大。本页实测了一半：主键按顺序插，叶子每页 221 行，按行长估算约 97% 满；idx_user 的 user_id 是乱序插入的，叶子平均 488 条，按每条约 21 字节估算只有约 64% 满。随机主键的聚簇索引也会这样，而且每行都更大。</dd>
+      <dt>根源</dt><dd>新值插进树的中间，页满了就对半分裂，两页各半满；顺序插入时 InnoDB 能识别出是往末尾追加，新页从插入点开始，老页保持满的。另外每个二级索引的叶子都带着主键，<code>CHAR(36)</code> 的 UUID 比 BIGINT 多 28 字节，乘以每个二级索引的每一条。</dd>
+      <dt>做法</dt><dd class="fix">主键用自增 BIGINT，或时间有序的 ID（雪花算法、UUIDv7）；非要 UUID，存成 <code>BINARY(16)</code>。业务唯一键另建唯一索引。</dd></dl>
+    </div>
+    <div class="pit" id="p-func"><b><em>坑 5</em>对索引列套函数、类型对不上，索引就失效<a class="root" href="#m-tree">← ④-1 树按原值排序</a><span class="seen">按文档</span></b>
+      <dl><dt>现象</dt><dd><code>WHERE DATE(created_at) = '2026-11-01'</code>、<code>WHERE phone = 13800000000</code>（phone 是 VARCHAR）都会退化成全表扫。</dd>
+      <dt>根源</dt><dd>树按列的原值排序。函数算出来的值顺序和原值不一样，字符串和数字比较时要先把每行的字符串转成数字，都没法在树上二分。</dd>
+      <dt>做法</dt><dd class="fix">改写成对原列的范围：<code>created_at &gt;= '2026-11-01' AND created_at &lt; '2026-11-02'</code>；参数类型和列类型一致。8.0.13 起也可以建函数索引。下一个知识点“执行计划与 SQL 调优”专门讲。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <div class="rules-list">
+    <div class="rl"><b>主键：短、有序、不改</b><p>自增 BIGINT 或趋势递增的 ID；不用业务字段（手机号、订单号字符串）当主键。</p><p class="guard">防页分裂、二级索引膨胀，以及改主键时整行搬家。</p></div>
+    <div class="rl"><b>联合索引：等值在前，范围和排序在后</b><p>“我的订单按时间倒序”建 <code>(user_id, created_at)</code>，查和排一次搞定。</p><p class="guard">防缺最左列、范围截断和 <code>Using filesort</code>。</p></div>
+    <div class="rl"><b>有了 (a, b)，就别再单建 (a)</b><p>本页的 idx_user 就是 idx_user_created 的前缀。删之前先 <code>ALTER INDEX … INVISIBLE</code> 观察几天，没问题再删（8.0 起）。</p><p class="guard">防冗余索引：每多一棵树，每次写入就多改一棵、多一批脏页（全景第 8、12 站）。</p></div>
+    <div class="rl"><b>列表和热点查询只取要的列</b><p>能让索引覆盖就覆盖，EXPLAIN 里看到 <code>Using index</code>。</p><p class="guard">防大量回表（坑 1）。</p></div>
+    <div class="rl"><b>区分度低的列不单独建索引</b><p><code>status</code> 只有两三种值，单独建索引几乎用不上，要用就放进联合索引里。</p><p class="guard">防白白多一棵树。</p></div>
+    <div class="rl"><b>建索引、改 SQL，前后都看 EXPLAIN</b><p>看 type、key、key_len、rows、Extra 五列；大表加索引走 Online DDL（下钻第 6 步）。</p><p class="guard">防“以为走了索引”。</p></div>
+  </div>
+
+  <h3>第三圈 · 优化和深处</h3>
+  <div class="deep">
+    <div class="dp" data-role="pd"><h4>树高怎么算，“2000 万行”从哪来</h4>
+      <ul>
+        <li>能装的行数 ≈ 根的条数 × 内节点扇出<sup>层数−2</sup> × 叶子每页行数。按本表实测平均值，3 层能装到约 754 × 754 × 221 ≈ 1.26 亿行（估算）。</li>
+        <li>流传的算法：内节点 16 KB ÷（8 字节键 + 6 字节指针）≈ 1170，叶子按每行 1 KB 装 16 行，1170 × 1170 × 16 ≈ 2190 万。说的是“1 KB 的行、3 层”，不是硬上限。</li>
+        <li>多一层也只多拿 1 页，上面几层通常常驻 buffer pool。真正变慢的原因多半是热数据装不下 buffer pool，下降时频繁读盘。</li>
+      </ul></div>
+    <div class="dp" data-role="cg"><h4>页为什么不满：分裂和合并</h4>
+      <ul>
+        <li>随机插入页满时对半分裂，长期看页大约半满到七成满；本页 idx_user 实测约 64%（估算）。</li>
+        <li>删得多了，页的数据少于 <code>MERGE_THRESHOLD</code>（默认 50%）时，InnoDB 会尝试和相邻页合并（按文档）。</li>
+        <li><code>CREATE INDEX</code> 这种排序建索引按 <code>innodb_fill_factor</code> 填页，默认 100，实际给每页留 1/16 空间（按文档）。</li>
+        <li>想把页重新压紧：<code>OPTIMIZE TABLE</code>（InnoDB 上就是重建表），大表要走 Online DDL。</li>
+      </ul></div>
+    <div class="dp" data-role="of"><h4>锁和索引是一回事（全景第 6 站）</h4>
+      <ul>
+        <li>InnoDB 的行锁加在索引记录上。按主键改，锁主键树上那一条；按二级索引改，二级索引记录和回表到的主键记录都要锁。</li>
+        <li>条件上没有索引，UPDATE 要扫整棵主键树，可重复读下扫过的记录都会加锁，相当于锁表。见 <a href="mysql-mvcc-lock.html">MVCC 与锁</a>。</li>
+      </ul></div>
+    <div class="dp" data-role="bk"><h4>脏的是整页（全景第 12 站）</h4>
+      <ul>
+        <li>改 9527 的 71 字节，页 75 整页变脏，刷回去写 16 KB，再加 doublewrite 一份。</li>
+        <li>主键有序时，新行集中写在最右边几页，脏页少；随机主键让插入散到成千上万个页，脏页和刷盘量一起涨。</li>
+      </ul></div>
+  </div>
+
+  <h3 id="d-ver">版本差异：5.7 → 8.0 → 8.4</h3>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>特性</th><th>什么时候有</th><th>对索引的影响</th></tr></thead>
+    <tbody>
+      <tr><th>索引条件下推 ICP</th><td>5.6</td><td>联合索引后面的列能在索引里先过滤，少回表（<code>Using index condition</code>）</td></tr>
+      <tr><th>降序索引</th><td>8.0</td><td>5.7 能写 DESC 但会忽略；8.0 起真按降序存，混合排序 <code>ORDER BY a ASC, b DESC</code> 也能用上</td></tr>
+      <tr><th>不可见索引</th><td>8.0</td><td>先 INVISIBLE 观察再删，本页 ⑤ 就是这样屏蔽 idx_user 的</td></tr>
+      <tr><th>跳跃扫描、函数索引</th><td>8.0.13</td><td>缺最左列时有条件地能用（坑 2）；<code>INDEX ((DATE(created_at)))</code>（坑 5）</td></tr>
+      <tr class="hl"><th>自适应哈希索引</th><td>8.4 默认关</td><td>8.0 默认开：热点页自动建哈希。8.4 起 <code>innodb_adaptive_hash_index=OFF</code>（本机 8.4.13 核对）</td></tr>
+      <tr class="hl"><th>change buffer</th><td>8.4 默认关</td><td>8.0 默认缓冲二级索引的写；8.4 起 <code>innodb_change_buffering=none</code>（本机 8.4.13 核对）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="cap">8.4 的两个默认值、<code>innodb_page_size=16384</code>、<code>innodb_fill_factor=100</code>、<code>optimizer_switch</code> 里 <code>skip_scan=on</code>、<code>index_condition_pushdown=on</code>，都是在本机 MySQL 8.4.13 上用 <code>SHOW VARIABLES</code> 读出来的；其余版本号按 MySQL 官方文档。</p>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>执行计划与 SQL 调优：EXPLAIN 每一列、慢查询日志、索引失效的各种写法、深分页（下钻第 2 步，就是下一页）。</li>
+    <li>页内结构逐字节：记录头、infimum / supremum、变长字段列表、NULL 位图，行格式 DYNAMIC 和 COMPACT 的差别。</li>
+    <li>页分裂源码：<code>btr_page_split_and_insert</code>，顺序插入的判断在哪。</li>
+    <li>自适应哈希索引为什么在 8.4 默认关掉：高并发下的锁争用。</li>
+    <li>PostgreSQL 的 B-tree：堆表、HOT 更新、只读索引扫描为什么要看可见性映射（下钻第 9 步）。</li>
+    <li>LSM 树：RocksDB / MyRocks 为什么写得快，读放大和写放大怎么换。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：拿刚学的细节改靶场的查询</h2>
+  </div>
+  <div class="rules-list">
+    <div class="rl"><b>练习 1 · 我的订单列表</b><p>为 <code>SELECT id, status, amount_cents, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 20</code> 设计一个索引。做对了：EXPLAIN 里 <code>Extra</code> 有 <code>Using index</code>，没有 <code>Using filesort</code>。</p></div>
+    <div class="rl"><b>练习 2 · 救回第 ⑤ 条</b><p>把 ⑤ 的 <code>SUM(amount_cents) … user_id BETWEEN 1 AND 20000</code> 改到拿页次数降两个数量级，用 reads 段的输出证明。提示：坑 1 的两种做法。</p></div>
+    <div class="rl"><b>练习 3 · 换成 UUID 主键</b><p>建一张 <code>orders_uuid</code>，主键 <code>CHAR(36) DEFAULT (UUID())</code>，灌同样的 100 万行，跑 shape。先猜：叶子每页几行、idx_user 多大，再对照坑 4。</p></div>
+    <div class="rl"><b>练习 4 · 1000 万行</b><p>把 setup 改成 1000 万行再跑 shape：先算一算会不会长到 4 层，再看实际。</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>索引是一棵按键排好序、以 16 KB 页为节点的矮胖树，一次查找只读树高那么几页；InnoDB 里表就是主键那棵树，二级索引叶子只存主键值，所以要别的列就得回表。</p></details>
+    <details><summary>2. 没有索引时，全表扫和“排好序的大文件二分”各疼在哪？</summary><p>全表扫要把 4526 个叶子页全读一遍（实测拿页 5430 次、345 ms），UPDATE 时还会把扫过的行都锁上。排序文件二分每次只排除一半，100 万行要约 20 次随机读，而且插入要挪动后面所有数据。B+ 树一页放几百个分界点，数据分散在页里，插入只改一页。</p></details>
+    <details><summary>3. 为什么走索引反而比全表扫慢？根源是哪条原理？</summary><p>④-3：二级索引叶子只有主键值，每条都要回表，一次回表就是从主键根页下降 3 页，而且是随机的。10 万行就是 40 万次拿页；全表扫顺着叶子链表读，每页一次拿 221 行，只要 4812 次。</p></details>
+    <details><summary>4. 预测：主键从 BIGINT 换成 CHAR(36) 的 UUID，idx_user 会怎样？</summary><p>变大，而且不止一点。每条二级索引记录从约 21 字节（记录头 5 + user_id 8 + id 8）变成约 49 字节以上，叶子每页从几百条降到两三百条，页数翻倍多；乱序的 UUID 还让主键树本身频繁分裂、页半满（④-6 二级索引存主键，坑 4）。</p></details>
+    <details><summary>5. 预测：给 orders 单独建一个 <code>(status)</code> 索引，<code>SELECT * FROM orders WHERE status = 'CREATED'</code> 该不该走它？</summary><p>不该。数据里 10% 是 CREATED，也就是 10 万行，走索引就是 10 万次回表，跟 ⑤ 第 ⑤ 条一样会比全表扫慢（坑 1）。区分度这么低的列，单独建索引意义不大，要么放进联合索引，要么让查询带上更有区分度的条件。</p></details>
+    <details><summary>6. 预测：orders 涨到 1000 万行，按主键找一单要拿几页？</summary><p>还是 3 页。叶子约 1000 万 ÷ 221 ≈ 4.5 万页，内节点每页 754 条左右，需要约 60 个内节点页，根页放 60 条路标绰绰有余。按 ④-6 的估算，这种行长要到上亿行才会长到第 4 层。</p></details>
+    <details><summary>7. 放回全景：第 5 站前后各发生了什么？如果 UPDATE 的条件是没有索引的 sku_id，整条链路会怎样？</summary><p>前一站（第 4 站）优化器根据有哪些索引决定走 PRIMARY；后一站（第 6 站）在找到的那条索引记录上加 X 锁，然后第 7、8 站写 undo、改页、写 redo，第 12 站把整页刷回磁盘。换成 sku_id：第 4 站只能选全表扫（type=ALL），第 5 站从 3 页变成扫 4526 个叶子页，冷启动时大量读盘；第 6 站可重复读下扫过的每条记录都加 next-key 锁，等于锁表，别的用户付款在第 6 站排队；第 3 站的连接被长时间占着，第 1 站 HikariCP 借连接开始超时。</p></details>
+  </div>
+</section>
+</main>
+<footer>
+  <p>档位：标准。实测：本机 2 核 ARM，Docker 里一个 MySQL 8.4.13 容器，JDK 17.0.21 跑 IndexLab（按 JDK 8 写法编译），orders 100 万行；树的形状读自 <code>FLUSH TABLES … FOR EXPORT</code> 后拷出的 orders.ibd，拿页次数是 <code>Innodb_buffer_pool_read_requests</code> 的增量（预热后 5 次取最小，跑了两轮结果一致）。页内结构、页分裂、版本差异按 MySQL 8.4 官方文档；8.4 的默认值在本机核对。</p>
+  <p>同系列：<a href="../java/pano-j06-update-to-disk.html">全景：一条 UPDATE 从应用到磁盘</a> · <a href="mysql-mvcc-lock.html">MySQL MVCC 与锁</a> · <a href="db-pool-tx-perf.html">连接池与事务性能</a> · <a href="../java/roadmap.html#j06">Java 地图 J06</a></p>
+</footer>
+<script>
+/*SIM-START*/
+// 六条查询在两棵树上的走法。每一步：亮哪些节点、说什么、这一步拿几页。
+// 节点：s-root s-int s-leaf（二级索引），p-root p-int p-leaf p-leaves（主键），back = 回表箭头。
+var PK = ['p-root', 'p-int', 'p-leaf'];
+var SCN = [
+  { id: 'pk', name: '主键等值', sub: '付款那条 UPDATE 的 WHERE',
+    sql: "SELECT * FROM orders WHERE id = 9527;",
+    left: 'idx_user (user_id)', leaf: '(1024, 9527) ×6', lcap: '叶子存 (user_id, id)，平均每页 488 条',
+    steps: [
+      { on: ['p-root'], n: 1, say: '读根页 4：6 条“键 + 子页号”，二分出 9527 该去子页 134。' },
+      { on: ['p-int'], n: 1, say: '读内节点页 134：几百条路标，再二分，下一站是叶子页 75。' },
+      { on: ['p-leaf'], n: 1, say: '读叶子页 75：页目录二分 + 走几步链表，整行就在这里。到此结束。' }
+    ], measured: 3, explain: 'type=const key=PRIMARY rows=1', bucket: 'a' },
+  { id: 'back', name: '二级索引 + 回表', sub: 'SELECT * 按 user_id',
+    sql: "SELECT * FROM orders WHERE user_id = 1024;",
+    left: 'idx_user (user_id)', leaf: '(1024, 9527) ×6', lcap: '叶子存 (user_id, id)，平均每页 488 条',
+    steps: [
+      { on: ['s-root'], n: 1, say: '主键帮不上忙，走 idx_user：读它的根页 5。' },
+      { on: ['s-int'], n: 1, say: '读内节点，二分出 1024 在哪个叶子。' },
+      { on: ['s-leaf'], n: 1, say: '读叶子：(1024, …) 的 6 条挨在一起，拿到 6 个 id。但 SELECT * 要的列这里没有。' },
+      { on: ['back'].concat(PK), n: 3, say: '回表：拿第 1 个 id（9527）回主键树，从根页 4 再下降 3 页取整行。' },
+      { on: ['back'].concat(PK), n: 15, say: '剩下 5 个 id 各来一遍：5 × 3 = 15 页。它们散在不同的叶子里。' }
+    ], measured: 34, explain: 'type=ref key=idx_user rows=6', bucket: 'b' },
+  { id: 'cover', name: '覆盖索引', sub: '只要 id',
+    sql: "SELECT id, user_id FROM orders WHERE user_id = 1024;",
+    left: 'idx_user (user_id)', leaf: '(1024, 9527) ×6', lcap: '叶子存 (user_id, id)，平均每页 488 条',
+    steps: [
+      { on: ['s-root'], n: 1, say: '读 idx_user 的根页 5。' },
+      { on: ['s-int'], n: 1, say: '读内节点，二分出 1024 在哪个叶子。' },
+      { on: ['s-leaf'], n: 1, say: '读叶子：要的 user_id、id 叶子里都有，6 条直接返回，不回表。Extra 显示 Using index。' }
+    ], measured: 10, explain: 'type=ref key=idx_user rows=6 Extra=Using index', bucket: 'a' },
+  { id: 'scan', name: '没有索引', sub: '按 sku_id 找',
+    sql: "SELECT * FROM orders WHERE sku_id = 88 AND qty = 2;",
+    left: 'idx_user (user_id)', leaf: '(1024, 9527) ×6', lcap: '叶子存 (user_id, id)，平均每页 488 条',
+    steps: [
+      { on: ['p-root'], n: 1, say: 'sku_id 不在任何索引里，只能扫整张表，也就是整棵主键树：先读根页 4。' },
+      { on: ['p-int'], n: 1, say: '一路往最左边走，读最左的内节点。' },
+      { on: ['p-leaves', 'p-leaf'], n: 4526, say: '从最左的叶子开始，顺着叶子链表一页页往右，4526 页每行都比一下 sku_id。' }
+    ], measured: 5430, explain: 'type=ALL key=NULL rows=995720', bucket: 'c' },
+  { id: 'prefix', name: '联合索引 · 最左列', sub: '我的订单按时间倒序',
+    sql: "SELECT * FROM orders WHERE user_id = 1024\n ORDER BY created_at DESC LIMIT 10;",
+    left: 'idx_user_created (user_id, created_at)', leaf: '(1024, 时间, 9527) ×6', lcap: '叶子存 (user_id, created_at, id)，先按 user_id 再按时间排',
+    steps: [
+      { on: ['s-root'], n: 1, say: '读 idx_user_created 的根页：最左列 user_id 有了，能二分。' },
+      { on: ['s-int'], n: 1, say: '读内节点，找到 1024 那一段。' },
+      { on: ['s-leaf'], n: 1, say: '读叶子：6 条已经按 created_at 排好，倒着读就是倒序，不用再排序（没有 Using filesort）。' },
+      { on: ['back'].concat(PK), n: 18, say: 'SELECT * 还是要回表：6 × 3 = 18 页。只取索引里有的列就能省掉这一步。' }
+    ], measured: null, explain: 'type=ref key=idx_user_created rows=6 Extra=Backward index scan', bucket: 'b' },
+  { id: 'noleft', name: '联合索引 · 缺最左列', sub: '只按时间找',
+    sql: "SELECT * FROM orders\n WHERE created_at = '2026-11-01 02:38:47';",
+    left: 'idx_user_created (user_id, created_at)', leaf: '(…, 02:38:47, …) 散在各处', lcap: '叶子先按 user_id 排，created_at 只在同一个 user_id 里有序',
+    steps: [
+      { on: ['s-root'], bad: true, n: 0, say: '根页里的路标先按 user_id 分段。只知道 created_at，不知道该往哪个子树走：这棵树用不上（优化器根本不会选它）。' },
+      { on: ['p-root'], n: 1, say: '只能全表扫：从主键树的根页 4 开始。' },
+      { on: ['p-int'], n: 1, say: '往最左边走，读最左的内节点。' },
+      { on: ['p-leaves', 'p-leaf'], n: 4526, say: '顺着叶子链表读完 4526 页，每行比一下 created_at。' }
+    ], measured: null, explain: 'type=ALL key=NULL rows=995720', bucket: 'c' }
+];
+function total(s) { var t = 0; for (var i = 0; i < s.steps.length; i++) t += s.steps[i].n; return t; }
+function upto(s, k) { var t = 0; for (var i = 0; i <= k && i < s.steps.length; i++) t += s.steps[i].n; return t; }
+function bucketOf(n) { return n <= 5 ? 'a' : (n <= 100 ? 'b' : 'c'); }
+/*SIM-END*/
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var BN = { a: '3 页左右', b: '十几到几十页', c: '几千页' };
+  var cur = 0, k = -1, guess = null, timer = null;
+  var box = $('qw-scn');
+  SCN.forEach(function (s, i) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.setAttribute('aria-pressed', i === 0 ? 'true' : 'false');
+    b.innerHTML = '<b>' + s.name + '</b><span>' + s.sub + '</span>';
+    b.addEventListener('click', function () { pick(i); });
+    box.appendChild(b);
+  });
+  var gbtn = [].slice.call(document.querySelectorAll('#qw-guess .opts button'));
+  gbtn.forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (k >= 0) return;
+      guess = b.getAttribute('data-g');
+      gbtn.forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+      $('qw-say').textContent = '猜好了，点“下一步”开始走。';
+    });
+  });
+  var NODES = ['s-root', 's-int', 's-leaf', 'p-root', 'p-int', 'p-leaf', 'p-leaves'];
+  function stop() { if (timer) { clearInterval(timer); timer = null; $('qw-auto').textContent = '自动播放'; } }
+  function pick(i) {
+    stop(); cur = i; k = -1; guess = null;
+    [].forEach.call(box.children, function (b, j) { b.setAttribute('aria-pressed', j === i ? 'true' : 'false'); });
+    gbtn.forEach(function (x) { x.setAttribute('aria-pressed', 'false'); x.classList.remove('right', 'wrong'); });
+    var s = SCN[i];
+    $('qw-sql').textContent = s.sql;
+    $('qw-ltitle').textContent = s.left; $('qw-lleaf').textContent = s.leaf; $('qw-lcap').textContent = s.lcap;
+    render();
+  }
+  function render() {
+    var s = SCN[cur], st = k >= 0 ? s.steps[k] : null;
+    NODES.forEach(function (n) {
+      var el = $('n-' + n); var on = st && st.on.indexOf(n) >= 0;
+      el.classList.toggle('on', !!on && !st.bad); el.classList.toggle('bad', !!on && !!st.bad);
+    });
+    var back = !!(st && st.on.indexOf('back') >= 0);
+    $('qw-back').classList.toggle('on', back); $('qw-backt').classList.toggle('on', back);
+    $('qw-count').textContent = '拿页：' + (k >= 0 ? upto(s, k) : 0) + (k >= 0 && st.n > 1 ? '（这一步 +' + st.n + '）' : '');
+    $('qw-pos').textContent = k < 0 ? '共 ' + s.steps.length + ' 步' : '第 ' + (k + 1) + ' / ' + s.steps.length + ' 步';
+    $('qw-say').textContent = k < 0 ? '先猜一个，再点“下一步”。也可以直接走。' : st.say;
+    $('qw-prev').disabled = k < 0; $('qw-next').disabled = k >= s.steps.length - 1;
+    var done = k === s.steps.length - 1;
+    $('qw-out').hidden = !done;
+    if (done) {
+      var t = total(s), b = bucketOf(t);
+      var v = $('qw-verd');
+      if (guess) {
+        v.textContent = guess === b ? '猜对了' : '猜的是“' + BN[guess] + '”';
+        gbtn.forEach(function (x) { var g = x.getAttribute('data-g'); x.classList.toggle('right', g === b); x.classList.toggle('wrong', g === guess && g !== b); });
+      } else v.textContent = '量级：' + BN[b];
+      $('qw-sum').textContent = '理论最少 ' + t + ' 页' + (s.measured != null ? ' · 实测拿页 ' + s.measured + ' 次' : ' · 拿页次数未单独测') + ' · EXPLAIN：' + s.explain;
+    }
+  }
+  function step(d) { var s = SCN[cur]; k = Math.max(-1, Math.min(s.steps.length - 1, k + d)); render(); }
+  $('qw-next').addEventListener('click', function () { stop(); step(1); });
+  $('qw-prev').addEventListener('click', function () { stop(); step(-1); });
+  $('qw-reset').addEventListener('click', function () { pick(cur); });
+  $('qw-auto').addEventListener('click', function () {
+    if (timer) { stop(); return; }
+    if (k >= SCN[cur].steps.length - 1) k = -1;
+    $('qw-auto').textContent = '暂停';
+    timer = setInterval(function () { if (k >= SCN[cur].steps.length - 1) { stop(); return; } step(1); }, 1600);
+  });
+  $('qw').addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { e.preventDefault(); stop(); step(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); stop(); step(-1); }
+  });
+  pick(0);
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
