@@ -1,0 +1,1637 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>commit 返回了，数据页还是旧的：redo、undo、binlog 与两阶段提交</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J06 knowledge point 4 "redo, undo, binlog and two-phase commit", panorama "an UPDATE from app to disk" stations 7, 8, 9, 12. Roles: bk = redo log (InnoDB WAL), cg = undo / old versions, g2 = binlog (server layer, replication), pd = buffer pool and data pages, of = the application / commit() call, other = clumsy old approach, bad = crash, lost or divergent data; good = recovered correctly. Interaction: one crash-point lab (pick the moment mysqld dies, process crash vs power loss, 1/1 vs 2/0, guess PAID or CREATED, see what recovery does). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.cmp3 pre{font-size:12px}
+.cmp3 .cnt{font-size:13px;color:var(--muted);padding:8px 14px;border-top:1.5px solid var(--line)}
+.choose{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ch{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ch h4{color:var(--rc);font-size:17px}
+.ch pre{padding:8px 10px;background:var(--code-bg);border-radius:10px;font-size:11.5px}
+.ch p{font-size:13.5px}
+.ch .use{font-size:12.5px;color:var(--muted)}
+.ch.pick{box-shadow:0 0 0 3px var(--rt)}
+.trio .ess{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.trio .ess h4{color:var(--rc)}
+.trio .ess p{font-size:14px}
+.trio .ess code{overflow-wrap:anywhere}
+.jmap td:first-child code,.jmap td:nth-child(2) code{white-space:nowrap}
+.jmap td.note{color:var(--muted);font-size:13px}
+.toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.tg{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tg > span{font-size:13px;color:var(--muted)}
+.seg{display:flex;flex-direction:column;gap:6px}
+.seg button{text-align:left;border:1.5px solid var(--line-strong);border-radius:10px;background:var(--card);padding:6px 10px;font-size:13.5px;cursor:pointer}
+.seg button[aria-pressed="true"],.seg button.right{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.seg button code{font-size:12px}
+.stack{font-family:var(--font-mono);font-size:13px;line-height:1.7;padding:10px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.stack .hl{background:var(--of-tint)}
+.stack .cm{color:var(--muted)}
+.outc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:980px){.choose{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.cmp3,.toggles,.outc{grid-template-columns:1fr}}
+@media (max-width:560px){.choose{grid-template-columns:1fr}}
+
+.flow4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.fl{background:var(--card);border:2px solid var(--rc);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.fl b{color:var(--rc);font-size:15px}
+.fl p{font-size:13.5px}
+.fl code{overflow-wrap:anywhere}
+.lab-res2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.lab-res2 > div{padding:10px 14px;border-radius:12px;font-size:14px;min-width:0;border:2px solid var(--line-strong);background:var(--card)}
+.lab-res2 > div.ok{border-color:var(--good);background:var(--good-tint)}
+.lab-res2 > div.no{border-color:var(--bad);background:var(--bad-tint)}
+.lab-res2 b{display:block;font-size:12.5px;color:var(--muted)}
+.lab-res2 code{overflow-wrap:anywhere}
+.lab-res2[hidden]{display:none}
+@media (max-width:860px){.flow4{grid-template-columns:repeat(2,minmax(0,1fr))}.lab-res2{grid-template-columns:1fr}}
+@media (max-width:520px){.flow4{grid-template-columns:1fr}}
+.presets.six{grid-template-columns:repeat(5,minmax(0,1fr))}
+.presets.six button b{font-family:var(--font-mono);font-size:14px;font-weight:600}
+.cmdline{font-family:var(--font-mono);font-size:13.5px;padding:8px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:nowrap}
+@media (max-width:860px){.presets.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:10em minmax(0,1fr) 6em;gap:10px;align-items:center;font-size:13.5px}
+.bar .track{height:16px;border-radius:6px;background:var(--neutral-tint);overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:var(--rc)}
+.bar .val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12.5px}
+@media (max-width:560px){.bar{grid-template-columns:7.5em minmax(0,1fr) 5em}}
+.seg button.right{border-color:var(--good);background:var(--good-tint)}
+.seg button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+/* timeline lab */
+.tl{display:flex;flex-direction:column;gap:6px;overflow-x:auto}
+.tl-row{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.tl-row > span:first-child{font-family:var(--font-mono)}
+.tl-track{position:relative;height:18px;background:var(--neutral-tint);border-radius:5px}
+.tl-track i{position:absolute;top:0;bottom:0;border-radius:4px}
+.tl-track i.wait{background:var(--pd-tint);border:1.5px solid var(--pd)}
+.tl-track i.cpu{background:var(--bad)}
+.tl-track i.wk{background:var(--g2)}
+.tl-track i.blk{background:var(--bad);opacity:.85}
+.tl-track i.to{background:repeating-linear-gradient(135deg,var(--bad-tint) 0 5px,var(--card) 5px 10px);border:1.5px dashed var(--bad)}
+.tl-track i.hz{background:var(--good);width:3px!important}
+.tl-row .v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.tl-axis{display:grid;grid-template-columns:6.5em minmax(420px,1fr) 5.5em;gap:8px;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.tl-axis div{display:flex;justify-content:space-between}
+.tl-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.tl-legend span::before{content:"";display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:5px;vertical-align:0;background:var(--sw);border:1px solid var(--sb,transparent)}
+.toggles.four{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:980px){.toggles.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.toggles.four{grid-template-columns:1fr}}
+.scope-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tcase{border:2px solid var(--line-strong);border-radius:12px;padding:8px 10px;background:var(--card);font-size:13.5px;min-width:0}
+.tcase b{font-family:var(--font-mono);font-size:13px}
+.tcase.ok{border-color:var(--good);background:var(--good-tint)}
+.tcase.no{border-color:var(--bad);background:var(--bad-tint)}
+.tcase small{display:block;color:var(--muted);font-size:12px}
+@media (max-width:560px){.scope-grid{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.bad-t{color:var(--bad);font-weight:700}
+td.good{color:var(--good);font-weight:700}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.calc-out .tile{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.calc-out .tile small{font-size:12.5px;color:var(--muted)}
+.calc-out .tile b{font-family:var(--font-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.calc-out .tile.warn{border-color:var(--bad);background:var(--bad-tint)}
+.calc-out .tile.warn b{color:var(--bad)}
+.calc-verdict{font-size:15px;background:var(--good-tint);border-radius:10px;padding:10px 14px}
+.calc-verdict.bad{background:var(--bad-tint);color:var(--bad);font-weight:700}
+.vtl{display:flex;flex-direction:column;gap:14px;outline:none}
+.vtl-ctl{display:flex;flex-direction:column;gap:12px}
+.vtl-ctl > div{min-width:0}
+.vtl .seg{flex-direction:row;flex-wrap:wrap}
+.vtl .seg button{text-align:center}
+.gantt{display:flex;flex-direction:column;gap:6px}
+.g-row{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;align-items:center}
+.g-lab{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.g-track{position:relative;height:28px;background:var(--paper);border:1.5px dashed var(--line);border-radius:6px;overflow:hidden}
+.g-bar{position:absolute;top:2px;bottom:2px;border-radius:4px;font-style:normal;font-family:var(--font-mono);font-size:11px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap}
+.g-bar.cpu{background:var(--pd-tint);border:1.5px solid var(--pd);color:var(--pd)}
+.g-bar.pin{background:var(--bad-tint);border:1.5px solid var(--bad);color:var(--bad)}
+.g-axis{display:flex;justify-content:space-between;margin-left:96px;font-family:var(--font-mono);font-size:11.5px;color:var(--muted)}
+.tlm-legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.tlm-legend span{position:relative;padding-left:20px}
+.tlm-legend span::before{content:"";position:absolute;left:0;top:3px;width:13px;height:13px;border-radius:4px;border:1.5px solid}
+.tlm-legend .lg-cpu::before{border-color:var(--pd);background:var(--pd-tint)}
+.tlm-legend .lg-pin::before{border-color:var(--bad);background:var(--bad-tint)}
+.tlm-legend .lg-free::before{border-color:var(--line);border-style:dashed;background:var(--paper)}
+@media (max-width:640px){.calc-out{grid-template-columns:minmax(0,1fr)}.g-row{grid-template-columns:64px minmax(0,1fr)}.g-axis{margin-left:72px}}
+
+/* ---------- this page: byte grids ---------- */
+.lay{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lay-cap{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;font-size:14px}
+.lay-cap b{font-family:var(--font-display);font-weight:400;font-size:18px}
+.lay-cap .sz{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.lay-grid{display:grid;grid-template-columns:2.6em repeat(8,minmax(0,1fr));gap:3px;font-size:11.5px}
+.lay-grid .off{font-family:var(--font-mono);font-size:11px;color:var(--muted);align-self:center;text-align:right;padding-right:4px}
+.lay-grid .cell{min-width:0;border-radius:6px;padding:4px 5px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;line-height:1.25;overflow:hidden;min-height:38px}
+.lay-grid .cell span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell small{font-family:var(--font-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lay-grid .cell.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 6px,var(--card) 6px 12px);border-style:dashed}
+.lay-grid .cell.cont{border-style:dashed}
+.lay-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lay-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:var(--rt);border:1.5px solid var(--rc)}
+.lay-legend i.gap{background:repeating-linear-gradient(135deg,var(--neutral-tint) 0 3px,var(--card) 3px 6px);border:1.5px dashed var(--neutral)}
+.lay-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.fields{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.fields .fd{display:inline-flex;align-items:center;gap:4px;border:1.5px solid var(--line-strong);border-radius:999px;padding:2px 4px 2px 10px;font-family:var(--font-mono);font-size:12.5px;background:var(--card)}
+.fields .fd button{border:0;background:var(--neutral-tint);border-radius:999px;width:20px;height:20px;cursor:pointer;line-height:1;font-size:13px;color:var(--ink)}
+.addf{display:flex;flex-wrap:wrap;gap:6px}
+.addf button{border:1.5px dashed var(--line-strong);background:var(--card);border-radius:8px;padding:3px 9px;font-family:var(--font-mono);font-size:12.5px;cursor:pointer;color:var(--ink)}
+.lab-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.st5{border:2px solid var(--rc);background:var(--card);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.st5 h4{font-size:15.5px;color:var(--rc)}
+.st5 h4 em{font-style:normal;font-family:var(--font-display);font-size:20px;margin-right:6px}
+.st5 p{font-size:13.5px}
+.st5 code{font-size:12px;overflow-wrap:anywhere}
+.st5 .mini{display:grid;grid-template-columns:repeat(6,1fr);gap:2px;margin-top:auto}
+.st5 .mini i{height:14px;border-radius:3px;background:var(--neutral-tint);border:1px solid var(--line-strong)}
+.st5 .mini i.z{background:var(--card);border-color:var(--good)}
+.st5 .mini i.h{background:var(--bk-tint);border-color:var(--bk)}
+.st5 .mini i.k{background:var(--cg-tint);border-color:var(--cg)}
+.st5 .mini i.v{background:var(--g2-tint);border-color:var(--g2)}
+.st5 .mini i.r{background:var(--pd-tint);border-color:var(--pd)}
+.st5 .mini i.x{background:repeating-linear-gradient(135deg,var(--of-tint) 0 3px,var(--card) 3px 6px);border-color:var(--of)}
+.st5 .who{font-size:12px;color:var(--muted)}
+.fig-box.wide svg{min-width:760px}
+@media (max-width:980px){.steps5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:860px){.lay-pair,.lab-row{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:560px){.steps5{grid-template-columns:minmax(0,1fr)}.lay-grid{grid-template-columns:2.2em repeat(8,minmax(0,1fr));gap:2px;font-size:10.5px}.lay-grid .cell{padding:3px 3px;min-height:34px}.lay-grid .cell small{display:none}}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.goal h4{margin:0;font-size:15px;color:var(--rc)}
+.goal .big{font-family:var(--font-mono);font-size:22px;font-weight:600;color:var(--ink)}
+.goal p{margin:0;font-size:13.5px}
+.fx{font-family:var(--font-mono);font-size:13.5px;background:var(--code-bg);border-radius:8px;padding:4px 8px;display:inline-block;overflow-wrap:anywhere}
+.runs td.num,.runs th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.runs tr.badrow td{background:var(--bad-tint)}
+.runs tr.goodrow td{background:var(--good-tint)}
+.diag textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px;line-height:1.5;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--code-bg);color:var(--ink);padding:10px;resize:vertical;box-sizing:border-box}
+.diag .tg-row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;font-size:14px}
+.diag .tg-row label{display:flex;gap:6px;align-items:center}
+.diag .tg-row input[type=number]{width:5.5em;font-family:var(--font-mono);font-size:14px;padding:4px 6px;border:1.5px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)}
+.mtx{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.mtx div{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--card);min-width:0}
+.mtx b{display:block;font-family:var(--font-mono);font-size:18px;font-variant-numeric:tabular-nums}
+.mtx span{font-size:12.5px;color:var(--muted)}
+.mtx div.over{border-color:var(--bad);background:var(--bad-tint)}
+.mtx div.okk{border-color:var(--good);background:var(--good-tint)}
+.chartwrap{position:relative}
+.chart-tip{position:absolute;pointer-events:none;background:var(--card);border:1.5px solid var(--line-strong);border-radius:8px;padding:4px 8px;font-size:12.5px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px}
+.legend i{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:var(--rc)}
+@media (max-width:860px){.goals,.mtx{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.goals{grid-template-columns:1fr}}
+.two > *{min-width:0}
+.halo{paint-order:stroke;stroke:var(--card);stroke-width:5px;stroke-linejoin:round}
+[hidden]{display:none!important}
+
+/* ---- 本页：委派走一遍 ---- */
+.ldr{display:flex;flex-direction:column;gap:8px}
+.lrow{display:grid;grid-template-columns:12em minmax(0,1fr) 10.5em;gap:10px;align-items:center;padding:10px 14px;border:2px solid var(--line);border-radius:14px;background:var(--card);transition:background .2s,border-color .2s}
+.lrow .lname{display:flex;flex-direction:column;min-width:0}
+.lrow .lname b{color:var(--rc);font-size:15.5px}
+.lrow .lname span{font-size:12px;color:var(--muted);font-family:var(--font-mono)}
+.lrow .lsee{font-size:13.5px;color:var(--muted);min-width:0}
+.lrow .lsee code{color:var(--ink);overflow-wrap:anywhere}
+.lrow .lstate{font-size:13px;font-weight:700;text-align:right;min-width:0}
+.lrow.on{border-color:var(--rc);background:var(--rt)}
+.lrow.def{box-shadow:inset 0 0 0 2px var(--good)}
+.lrow .lstate.k-hit,.lrow .lstate.k-cached{color:var(--good)}
+.lrow .lstate.k-miss{color:var(--bad)}
+.lrow .lstate.k-ask,.lrow .lstate.k-direct,.lrow .lstate.k-tccl{color:var(--rc)}
+.dlog{margin:0;padding-left:1.6em;display:flex;flex-direction:column;gap:4px;font-size:14px;min-height:3em}
+.dlog li.cur{font-weight:700}
+.dlog li .who{font-family:var(--font-mono);font-size:12px;padding:0 6px;border-radius:6px;background:var(--rt);color:var(--rc);margin-right:6px}
+.walker{outline:none}
+.walker:focus-visible{box-shadow:0 0 0 3px var(--of-tint)}
+.presets.scn{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pre-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:760px){.lrow{grid-template-columns:minmax(0,1fr)}.lrow .lstate{text-align:left}.presets.scn{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.presets.scn{grid-template-columns:minmax(0,1fr)}}
+.idrow{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:14px}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+#s4 > h3{margin-top:12px}
+h3[id]{scroll-margin-top:64px}
+body{overflow-x:clip}
+.lab-h{font-family:var(--font-display);font-weight:400;font-size:20px}
+#eb-res p{margin:0 0 4px}
+#eb-res .note-p{font-size:13px;color:var(--muted)}
+#eb pre{white-space:pre;overflow-x:auto}
+
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2;fill:none}
+.e-warn{stroke:var(--warn);stroke-width:2.5;fill:none}
+.misj{border-collapse:collapse}
+.ev-card{font-family:var(--font-mono);font-size:12.5px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--console-bg);color:var(--console-fg);border-radius:12px;padding:10px 12px;margin:0}
+.tr-nav{display:flex;flex-wrap:wrap;gap:6px}
+.tr-nav button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:var(--font-mono)}
+.tr-nav button[aria-current="true"]{border-color:var(--ink);background:var(--ink);color:var(--paper)}
+.tr-nav button.ok{border-color:var(--good)}
+.tr-nav button.ng{border-color:var(--bad)}
+.tr-score{font-size:13.5px;color:var(--muted)}
+
+/* page: budget bench */
+.bud{display:flex;flex-direction:column;gap:6px}
+.bud-bar{position:relative;display:flex;height:34px;border-radius:10px;overflow:hidden;border:1.5px solid var(--line-strong);background:var(--paper)}
+.bud-bar span{display:block;height:100%;min-width:0}
+.bud-bar .h{background:var(--pd)} .bud-bar .m{background:var(--warn);opacity:.55} .bud-bar .c{background:var(--warn);opacity:.7}
+.bud-bar .s{background:var(--warn);opacity:.85} .bud-bar .o{background:var(--neutral);opacity:.6} .bud-bar .d{background:var(--warn)}
+.bud-bar .d.over{background:var(--bad)}
+.bud-lim{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--ink)}
+.bud-cap{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);font-family:var(--font-mono)}
+.bud-lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--muted)}
+.bud-lg i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.derive{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.derive > div{padding:8px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--card);font-size:13.5px;min-width:0}
+.derive b{display:block;font-size:12px;color:var(--muted);font-weight:500}
+.derive code{font-size:13px;overflow-wrap:anywhere}
+.ctl select{font:inherit;font-size:14px;padding:5px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:720px){.derive{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){.derive{grid-template-columns:1fr}}
+
+/* page: tcp */
+.cap{font-size:13.5px;color:var(--muted);margin-top:8px;line-height:1.55}
+.seq{display:flex;flex-direction:column;gap:12px}
+.seq-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seq-ctl .seg{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;margin-left:auto}
+.seq-box{outline:none}
+.seq svg .msg{opacity:.13;transition:opacity .25s}
+.seq svg .msg.on{opacity:1}
+.seq svg .msg.cur .ln{stroke-width:4}
+.seq svg .msg.cur .lab{font-weight:700}
+.seq svg .lane{stroke:var(--line-strong);stroke-width:2;stroke-dasharray:2 5}
+.st-chip{font-family:var(--font-mono);font-size:12.5px;font-weight:600}
+.seq-info{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.seq-info > div{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.seq-info .k{font-size:12.5px;color:var(--muted);display:block;margin-bottom:4px}
+.seq-info .sts{display:flex;flex-wrap:wrap;gap:8px 16px}
+.seq-info .sts span{display:inline-flex;gap:6px;align-items:baseline}
+.seq-info .sts b{font-family:var(--font-mono);font-size:14px;padding:1px 8px;border-radius:8px;background:var(--rt);border:1.5px solid var(--rc)}
+.seq-say{grid-column:1 / -1}
+.seq-say p + p{margin-top:6px}
+.seq-num{font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.frames{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.frames > div{border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.frames h4{font-size:17px;color:var(--rc)}
+.frames pre{margin:0;font-family:var(--font-mono);font-size:12px;background:var(--code-bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+@media (max-width:760px){.way{overflow-x:auto}.way > svg{min-width:400px}.seq-info{grid-template-columns:minmax(0,1fr)}.frames{grid-template-columns:minmax(0,1fr)}.seq-ctl .seg{margin-left:0}}
+/* ---------- netty page ---------- */
+.lanes{display:flex;flex-direction:column;gap:6px}
+.lane{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;align-items:center;font-size:12.5px}
+.lane .nm{font-family:var(--font-mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lane .tr{position:relative;height:18px;border-radius:6px;background:var(--neutral-tint)}
+.lane .tr i{position:absolute;top:0;bottom:0;background:var(--bad);border-radius:5px;opacity:.85}
+.lane .tr u{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--bk)}
+.lane .v{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right}
+.lane-axis{display:grid;grid-template-columns:7.5em minmax(0,1fr) 5.5em;gap:8px;font-size:11.5px;color:var(--muted);font-family:var(--font-mono)}
+.lane-axis span{display:flex;justify-content:space-between}
+.lanes-more{font-size:12.5px;color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:760px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.ctl-grid{grid-template-columns:1fr}}
+.seg-mode{display:flex;flex-wrap:wrap;gap:6px}
+.seg-mode button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 10px;font-size:13.5px;cursor:pointer;color:var(--ink)}
+.seg-mode button[aria-pressed="true"]{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.verx{width:100%;border-collapse:collapse;font-size:14px}
+.verx th,.verx td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.verx th{font-size:13px;color:var(--muted);font-weight:600;background:var(--code-bg)}
+.verx code{overflow-wrap:anywhere}
+
+/* ---- 本页新增 ---- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2;fill:none}
+.bytes{display:flex;flex-direction:column;gap:10px}
+.brow{display:grid;grid-template-columns:8.5em minmax(0,1fr);gap:10px;align-items:start}
+.brow > b{font-size:14px;line-height:1.3}
+.brow > b small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:3px;min-width:0}
+.chips i{font-style:normal;font-family:var(--font-mono);font-size:11.5px;line-height:1;padding:4px 3px;border-radius:4px;background:var(--rt);border:1px solid var(--rc);min-width:2.1em;text-align:center}
+.chips i.k{background:var(--card);border-style:dashed;color:var(--muted)}
+.chips i.w{padding:4px 6px}
+@media (max-width:560px){.brow{grid-template-columns:minmax(0,1fr)}}
+.hdr{display:grid;grid-template-columns:repeat(17,minmax(0,1fr)) minmax(0,4fr);gap:2px;min-width:620px;font-family:var(--font-mono);font-size:11.5px}
+.hdr > div{border:1.5px solid var(--rc);background:var(--rt);border-radius:6px;padding:6px 4px;text-align:center;display:flex;flex-direction:column;gap:3px;min-width:0}
+.hdr > div small{font-family:var(--font-body);font-size:11.5px;color:var(--ink)}
+.hdr-wrap{overflow-x:auto;padding-bottom:4px}
+.lbt{display:flex;flex-direction:column;gap:10px}
+.lbrow{display:grid;grid-template-columns:6.5em minmax(0,1fr) 15em;gap:10px;align-items:center;font-size:13.5px}
+.lbrow > b{font-size:14px}
+.lbrow.best > b::after{content:" ✓";color:var(--good)}
+.stk{display:flex;height:22px;border-radius:6px;overflow:hidden;background:var(--neutral-tint);min-width:0}
+.stk i{display:block;height:100%;font-style:normal;font-family:var(--font-mono);font-size:10.5px;line-height:22px;text-align:center;overflow:hidden;white-space:nowrap;color:var(--ink);border-right:1.5px solid var(--card)}
+.stk i.n{background:var(--rn-tint)}
+.stk i.n2{background:var(--pd-tint)}
+.stk i.s{background:var(--warn-tint)}
+.stk i.x{background:var(--bad-tint);color:var(--bad)}
+.lbstat{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap}
+.lbstat .e{color:var(--bad);font-weight:600}
+.leg{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.leg span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-2px;background:var(--c)}
+.inst-cfg{display:flex;flex-wrap:wrap;gap:8px}
+.inst-cfg .ic{display:flex;flex-direction:column;gap:4px;border:1.5px solid var(--line-strong);border-radius:10px;padding:6px 8px;font-size:12.5px;background:var(--card);min-width:0}
+.inst-cfg .ic b{font-family:var(--font-mono);font-size:12.5px}
+.inst-cfg select{font:inherit;font-size:12.5px;padding:2px 4px;border-radius:6px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){.lbrow{grid-template-columns:minmax(0,1fr)}.lbrow .stk{order:2}}
+
+/* 本页：超时实验台 */
+.hc-ctl{display:flex;flex-direction:column;gap:12px}
+.hc-leg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.hc-leg i{display:inline-block;width:14px;height:10px;border-radius:3px;margin-right:6px;vertical-align:0}
+.hc-out{display:flex;flex-direction:column;gap:8px;min-height:30px}
+.hc-row{display:grid;grid-template-columns:4.2em minmax(0,1fr);gap:4px 10px;align-items:center}
+.hc-lb{font-size:13px;color:var(--muted)}
+.hc-track{height:20px;background:var(--neutral-tint);border-radius:6px;overflow:hidden}
+.hc-fill{display:flex;height:100%}
+.hc-fill i{display:block;height:100%}
+.hc-end{grid-column:2;font-size:13px;font-family:var(--font-mono);min-width:0;overflow-wrap:anywhere}
+.lead code{overflow-wrap:anywhere}
+.good-t{color:var(--good)}
+.dp-h{margin-top:18px}
+
+/* page-specific */
+.esteps{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.esteps code{overflow-wrap:anywhere}
+.code-s{margin:0;padding:10px 12px;background:var(--code-bg);border-radius:10px;font-family:var(--font-mono);font-size:12px;line-height:1.55;overflow-x:auto;white-space:pre}
+.deep .pit .tbl-wrap{margin-top:4px}
+.bx-ver{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.bx-ver .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.bx-ver button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:999px;padding:5px 12px;font-size:13.5px;cursor:pointer}
+.bx-ver button[aria-pressed="true"]{border-color:var(--g2);background:var(--g2-tint);box-shadow:inset 0 0 0 1px var(--g2)}
+.bx-run{display:flex}
+.bx-trace{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.bx-real{font-size:13.5px;color:var(--muted);margin-top:6px}
+.bx-real code{color:var(--ink);overflow-wrap:anywhere}
+.bx-o{display:inline-block;font-weight:700;padding:1px 10px;border-radius:999px;margin-right:6px}
+.bx-o.fail{background:var(--bad-tint);color:var(--bad);border:1.5px solid var(--bad)}
+.bx-o.silent{background:var(--warn-tint);color:var(--ink);border:1.5px solid var(--warn)}
+.bx-o.ok{background:var(--good-tint);color:var(--good);border:1.5px solid var(--good)}
+#bx-out[data-o="fail"]{--rc:var(--bad);--rt:var(--bad-tint)}
+#bx-out[data-o="silent"]{--rc:var(--warn);--rt:var(--warn-tint)}
+#bx-out[data-o="ok"]{--rc:var(--good);--rt:var(--good-tint)}
+@media (max-width:860px){.presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.presets{grid-template-columns:1fr}}
+/* page: AOP chain */
+.duo{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.duo > *{min-width:0}
+.ac-bench{display:flex;flex-direction:column;gap:8px;padding:14px 16px;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+.ac-br{display:grid;grid-template-columns:180px minmax(0,1fr) 64px;gap:10px;align-items:center;font-size:13.5px}
+.ac-br i{display:block;height:20px;width:max(var(--w),3px);border-radius:5px;background:var(--g2-tint);border:1.5px solid var(--g2)}
+.ac-br.rn i{background:var(--rn-tint);border-color:var(--rn)}
+.ac-br b{font-family:var(--font-mono);font-size:12.5px;text-align:right}
+.ac-chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13.5px}
+.ac-chain > span{min-width:0}
+.ac-chip{display:inline-flex;gap:6px;align-items:center;border:1.5px solid var(--rc);background:var(--rt);border-radius:999px;padding:2px 10px;font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ac-chip b{font-family:var(--font-display);font-weight:400}
+.ac-chain .sep{color:var(--muted)}
+.ac-walk{margin:8px 0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:3px;font-size:14px}
+.ac-walk li{position:relative;padding-left:2.4em}
+.ac-walk li::before{position:absolute;left:0;font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.ac-walk li.in::before{content:"进 →"}
+.ac-walk li.out::before{content:"← 出"}
+.ac-walk li.mid{font-weight:700}
+.ac-walk li.mid::before{content:"  ●"}
+.ac-walk li code{color:var(--rc)}
+@media (max-width:640px){.ac-br{grid-template-columns:110px minmax(0,1fr) 56px;font-size:12.5px}}
+
+/* dispatch walker */
+.dw-scn{display:flex;flex-wrap:wrap;gap:6px}
+.dw-scn button{border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:999px;padding:4px 12px;font-size:13.5px;cursor:pointer;font-family:var(--font-body)}
+.dw-scn button[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.dw-scn button:focus-visible,.dw:focus-visible{outline:2px solid var(--pd);outline-offset:2px}
+.dw svg .g{transition:opacity .25s}
+.dw svg .g.idle{opacity:.25}
+.dw svg .g.skip{opacity:.75}
+.dw svg .g.skip rect.box{stroke-dasharray:5 4;fill:var(--card)}
+.dw svg .g.deny rect.box,.dw svg .g.thr rect.box{fill:var(--bad-tint);stroke:var(--bad)}
+.dw svg .g.cur rect.box{stroke-width:4}
+.dw svg .g .tag{font-weight:700;fill:var(--ink)}
+.dw svg .g.deny .tag,.dw svg .g.thr .tag{fill:var(--bad)}
+.dw .seq-info .sts > span:last-child:not(:has(b)){flex-basis:100%;font-weight:700}
+@media (prefers-reduced-motion: reduce){.dw svg .g{transition:none}}
+
+
+/* ---------- this page ---------- */
+.jwt{font-family:var(--font-mono);font-size:13px;line-height:1.6;padding:12px 14px;border-radius:12px;background:var(--code-bg);border:1.5px solid var(--line);overflow-wrap:anywhere}
+.jwt .h{color:var(--rn)} .jwt .p{color:var(--cg)} .jwt .s{color:var(--bk)}
+.jwt-parts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.jwt-parts > div{border:2px solid var(--rc);background:var(--rt);border-radius:12px;padding:8px 12px;font-size:13.5px;min-width:0}
+.jwt-parts code{overflow-wrap:anywhere;font-size:12px}
+.walk{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.walk li{display:grid;grid-template-columns:1.6em minmax(0,1fr);gap:8px;font-size:14px;align-items:start;padding:6px 10px;border-radius:10px;background:var(--card);border-left:4px solid var(--rc)}
+.walk li > i{font-style:normal;font-weight:700;color:var(--rc);text-align:center}
+.walk li.stop{background:var(--bad-tint)}
+.walk li.pass > i{color:var(--good)}
+.walk code{overflow-wrap:anywhere}
+.lab-out{font-family:var(--font-mono);font-size:12.5px;line-height:1.55;padding:10px 12px;border-radius:10px;background:var(--console-bg);color:var(--console-fg);overflow-x:auto;white-space:pre}
+.lab-out .r{color:#FF9C9A} .lab-out .g{color:#7EE2A8} .lab-out .w{color:var(--console-dim)}
+.statline{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:baseline;font-size:15px}
+.statline b.code{font-family:var(--font-display);font-weight:400;font-size:28px}
+.statline b.code.ok{color:var(--good)} .statline b.code.no{color:var(--bad)}
+@media (max-width:860px){.jwt-parts{grid-template-columns:1fr}}
+pre.console .hi{color:var(--console-hi)}
+.presets.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+#lb-builds{margin-bottom:8px}
+@media (max-width:860px){.presets.c3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.presets.c3{grid-template-columns:1fr}}
+
+/* page-specific: 11-stop strip (real / fake / absent / distorted) */
+.stn{display:grid;grid-template-columns:repeat(11,minmax(0,1fr));gap:4px}
+.stn .c{border:2px solid var(--line-strong);border-radius:10px;padding:6px 4px;text-align:center;background:var(--card);min-width:0;display:flex;flex-direction:column;gap:1px}
+.stn .c b{font-family:var(--font-mono);font-size:13px}
+.stn .c span{font-size:11px;line-height:1.3;color:var(--muted);overflow-wrap:anywhere}
+.stn .c[data-st="real"]{border-color:var(--bk);background:var(--bk-tint)}
+.stn .c[data-st="real"] span{color:var(--ink)}
+.stn .c[data-st="fake"]{border-color:var(--rn);border-style:dashed;background:var(--rn-tint)}
+.stn .c[data-st="part"]{border-color:var(--cg);border-style:dotted}
+.stn .c[data-st="none"]{opacity:.38}
+.stn .c[data-st="warp"]{border-color:var(--bad);background:var(--bad-tint)}
+.stn-leg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.stn-leg i{display:inline-block;width:14px;height:12px;border-radius:3px;border:2px solid var(--line-strong);vertical-align:-1px;margin-right:4px}
+.stn-leg i.real{border-color:var(--bk);background:var(--bk-tint)}
+.stn-leg i.fake{border-color:var(--rn);border-style:dashed;background:var(--rn-tint)}
+.stn-leg i.part{border-color:var(--cg);border-style:dotted}
+.stn-leg i.none{opacity:.38}
+.stn-leg i.warp{border-color:var(--bad);background:var(--bad-tint)}
+.verd{font-family:var(--font-display);font-size:22px;padding:2px 12px;border-radius:10px;border:2px solid var(--line-strong)}
+.verd[data-v="绿"]{border-color:var(--good);background:var(--good-tint);color:var(--good)}
+.verd[data-v="红"]{border-color:var(--bad);background:var(--bad-tint);color:var(--bad)}
+.verd[data-v="测不了"]{border-color:var(--neutral);background:var(--neutral-tint);color:var(--ink)}
+.presets.c5{grid-template-columns:repeat(5,minmax(0,1fr))}
+@media (max-width:720px){
+  .stn{grid-template-columns:repeat(6,minmax(0,1fr))}
+  .presets.c5{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
+.presets.c3{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:720px){.presets.c3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.qt .nd rect{transition:fill .2s,stroke-width .2s}
+.qt .nd.on rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3.5}
+.qt .nd.bad rect{fill:var(--bad-tint);stroke:var(--bad);stroke-width:3.5}
+#qw-back,#qw-backt{opacity:0;transition:opacity .2s}
+#qw-back.on,#qw-backt.on{opacity:1}
+#qw-sql{white-space:pre-wrap;margin:0}
+#qw .codebox pre{padding:10px 14px}
+/* page: explain-tuning */
+.b-of-z{fill:var(--of-tint);stroke:none}
+.g-line{stroke:var(--line);stroke-width:1;fill:none}
+.ln-pd,.ln-cg,.ln-g2{fill:none;stroke-width:2.5;stroke-linejoin:round}
+.ln-pd{stroke:var(--pd)}.ln-cg{stroke:var(--cg)}.ln-g2{stroke:var(--g2)}
+.ln-pd.dash{stroke-dasharray:6 5;stroke-width:2}
+.pt-bad{fill:var(--card);stroke:var(--bad);stroke-width:2.5}
+.dumb{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dumb > div{border:1.5px solid var(--line-strong);border-radius:14px;background:var(--card);padding:12px 16px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.dumb h4{font-size:17px;color:var(--neutral)}
+.dumb p{font-size:14px;margin:0}
+.dumb p.pain{color:var(--bad)}
+.dumb p.pain::before{content:"疼在哪 ";font-weight:700}
+.ladder{display:flex;flex-wrap:wrap;gap:6px;align-items:stretch}
+.ladder > span{flex:1 1 120px;min-width:0;border-radius:12px;padding:8px 10px;border:2px solid var(--rc);background:var(--rt);font-size:13px;display:flex;flex-direction:column;gap:2px}
+.ladder b{font-family:var(--font-mono);font-size:15px}
+.ladder small{color:var(--muted);font-size:12px}
+.cols5{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.cols5 > div{border:1.5px solid var(--line);border-radius:12px;background:var(--card);padding:10px 12px;font-size:13.5px;min-width:0}
+.cols5 b{font-family:var(--font-mono);font-size:14px;display:block;color:var(--of)}
+.bench-sql{font-family:var(--font-mono);font-size:13px;padding:10px 12px;border-radius:10px;background:var(--code-bg);border:1.5px solid var(--line);overflow-x:auto;white-space:pre}
+.bench .presets{grid-template-columns:repeat(4,minmax(0,1fr))}
+.bench .presets button code{font-size:11.5px;color:var(--muted);overflow-wrap:anywhere}
+.bench .presets button.done{border-style:dashed}
+.score{font-size:13px;color:var(--muted)}
+@media (max-width:720px){.dumb{grid-template-columns:1fr}.bench .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* ---------- race lab (this page) ---------- */
+.race-top{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between}
+.race-body{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:14px;align-items:start}
+.race-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;counter-reset:rs}
+.race-steps li{display:grid;grid-template-columns:2.2em minmax(0,1fr);gap:4px 10px;align-items:start;padding:7px 10px;border-radius:10px;border:1.5px solid var(--line);background:var(--card);font-size:14px;transition:opacity .2s}
+.race-steps li.fut{opacity:.28}
+.race-steps li.now{border-color:var(--rc);background:var(--rt)}
+.race-steps li .who{grid-row:1 / span 2;font-family:var(--font-display);font-size:18px;line-height:1.2;text-align:center;border-radius:8px;color:var(--on-accent);background:var(--rc);padding:2px 0}
+.race-steps li code{overflow-wrap:anywhere;font-size:12.5px}
+.race-steps li .say{color:var(--muted);font-size:13px}
+.race-steps li .say b{color:var(--ink)}
+.race-steps li.blk .say b{color:var(--bad)}
+.race-state{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;border:1.5px solid var(--line);background:var(--paper);font-size:14px}
+.race-state h4{font-size:16px}
+.race-state dl{margin:0;display:grid;grid-template-columns:5.4em minmax(0,1fr);gap:5px 8px}
+.race-state dt{color:var(--muted);font-size:13px}
+.race-state dd{margin:0;min-width:0;font-family:var(--font-mono);font-size:13px}
+.race-state dd.big{font-family:var(--font-display);font-size:24px;line-height:1.1}
+.race-state dd.big.bad-t{color:var(--bad)}
+.race-state dd.big.good-t{color:var(--good)}
+.chip{display:inline-block;padding:0 8px;border-radius:999px;font-size:12px;font-family:var(--font-body);border:1.5px solid var(--rc);background:var(--rt);color:var(--ink);margin:1px 2px 1px 0}
+.bad-t{color:var(--bad)} .good-t{color:var(--good)}
+@media (max-width:760px){.race-body{grid-template-columns:minmax(0,1fr)}}
+@media (prefers-reduced-motion:reduce){.race-steps li{transition:none}}
+
+/* 本页：崩溃点实验台 */
+.cp-ctl{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center}
+.cp-ctl > div{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.cp-ctl small{color:var(--muted);font-size:13px;margin-right:2px}
+.cp-list{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.cp-list button{width:100%;height:100%;text-align:left;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);border-radius:10px;padding:8px;font-size:13px;line-height:1.35;cursor:pointer;display:flex;flex-direction:column;gap:4px}
+.cp-list button b{font-family:var(--font-mono);font-size:12px;color:var(--muted)}
+.cp-list button[aria-pressed="true"]{border-color:var(--bk);background:var(--bk-tint);box-shadow:inset 0 0 0 1px var(--bk)}
+.cp-list button i{font-style:normal;font-size:11px;color:var(--bk);font-weight:700}
+.cp-list button:focus-visible,.cp-ctl button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+@media (max-width:760px){.cp-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.cp-out{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.cp-out > div{border:1.5px solid var(--line);border-radius:12px;padding:8px 12px;background:var(--card);min-width:0}
+.cp-out small{display:block;font-size:12px;color:var(--muted)}
+.cp-out b{font-size:16px}
+.cp-out .masked b{color:var(--muted);font-weight:400}
+@media (max-width:760px){.cp-out{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.cp-verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--line-strong);background:var(--neutral-tint)}
+.cp-verdict.v-ok{border-color:var(--good);background:var(--good-tint)}
+.cp-verdict.v-unknown{border-color:var(--warn);background:var(--warn-tint)}
+.cp-verdict.v-lost,.cp-verdict.v-split{border-color:var(--bad);background:var(--bad-tint)}
+.logcmp{width:100%}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>数据库</span><span aria-hidden="true">/</span><span class="tb-here">commit 返回了，数据页还是旧的</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-ink" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-mut" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bad" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-good" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-of" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-bk" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-g2" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-cg" d="M0 0L10 5L0 10z"/></marker>
+  <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="f-pd" d="M0 0L10 5L0 10z"/></marker>
+</defs></svg>
+<header class="hero">
+  <p class="kicker">MySQL 8.4 · InnoDB · WAL · redo / undo · binlog · 两阶段提交 · 崩溃恢复 · 检查点 · purge</p>
+  <h1>commit 返回了，数据页还是旧的：redo、undo、binlog 与两阶段提交</h1>
+  <p class="lead">付款提交后 120 秒，页 75 还是脏页，磁盘上的数据文件写的还是 CREATED。commit 敢返回，是因为它的承诺不落在数据页上，而落在两本<b>顺序追加、提交时刷盘</b>的日志上：InnoDB 的 <b>redo</b>，崩溃后靠它把页重做出来；server 层的 <b>binlog</b>，从库照着它改。改之前的旧值记在 <b>undo</b> 里，用来回滚和给别人读旧版本。两本日志靠<b>两阶段提交</b>对齐：重启时，处于 prepare 状态的事务，binlog 里有它的 Xid 就提交，没有就回滚。实测在提交途中 kill -9 了三次，三次都是这样落地的。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j06-update-to-disk.html#s-8">一条 UPDATE 从应用到磁盘 · 第 7、8、9、12 站</a></span><span>地图：<a href="../java/roadmap.html#j06">J06 · 日志：redo、undo、binlog 与两阶段提交</a></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：commit 返回了，页还在内存里</h2>
+    <p class="lead">在全景第 8、9 站，这一步要解决：<code>commit()</code> 3 ms 就返回了，等于承诺“之后不管出什么事，9527 都是 PAID”。可第 12 站实测，提交后 120 秒页 75 还是脏页，磁盘上的 <code>orders.ibd</code> 里写的仍是 CREATED。这时候断电，承诺靠什么兑现？同时还有两件事要办到：从库要收到同一个改动；没提交的事务改了一半，要能撤回去。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="提交后 PAID 这个值在哪里。左边是 mysqld 进程的内存，断电就没了：log buffer、这个会话的 binlog cache、buffer pool 里的页 75（脏页，status 已经是 PAID）。右边是磁盘，断电还在：redo 文件里有“页 75 改成 PAID”的记录，提交时 fsync 过；binlog 文件里有 Update_rows 事件，提交时 fsync 过；undo 表空间里存着旧值 CREATED；orders.ibd 数据文件里的页 75 还是 CREATED，提交后 120 秒仍未写回。">
+  <text class="t-b" x="200" y="26">mysqld 内存 · 断电就没了</text>
+  <text class="t-b" x="520" y="26">磁盘 · 断电还在</text>
+  <line x1="490" y1="40" x2="490" y2="292" class="e-mut" style="stroke-dasharray:6 5"/>
+  <g data-role="of"><rect class="b-of" x="16" y="128" width="150" height="72" rx="10"/><text class="t-of" x="30" y="154">应用</text><text class="t-mono" x="30" y="174">commit() 返回</text><text class="t-xs" x="30" y="192">承诺：9527 是 PAID</text></g>
+  <g data-role="bk"><rect class="b-bk" x="200" y="50" width="260" height="52" rx="10"/><text class="t-bk" x="214" y="72">log buffer</text><text class="t-s" x="214" y="92">redo 记录先放这儿</text></g>
+  <g data-role="g2"><rect class="b-g2" x="200" y="112" width="260" height="52" rx="10"/><text class="t-g2" x="214" y="134">binlog cache</text><text class="t-s" x="214" y="154">这个会话自己的，提交前攒着</text></g>
+  <g data-role="pd"><rect class="b-pd" x="200" y="174" width="260" height="110" rx="10"/><text class="t-pd" x="214" y="198">buffer pool · 页 75（脏页）</text><text class="t-mono" x="214" y="222">9527 status = PAID</text><text class="t-xs" x="214" y="244">第 8 站改的就是这一页</text><text class="t-xs" x="214" y="262">后台 page cleaner 以后再写回</text></g>
+  <g data-role="bk"><rect class="b-bk" x="520" y="50" width="424" height="52" rx="10"/><text class="t-bk" x="534" y="72">#innodb_redo · redo 文件 ✓</text><text class="t-s" x="534" y="92">“页 75 第几字节改成了什么” · 提交时已 fsync</text></g>
+  <g data-role="g2"><rect class="b-g2" x="520" y="112" width="424" height="52" rx="10"/><text class="t-g2" x="534" y="134">binlog.000002 ✓</text><text class="t-s" x="534" y="154">Update_rows：9527 改前 CREATED、改后 PAID · 提交时已 fsync</text></g>
+  <g data-role="cg"><rect class="b-cg" x="520" y="174" width="424" height="52" rx="10"/><text class="t-cg" x="534" y="196">undo_001 · undo 页</text><text class="t-s" x="534" y="216">旧值 CREATED（undo 页的改动也记在 redo 里）</text></g>
+  <rect class="b-bad" x="520" y="236" width="424" height="52" rx="10" style="stroke-dasharray:6 4"/><text class="t-bad" x="534" y="258">orders.ibd · 页 75 ✗</text><text class="t-s" x="534" y="278">还是 CREATED：提交后 120 秒仍未写回</text>
+  <path class="e-bk" d="M460 76 H514" marker-end="url(#ah-bk)"/>
+  <path class="e-g2" d="M460 138 H514" marker-end="url(#ah-g2)"/>
+  <path class="e-mut" d="M460 262 H514" style="stroke-dasharray:5 4" marker-end="url(#ah-mut)"/>
+</svg>
+  </div>
+  <figcaption class="cap">左边断电就没了，右边还在。commit 返回时，PAID 已经在 redo 和 binlog 两个文件里，偏偏不在数据文件里。重启时 InnoDB 读 redo，把页 75 重新改成 PAID。</figcaption>
+  </figure>
+  <div class="tiles">
+    <div class="tile" data-role="bk"><small>COMMIT 里等落盘</small><b>2.9～3.3 ms</b><span>全景实测：几乎全是 fsync</span></div>
+    <div class="tile" data-role="pd"><small>提交后页 75</small><b>120 s 仍脏</b><span>全景实测：检查点没动</span></div>
+    <div class="tile" data-role="bad"><small>kill -9 · binlog 写到 1/3</small><b>回滚</b><span>binlog 被截回 158 字节</span></div>
+    <div class="tile" data-role="good"><small>kill -9 · binlog 写完整</small><b>提交</b><span>应用没收到 OK，可事务在</span></div>
+  </div>
+  <p class="cap"><span class="tag-real">实测</span> 前两格来自<a href="../java/pano-j06-update-to-disk.html#s-9">全景页</a>，后两格是本页在 Docker 里的 MySQL 8.4.13 上，对一个改 30 万行的事务在 COMMIT 途中 kill -9 mysqld，重启后看到的结果。代码在 ⑤。</p>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：三种笨办法</h2>
+    <p class="lead">先不用日志，只用“改内存”和“写文件”两件事，看能不能兑现 commit 的承诺。</p>
+  </div>
+  <div class="design three">
+    <div class="way" data-role="other">
+      <h4>只改内存 <small>commit 立刻返回</small></h4>
+      <ul class="pains">
+        <li class="ok">最快，提交什么都不用写。</li>
+        <li>mysqld 一崩，内存里的 PAID 没了。用户手里有“支付成功”，库里是 CREATED。</li>
+        <li>改了一半的事务，没处找回旧值。</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>提交时把页写回 <small>force：commit 等数据页落盘</small></h4>
+      <ul class="pains">
+        <li class="ok">崩溃后数据文件就是对的。</li>
+        <li>一次付款只改了几十字节，却要随机写一整个 16 KB 的页；事务碰了 N 个页（主键、二级索引、undo）就写 N 个。</li>
+        <li>页写到一半断电，磁盘上是半新半旧的“撕裂页”，谁也修不了。</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>两个文件各写各的 <small>引擎记一本，复制记一本</small></h4>
+      <ul class="pains">
+        <li class="ok">各管各的：一本用来恢复，一本发给从库。</li>
+        <li>崩在两次写之间：主库有、从库没有，或者反过来。</li>
+        <li>拿 binlog 做按时间点恢复，恢复出来的库和崩溃前对不上。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="tip"><b>缺的那一块：</b>提交时只写<b>小的、顺序追加的</b>日志并刷盘，页以后慢慢写（这叫 WAL：先写日志）；改之前把旧值留一份；两本日志要用同一个“这个事务算不算数”的判定。这三件事，就是 redo、undo 和两阶段提交。一次付款实测只写了约 550 字节 redo（UPDATE 232～264 字节，COMMIT 291～317 字节），是一个页的 1/30，而且是接着上一条往后写。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：别的系统怎么让“提交了就不丢”</h2>
+    <p class="lead">都要回答同一个问题：提交那一刻，什么东西必须已经在磁盘上。</p>
+  </div>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>做法</th><th>谁在用</th><th>提交时刷盘的是</th><th>代价</th></tr></thead>
+    <tbody>
+      <tr><th>回滚日志 + 提交时写回数据页</th><td>SQLite 默认的 rollback journal 模式</td><td>数据文件本身（旧页先抄进 journal）</td><td>每次提交随机写整页；适合单机、写少</td></tr>
+      <tr class="hl"><th>WAL：日志先刷盘，页以后写</th><td>InnoDB 的 redo，PostgreSQL 的 WAL，SQLite 的 WAL 模式</td><td>一小段日志，顺序追加</td><td>崩溃后要重放日志；日志空间要等页写回才能复用（检查点）</td></tr>
+      <tr><th>日志本身就是数据</th><td>Kafka 的分区日志，Redis 的 AOF</td><td>追加的那条记录（Redis 由 <code>appendfsync</code> 决定刷不刷）</td><td>读要另建索引或全量放内存；要定期压缩、重写</td></tr>
+      <tr><th>一本 WAL 同时管恢复和复制</th><td>PostgreSQL（流复制直接发 WAL）</td><td>只有一本</td><td>从库要和主库同一个大版本、同一种物理布局</td></tr>
+      <tr class="hl"><th>两本日志 + 两阶段提交</th><td>MySQL：InnoDB 的 redo 管恢复，server 层的 binlog 管复制</td><td>redo 的 prepare 记录和 binlog，各刷一次</td><td>每次提交至少两次 fsync，靠组提交摊薄（⑥ 深 1）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tip"><b>选择规则：</b>写多、要高并发的 OLTP 库几乎都走 WAL。MySQL 多出一本 binlog，是因为它的复制和按时间点恢复建在 server 层，要和存储引擎无关（④-5 讲为什么）。本页学 MySQL 这一套：redo、undo、binlog，以及把 redo 和 binlog 对齐的两阶段提交。对照：<a href="../kafka/kafka-storage-zerocopy.html">Kafka 存储与零拷贝</a>里讲过“顺序追加 + 交给操作系统”的同一个道理。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：三本账，一个提交</h2>
+    <p class="lead">先看 redo 怎么让“页以后再写”变得安全，再看 undo 留下的旧值干什么用，然后是 server 层的 binlog，最后是把 redo 和 binlog 对齐的两阶段提交，以及崩溃后怎么对账。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>页和 buffer pool</b>：InnoDB 按 16 KB 的页读写数据，修改都在内存的 buffer pool 里做，改过、还没写回磁盘的页叫脏页。见<a href="mysql-index-bplustree.html">索引与 B+ 树</a>。</li>
+      <li><b>write 和 fsync</b>：<code>write()</code> 只把数据交给操作系统的 page cache，mysqld 崩了它还在，整机断电就没了；<code>fsync()</code> 返回才算真落到磁盘。fsync 慢，所以要少做、成批做。</li>
+      <li><b>版本链</b>：每行带着最后改它的事务 ID 和一个指向旧版本的指针。见<a href="mysql-mvcc-lock.html">事务、MVCC 与锁</a>。</li>
+      <li><b>LSN</b>（log sequence number）：redo 写到第几个字节，只增不减，全库所有事务共用一条。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-redo">④-1 redo：先写日志，页以后再说</h3>
+  <p>UPDATE 改页 75 的同时，生成一条 redo 记录：“页 75 的这个位置改成了这些字节”。它先进 log buffer，提交时写进 redo 文件并 fsync。页 75 本身留在内存，由后台的 page cleaner 找时间写回 <code>orders.ibd</code>。崩溃后，InnoDB 从<b>检查点</b>开始把 redo 重放一遍，内存里丢掉的修改就回来了。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 268" role="img" aria-label="redo 文件是一圈固定大小的空间，8.4 默认 100 MB，写到尾回到头。条上从左到右：已经可以覆盖的部分，它们对应的脏页已写回；检查点 Last checkpoint at；检查点和写入位置之间是 checkpoint age，这段 redo 对应的脏页还没写回，不能覆盖；写入位置 Log sequence number；右边是空的。下面一条刻度：checkpoint age 占容量约 88% 时刷脏页开始加速，约 94% 最快，约 97% 开始激进地推检查点，再往上用户线程写 redo 前要等。">
+  <text class="t-b" x="40" y="24">redo 文件：一圈固定大小（8.4 默认 100 MB，放在 #innodb_redo，约 32 个文件），写到尾回到头</text>
+  <rect x="40" y="60" width="180" height="44" rx="6" class="b-card"/><text class="t-xs" x="52" y="86">可以覆盖：对应的脏页已写回</text>
+  <rect x="220" y="60" width="400" height="44" class="b-bk"/><text class="t-bk" x="236" y="80">checkpoint age</text><text class="t-s" x="236" y="97">这段 redo 对应的脏页还没写回，不能覆盖</text>
+  <rect x="620" y="60" width="300" height="44" rx="6" class="b-card" style="stroke-dasharray:5 4"/><text class="t-xs" x="636" y="86">空的，新 redo 往这里写</text>
+  <path class="e-ink" d="M220 52 V112"/><text class="t-mono" x="220" y="46" text-anchor="middle">Last checkpoint at</text>
+  <path class="e-bk" d="M620 52 V112" style="stroke-width:3"/><text class="t-mono" x="620" y="46" text-anchor="middle">Log sequence number</text>
+  <path class="e-mut" d="M920 112 C 920 140, 40 140, 40 112" marker-end="url(#ah-mut)"/><text class="t-xs" x="480" y="146" text-anchor="middle">写到尾，回到开头接着写</text>
+  <text class="t-s" x="40" y="182">page cleaner 把脏页写回 .ibd → 检查点往右走 → 左边空出来；写入太快，LSN 追上检查点，就只能停下来等</text>
+  <rect x="40" y="200" width="880" height="12" rx="6" class="b-card"/>
+  <rect x="814" y="200" width="54" height="12" class="f-warn"/>
+  <rect x="868" y="200" width="27" height="12" class="f-bad"/>
+  <rect x="895" y="200" width="25" height="12" class="f-bad" style="opacity:.6"/>
+  <text class="t-xs" x="40" y="230">0</text>
+  <text class="t-xs" x="814" y="230" text-anchor="end">约 88% 刷脏加速</text>
+  <text class="t-xs" x="868" y="246" text-anchor="end">约 94% 最快</text>
+  <text class="t-xs" x="920" y="262" text-anchor="end">约 97% 激进推检查点</text>
+  <text class="t-xs" x="40" y="246">checkpoint age 占可用容量的比例</text>
+</svg>
+  </div>
+  <figcaption class="cap">刻度里的比例来自 8.4 源码常量（<code>log0constants.h</code>、<code>log0files_capacity.cc</code>），基数是扣掉余量后的“软容量”，所以实际触发得比按 <code>innodb_redo_log_capacity</code> 算的还早一点。⑥ 坑 2 把容量调到 8 MB，看它怎么被逼着刷页。</figcaption>
+  </figure>
+  <p>两个容易漏的点。第一，<b>LSN 是全库共用的</b>：别的事务、后台的 purge 写的 redo 都往同一条上加，所以⑤里同一条 UPDATE，有一次量出来是 232 字节，另一次混进了后台的写入，量出来 964 字节。第二，<b>redo 记的是页上的修改，不分是数据页还是 undo 页</b>，所以 undo 也受 redo 保护，这一点 ④-2 马上用到。</p>
+
+  <h3 id="m-undo">④-2 undo：旧值留一份，管回滚，也管别人读旧版本</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="undo 版本链。页 75 里的 9527 是最新版本，status 为 PAID，记着改它的事务 T2 和回滚指针，指向 undo 里 T2 改之前的旧值 CREATED，再指向更早的版本。旧值有三个用处：T2 回滚时照着它把行改回去，这一步本身也写 redo；快照比 T2 早的读者沿指针往回找，实测往回 2 万步要 14 毫秒；最老的快照也用不到它时，purge 线程把它删掉，History list length 就是还在等 purge 的数量。">
+  <g data-role="pd"><rect class="b-pd" x="16" y="30" width="270" height="86" rx="10"/><text class="t-pd" x="30" y="54">页 75 里的 9527（最新）</text><text class="t-mono" x="30" y="76">status=PAID qty=2</text><text class="t-monos" x="30" y="98">DB_TRX_ID=T2  DB_ROLL_PTR</text></g>
+  <g data-role="cg"><rect class="b-cg" x="346" y="30" width="270" height="86" rx="10"/><text class="t-cg" x="360" y="54">undo：T2 改之前</text><text class="t-mono" x="360" y="76">status=CREATED paid_at=NULL</text><text class="t-monos" x="360" y="98">DB_TRX_ID=T1  roll_ptr</text></g>
+  <g data-role="cg"><rect class="b-cg" x="676" y="30" width="268" height="86" rx="10" style="stroke-dasharray:6 4"/><text class="t-cg" x="690" y="54">更早的版本 …</text><text class="t-xs" x="690" y="76">每改一次多一节</text><text class="t-xs" x="690" y="98">实测改 2 万次 = 链长 2 万</text></g>
+  <path class="e-cg" d="M286 92 H340" marker-end="url(#ah-cg)"/>
+  <path class="e-cg" d="M616 92 H670" marker-end="url(#ah-cg)"/>
+  <g data-role="cg">
+  <rect class="b-card" x="16" y="160" width="296" height="124" rx="10"/><text class="t-b" x="30" y="184">用处 1 · 回滚</text><text class="t-s" x="30" y="206">T2 ROLLBACK：照着 undo 把行改回去</text><text class="t-s" x="30" y="226">改回去也是改页，也写 redo</text><text class="t-xs" x="30" y="248">实测 ROLLBACK 写了 296 字节 redo，</text><text class="t-xs" x="30" y="266">binlog 一个字节没写</text>
+  <rect class="b-card" x="332" y="160" width="296" height="124" rx="10"/><text class="t-b" x="346" y="184">用处 2 · 读旧版本（MVCC）</text><text class="t-s" x="346" y="206">快照比 T2 早的读者，沿指针往回找</text><text class="t-s" x="346" y="226">找到自己该看的那一版</text><text class="t-xs" x="346" y="248">实测：往回 2 万步 13.7～15.2 ms，</text><text class="t-xs" x="346" y="266">新连接读最新版 0.4～1.0 ms</text>
+  <rect class="b-card" x="648" y="160" width="296" height="124" rx="10"/><text class="t-b" x="662" y="184">什么时候删 · purge</text><text class="t-s" x="662" y="206">最老的快照也用不到它了</text><text class="t-s" x="662" y="226">后台 purge 线程才删</text><text class="t-xs" x="662" y="248">History list length = 还在等 purge 的</text><text class="t-xs" x="662" y="266">提交后的 undo 数（实测涨到 20000）</text>
+  </g>
+  <path class="e-mut" d="M164 116 V156" marker-end="url(#ah-mut)"/><path class="e-mut" d="M480 116 V156" marker-end="url(#ah-mut)"/><path class="e-mut" d="M810 116 V156" marker-end="url(#ah-mut)"/>
+</svg>
+  </div>
+  <figcaption class="cap">undo 记的是<b>行的旧值</b>（逻辑上的），redo 记的是<b>页上的字节</b>（物理上的）。undo 存在 undo 表空间（8.4 默认 <code>undo_001</code>、<code>undo_002</code>）的页里，这些页的修改同样写 redo。所以崩溃恢复是两步：先重放 redo，把数据页和 undo 页都恢复到崩溃那一刻；再用 undo 把没提交的事务撤掉。</figcaption>
+  </figure>
+
+  <h3 id="m-binlog">④-3 binlog：server 层的账，给从库和“按时间点恢复”</h3>
+  <p>MySQL 分两层：server 层负责连接、解析、优化、复制；存储引擎（InnoDB）负责存数据。binlog 在 server 层，记的是“哪张表、哪一行、改前改后各是什么”（ROW 格式，8.4 默认），跟引擎无关。事务执行时，事件先攒在这个会话自己的 <b>binlog cache</b> 里（默认 32 KB，超了溢出到临时文件），提交时一次性写进 binlog 文件，所以一个事务的事件在 binlog 里连成一段，不和别的事务交错。从库拿到的、按时间点恢复重放的，都是这一段。</p>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th></th><th>redo</th><th>undo</th><th>binlog</th></tr></thead>
+    <tbody>
+      <tr><th>谁写</th><td>InnoDB</td><td>InnoDB</td><td>server 层，哪个引擎都一样</td></tr>
+      <tr><th>记什么</th><td>页上的字节改动（物理）</td><td>行的旧值（逻辑）</td><td>行改前、改后（ROW），或 SQL 原文（STATEMENT）</td></tr>
+      <tr><th>什么时候写</th><td>执行中不断进 log buffer，提交时刷盘</td><td>改每一行之前</td><td>执行中进 binlog cache，<b>提交时</b>才写进文件</td></tr>
+      <tr><th>给谁用</th><td>崩溃恢复</td><td>回滚、MVCC、崩溃后撤销未提交事务</td><td>从库复制、按时间点恢复、CDC（Canal、Debezium）</td></tr>
+      <tr><th>怎么回收</th><td>循环覆盖：检查点之前的可以复用</td><td>purge：没人需要了就删</td><td>按文件过期，8.4 默认 30 天（<code>binlog_expire_logs_seconds</code>）</td></tr>
+      <tr><th>付款这一单</th><td>UPDATE 232～264 字节 + COMMIT 291～317 字节</td><td>一条旧版本：CREATED、NULL</td><td>5 个事件 465 字节</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3 id="m-2pc">④-4 两阶段提交：两本账，一个判定</h3>
+  <p>redo 和 binlog 是两个文件，没法一次 fsync 同时写好。MySQL 的办法是让 InnoDB 先“预提交”，再把 binlog 写好，最后才正式提交，并且规定：<b>一个事务算不算数，看 binlog 里有没有它完整的 Xid 事件</b>。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="两阶段提交的时间线。三条泳道：应用、InnoDB redo、binlog。应用调 commit。第 1 步 InnoDB 写 prepare 记录，带上 Xid。第 2 步把这一组事务的 redo 刷盘。第 3 步把 binlog cache 里的事件写进 binlog 文件。第 4 步 binlog fsync。这里是分界线：binlog 里有了完整的 Xid。第 5 步 InnoDB 写 commit 记录、放锁。第 6 步应用收到 OK。分界线左边崩溃，重启后回滚；右边崩溃，重启后提交。实测三次 kill：UPDATE 后没提交时 kill，回滚；binlog 写到三分之一时 kill，回滚；binlog 写完整时 kill，提交。">
+  <rect x="96" y="40" width="530" height="232" style="fill:var(--bad-tint);opacity:.6"/>
+  <rect x="626" y="40" width="318" height="232" style="fill:var(--good-tint);opacity:.75"/>
+  <text class="t-bad" x="106" y="58">崩在这里 → 重启后回滚（CREATED）</text>
+  <text class="t-good" x="636" y="58">崩在这里 → 重启后提交（PAID）</text>
+  <text class="t-of" x="16" y="100">应用</text>
+  <text class="t-bk" x="16" y="166">InnoDB</text><text class="t-bk" x="16" y="182">redo</text>
+  <text class="t-g2" x="16" y="244">binlog</text>
+  <line x1="96" y1="95" x2="944" y2="95" class="e-mut" style="stroke-width:1"/>
+  <line x1="96" y1="170" x2="944" y2="170" class="e-mut" style="stroke-width:1"/>
+  <line x1="96" y1="240" x2="944" y2="240" class="e-mut" style="stroke-width:1"/>
+  <g data-role="of"><rect class="b-of" x="104" y="74" width="92" height="40" rx="8"/><text class="t-mono" x="150" y="99" text-anchor="middle">commit()</text></g>
+  <g data-role="bk"><rect class="b-bk" x="210" y="146" width="150" height="48" rx="8"/><text class="t-bk" x="222" y="166">1 prepare 记录</text><text class="t-xs" x="222" y="184">带上 Xid，事务进入 prepare</text>
+  <rect class="b-bk" x="370" y="146" width="120" height="48" rx="8"/><text class="t-bk" x="382" y="166">2 刷 redo</text><text class="t-xs" x="382" y="184">一组事务一起 fsync</text></g>
+  <g data-role="g2"><rect class="b-g2" x="404" y="216" width="132" height="48" rx="8"/><text class="t-g2" x="416" y="236">3 写 binlog</text><text class="t-xs" x="416" y="254">cache → 文件，write</text>
+  <rect class="b-g2" x="544" y="216" width="76" height="48" rx="8"/><text class="t-g2" x="554" y="236">4 fsync</text><text class="t-xs" x="554" y="254">Xid 落盘</text></g>
+  <g data-role="bk"><rect class="b-bk" x="640" y="146" width="160" height="48" rx="8"/><text class="t-bk" x="652" y="166">5 commit 记录</text><text class="t-xs" x="652" y="184">放锁，也刷 redo</text></g>
+  <g data-role="of"><rect class="b-of" x="820" y="74" width="118" height="40" rx="8"/><text class="t-of" x="832" y="99">6 收到 OK</text></g>
+  <path class="e-ink" d="M626 34 V280" style="stroke-width:2.5"/>
+  <text class="t-b" x="626" y="26" text-anchor="middle">分界线：binlog 里有了完整的 Xid</text>
+  <g>
+    <path class="e-badd" d="M180 120 V300"/><text class="t-bad" x="180" y="316" text-anchor="middle">kill 0 · 未提交</text>
+    <path class="e-badd" d="M470 268 V300"/><text class="t-bad" x="470" y="316" text-anchor="middle">kill A · binlog 1/3</text>
+    <path class="e-ink" d="M626 280 V300" style="stroke:var(--good);stroke-dasharray:5 4"/><text class="t-good" x="700" y="316" text-anchor="middle">kill B · binlog 写完整</text>
+  </g>
+</svg>
+  </div>
+  <figcaption class="cap"><span class="tag-real">实测</span> 底下三条虚线是本页三次 kill -9 的位置，结果分别是回滚、回滚、提交。分界线画在 fsync 之后，是按<b>整机断电</b>算的；只是 mysqld 进程崩溃时，binlog 只要 <code>write()</code> 完就已经在操作系统手里，分界线提前到第 3 步结束（kill B 正好落在这里）。第 2 步“一组一起刷”、第 5 步的刷盘按 8.4 源码 <code>MYSQL_BIN_LOG::ordered_commit</code>、<code>innobase_flush_logs</code>、<code>trx_commit_complete_for_mysql</code>。</figcaption>
+  </figure>
+  <p>重启时的对账，按事务在 redo 里的状态分三种：</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 236" role="img" aria-label="崩溃恢复的判断。先从检查点开始重放 redo，把数据页和 undo 页恢复到崩溃那一刻。然后看每个事务的状态：活跃，没有 prepare 记录，用 undo 回滚，实测 kill 0 回滚了 30 万行，在后台进行；prepare 状态，去 binlog 里找它的 Xid：找到了就提交，实测 kill B；找不到就回滚，并把 binlog 末尾那半截截掉，实测 kill A，binlog 从 16023552 字节截回 158 字节；已提交的事务什么都不用做。">
+  <g data-role="bk"><rect class="b-bk" x="16" y="88" width="190" height="64" rx="10"/><text class="t-bk" x="30" y="114">重放 redo</text><text class="t-xs" x="30" y="136">从检查点到末尾，页和 undo 页都回来</text></g>
+  <path class="e-ink" d="M206 120 H250" marker-end="url(#ah-ink)"/>
+  <rect class="b-card" x="256" y="88" width="130" height="64" rx="10"/><text class="t-b" x="270" y="114">事务在 redo</text><text class="t-b" x="270" y="134">里是什么状态？</text>
+  <path class="e-ink" d="M386 104 L430 40" marker-end="url(#ah-ink)"/><text class="t-xs" x="372" y="62">活跃</text>
+  <path class="e-ink" d="M386 120 H430" marker-end="url(#ah-ink)"/><text class="t-xs" x="392" y="114">prepare</text>
+  <path class="e-ink" d="M386 136 L430 200" marker-end="url(#ah-ink)"/><text class="t-xs" x="372" y="190">已提交</text>
+  <g data-role="cg"><rect class="b-cg" x="436" y="14" width="508" height="52" rx="10"/><text class="t-cg" x="450" y="36">用 undo 回滚</text><text class="t-xs" x="450" y="56">kill 0：“Rolling back trx …, 300000 rows to undo”，后台进行</text></g>
+  <g data-role="g2"><rect class="b-g2" x="436" y="94" width="150" height="52" rx="10"/><text class="t-g2" x="450" y="116">binlog 里有</text><text class="t-g2" x="450" y="134">它的 Xid 吗？</text></g>
+  <path class="e-good" d="M586 108 H630" marker-end="url(#ah-good)"/><text class="t-good" x="596" y="100">有</text>
+  <path class="e-bad" d="M586 132 H630" marker-end="url(#ah-bad)"/><text class="t-bad" x="596" y="150">没有</text>
+  <rect class="b-good" x="636" y="82" width="308" height="36" rx="8"/><text class="t-good" x="648" y="105">提交（kill B：Successfully committed）</text>
+  <rect class="b-bad" x="636" y="124" width="308" height="36" rx="8"/><text class="t-bad" x="648" y="147">回滚，截掉 binlog 尾巴（kill A）</text>
+  <rect class="b-card" x="436" y="176" width="508" height="40" rx="10"/><text class="t-s" x="450" y="201">不用做什么：redo 重放完它就是对的</text>
+</svg>
+  </div>
+  <figcaption class="cap"><span class="tag-real">实测</span> 引号里是错误日志原文（要把 <code>log_error_verbosity</code> 调到 3 才看得见，默认 2 只打警告以上）。kill A 那次还有一行：<code>Crashed binlog file ./binlog.000006 size is 16023552, but recovered up to 158. Binlog trimmed to 158 bytes.</code></figcaption>
+  </figure>
+
+  <div class="lab" id="crash" data-role="bk" tabindex="0" aria-label="崩溃点实验台">
+    <div class="lab-h"><b>实验台：在哪一刻崩溃</b></div>
+    <div class="cp-ctl">
+      <div class="seg-mode" role="group" aria-label="怎么崩"><small>怎么崩</small>
+        <button type="button" data-how="mysqld" aria-pressed="true">mysqld 进程崩溃</button>
+        <button type="button" data-how="power" aria-pressed="false">整机断电</button>
+      </div>
+      <div class="seg-mode" role="group" aria-label="参数"><small>参数</small>
+        <button type="button" data-cfg="strict" aria-pressed="true">双 1（默认）</button>
+        <button type="button" data-cfg="loose" aria-pressed="false">2 和 0</button>
+      </div>
+    </div>
+    <ol class="cp-list" id="cp-list"></ol>
+    <div class="guess" id="cp-guess">
+      <p>先猜：在这一刻崩，重启后主库的 9527 是？</p>
+      <div class="opts"><button type="button" data-g="PAID">PAID</button><button type="button" data-g="CREATED">CREATED</button><button type="button" data-g="skip">不猜了，直接看</button></div>
+    </div>
+    <div class="cp-out" id="cp-out" aria-live="polite">
+      <div><small>重启后主库 9527</small><b id="o-primary">?</b></div>
+      <div><small>binlog 里有它吗（从库会收到吗）</small><b id="o-binlog">?</b></div>
+      <div><small>应用收到 OK 了吗</small><b id="o-ok">?</b></div>
+      <div><small>重启时怎么判断的</small><b id="o-how" style="font-size:13.5px;font-weight:500">?</b></div>
+    </div>
+    <p class="cp-verdict" id="cp-verdict">选一个时刻，先猜结果。</p>
+  </div>
+  <p class="cap">实验台按上面两张图的规则推演。“2 和 0”指 <code>innodb_flush_log_at_trx_commit=2</code>、<code>sync_binlog=0</code>：提交时只 <code>write()</code> 不 fsync，整机断电按最坏情况算（最近约 1 秒的 redo 和 binlog 都没落盘）。标“实测”的三个时刻，结果和本机 kill -9 一致。</p>
+
+  <h3 id="m-why">④-5 为什么这样设计：两本日志，而不是一本</h3>
+  <p>PostgreSQL 只有一本 WAL，恢复和复制都用它，根本不需要两阶段提交。MySQL 多付一次 fsync，是被它的分层逼出来的。</p>
+  <div class="design">
+    <div class="way" data-role="bk">
+      <h4>MySQL：redo + binlog <small>两本，两阶段提交对齐</small></h4>
+      <ul class="pains">
+        <li class="ok">binlog 在 server 层，和引擎无关：从库可以换引擎、换页大小、换版本，照样回放“哪一行改成什么”。Canal、Debezium 这类 CDC 直接读它。</li>
+        <li class="ok">redo 贴着页写，恢复时按页重放，快，而且和 SQL 怎么写无关。</li>
+        <li>代价：每次提交 redo 和 binlog 各要落盘，中间还要有 prepare 这一步；两本日志的格式、保留期、配置都得分别管。</li>
+      </ul>
+    </div>
+    <div class="way" data-role="other">
+      <h4>PostgreSQL：一本 WAL <small>放弃的另一种</small></h4>
+      <ul class="pains">
+        <li class="ok">一次 fsync，没有两本账对不上的问题。</li>
+        <li>WAL 是物理的：流复制要求从库同一个大版本、同样的物理布局；要拿“哪一行改成什么”，得另开逻辑解码（logical decoding）。</li>
+        <li>PG 10 起的逻辑复制，也是从这同一本 WAL 里解码出来的：一本日志，两种读法。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="tip"><b>决定胜负的约束：</b>MySQL 的 server 层从一开始就要挂多种存储引擎（MyISAM 没有事务、没有 redo），复制只能建在 server 层的 binlog 上；InnoDB 是作为其中一种引擎接进来的，自带 redo。两本日志的用途不同、格式不同，却必须对“这个事务算不算数”说同一句话，两阶段提交就是这句话。所以 redo 管“页能不能恢复”，binlog 管“事务在不在”。</p>
+
+  <h3>最少的写法</h3>
+  <div class="codebox" data-role="bk">
+    <div class="code-bar"><b>查一台库的三本账</b><span>MySQL 8.4；8.0 里 <code>SHOW BINARY LOG STATUS</code> 写作 <code>SHOW MASTER STATUS</code></span></div>
+<pre><code>SELECT @@innodb_flush_log_at_trx_commit, @@sync_binlog;   -- 1, 1：双 1，默认
+SELECT @@innodb_redo_log_capacity, @@binlog_format;       -- 104857600, ROW
+SHOW ENGINE INNODB STATUS\G   -- LOG 段：Log sequence number / Last checkpoint at
+                              -- TRANSACTIONS 段：History list length
+SHOW BINARY LOG STATUS;       -- 当前 binlog 文件和位置
+SHOW BINLOG EVENTS IN 'binlog.000005' FROM 614;   -- 一个事务的 5 个事件
+SELECT trx_id, trx_started, trx_rows_modified
+  FROM information_schema.innodb_trx ORDER BY trx_started;   -- 谁开着没提交</code></pre>
+  </div>
+  <p class="cap">放到 ⑥ 的细节：双 1 改不改、redo 容量多大、长事务和大事务、组提交、doublewrite、版本差异。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：一条付款在三本账上留下什么</h2>
+    <p class="lead">还是全景那张 100 万行的 <code>orders</code>。先对 9527 做一次付款 UPDATE，每一步都看 redo 的 LSN、binlog 的位置、未提交事务；第一次 ROLLBACK，第二次 COMMIT。然后换一个改 30 万行的大事务，在提交途中 kill -9 三次。</p>
+  </div>
+  <div class="codebox" data-role="bk">
+    <div class="code-bar"><b>怎么跑</b><span>需要 Docker（拉 <code>mysql:8.4</code>）、JDK 8+、Maven；crash 段要 sudo 去杀宿主机上的 mysqld 进程</span></div>
+<pre><code>git clone https://github.com/archeu/study-labs && cd study-labs/java/database/mysql-redo-undo-binlog
+DOCKER="sudo docker" ./run.sh     # 起容器 → 灌 100 万行 → see purge redo → crash
+./run.sh crash                    # 容器留着，只重跑三次 kill
+./run.sh clean                    # 删容器和数据卷</code></pre>
+  </div>
+  <div class="codebox" data-role="bk">
+    <div class="code-bar"><b>核心：一次付款，看三本账</b><span><code>LogLab.see()</code> 节选</span></div>
+<pre><code>long[] l0 = logState(obs);                 // SHOW ENGINE INNODB STATUS：LSN、检查点、History list length
+String[] b0 = binlogPos(obs);              // SHOW BINARY LOG STATUS：文件和位置
+a.setAutoCommit(false);
+int rows = upd(a, "UPDATE orders SET status='PAID', paid_at=NOW(6) WHERE id=9527 AND status='CREATED'");
+long[] l1 = logState(obs);  String[] b1 = binlogPos(obs);
+String undoRows = one(obs, "SELECT trx_rows_modified FROM information_schema.innodb_trx");
+String seen = one(other, "SELECT status FROM orders WHERE id=9527");   // 另一个连接：读旧版本
+if ("COMMIT".equals(end)) a.commit(); else a.rollback();
+// 再看一次 LSN 和 binlog；COMMIT 的话把这段 binlog 事件列出来
+SHOW BINLOG EVENTS IN '<b1 文件>' FROM <b1 位置></code></pre>
+  </div>
+  <p><a href="https://github.com/archeu/study-labs/tree/main/java/database/mysql-redo-undo-binlog">完整代码 →</a></p>
+<pre class="console"><span class="w">[see] 付款 UPDATE，最后 ROLLBACK</span>
+  UPDATE 改了 1 行 | redo LSN +964 字节 | binlog binlog.000005:614 → binlog.000005:614 | 未提交事务改了 1 行（旧值在 undo）| 另一个连接读到 CREATED
+  ROLLBACK 用时 4.01 ms | redo LSN 再 <b>+296 字节</b> | binlog binlog.000005:614 → binlog.000005:614（<b>+0 字节</b>）| 现在 9527 = CREATED
+<span class="w">[see] 付款 UPDATE，最后 COMMIT</span>
+  UPDATE 改了 1 行 | redo LSN <b>+232 字节</b> | binlog binlog.000005:614 → binlog.000005:614 | 未提交事务改了 1 行（旧值在 undo）| 另一个连接读到 CREATED
+  COMMIT 用时 6.29 ms | redo LSN 再 +317 字节 | binlog binlog.000005:614 → binlog.000005:1079（<b>+465 字节</b>）| 现在 9527 = PAID
+    binlog 事件 Anonymous_Gtid   79 字节  SET @@SESSION.GTID_NEXT= 'ANONYMOUS'
+    binlog 事件 Query            97 字节  BEGIN
+    binlog 事件 Table_map        73 字节  table_id: 85 (trade.orders)
+    binlog 事件 Update_rows     185 字节  table_id: 85 flags: STMT_END_F
+    binlog 事件 Xid              31 字节  COMMIT /* xid=40 */</pre>
+  <p class="cap"><span class="tag-real">实测</span> 跑了两遍：UPDATE 的 redo 232～264 字节（第一遍里混进了后台 purge 的写入，量到 932～964），COMMIT 再加 291～317 字节；ROLLBACK 2.6～4.0 ms，加 296 字节 redo、0 字节 binlog。全景页量到的 binlog 是 423 字节，差在 Update_rows：这张表的 <code>order_no</code> 填了值，改前、改后两份整行都更长。</p>
+  <p>读法：UPDATE 之后 redo 已经在涨，<b>binlog 一动不动</b>（还在 binlog cache 里）；另一个连接读到 CREATED，是沿 undo 找到的旧版本。ROLLBACK 之后 binlog 还是没动：<b>回滚的事务不进 binlog</b>，从库根本不知道它存在过。只有 COMMIT 才把 5 个事件一次写进去。</p>
+
+  <div class="codebox" data-role="bk">
+    <div class="code-bar"><b>再看崩溃：提交途中 kill -9</b><span><code>crash.sh</code> 节选：在宿主机上盯着容器里的 binlog 文件长度，到点就杀</span></div>
+<pre><code>BIG="UPDATE orders SET qty = qty + 1 WHERE id &lt;= 300000"     # 30 万行，binlog 46 MB
+q "SET PERSIST log_error_verbosity = 3"                         # 恢复过程的消息是 Note 级
+docker exec -d $C mysql … -e "$BIG"                             # 自动提交，后台跑
+sudo bash -c "F=/proc/$P/root/var/lib/mysql/$f
+  while s=\$(stat -c %s \$F) &amp;&amp; [ \$s -lt $target ]; do :; done
+  kill -9 $P"                                                     # target：写到 1/3，或者刚写完整
+docker start $C                                                   # 重启，读错误日志，查 9527 的 qty</code></pre>
+  </div>
+<pre class="console"><span class="w">[crash] 先正常跑一遍：30 万行 COMMIT 用时 2376 ms，binlog +45995392 字节</span>
+<span class="w">[crash 0] UPDATE 做完、没 COMMIT 就 kill -9</span>
+  [InnoDB] Starting crash recovery.
+  [InnoDB] 1 transaction(s) which must be rolled back or cleaned up in total 300000 row operations to undo
+  [InnoDB] <b>Rolling back trx with id 43786, 300000 rows to undo</b>
+  9527 的 qty：kill 前 9 → 重启后 <b>9</b>
+<span class="w">[crash A] COMMIT 途中，binlog 写到三分之一就 kill -9（kill 时 binlog 15695872 字节）</span>
+  [InnoDB] Transaction 44301 was in the XA prepared state.
+  [Server] Found 1 prepared transaction(s) in InnoDB
+  [Server] Crash recovery finished in InnoDB engine. <span class="r">Successfully rolled back 1 internal transaction(s).</span>
+  [Server] Crashed binlog file ./binlog.000006 size is 16023552, but recovered up to 158. <b>Binlog trimmed to 158 bytes.</b>
+  9527 的 qty：kill 前 9 → 重启后 <b>9</b>
+<span class="w">[crash B] COMMIT 途中，binlog 刚写完整就 kill -9（kill 时 binlog 45995550 字节）</span>
+  [InnoDB] Transaction 44814 was in the XA prepared state.
+  [Server] Found 1 prepared transaction(s) in InnoDB
+  [Server] Crash recovery finished in InnoDB engine. <b>Successfully committed 1 internal transaction(s).</b>
+  9527 的 qty：kill 前 9 → 重启后 <b>10</b>；binlog 最后一个事件：Xid  COMMIT /* xid=32 */</pre>
+  <p class="cap"><span class="tag-real">实测</span> 本机 2 核 ARM，JDK 17.0.21，Connector/J 9.7.0，Docker 里 MySQL 8.4.13（buffer pool 512 MB，双 1 默认）。crash 段跑了两遍，结果相同；第一遍没开 <code>log_error_verbosity=3</code>，只看到结果没看到这些日志。kill 是对 mysqld 进程，不是整机断电：已经 <code>write()</code> 进操作系统的数据还在。</p>
+  <p class="tip"><b>到这里已经能交差了：</b>能说清 commit 返回时数据在哪、断电丢不丢、从库为什么不会多一条或少一条，也会用这几条命令查一台库的日志配置和状态。<b>已知还没处理的细节：</b>为了快改双 1（<a href="#p-flush">坑 1</a>）；redo 容量太小（<a href="#p-cap">坑 2</a>）；长事务让 undo 堆积（<a href="#p-hll">坑 3</a>）；大事务（<a href="#p-big">坑 4</a>）；应用没收到 OK 时怎么办（<a href="#p-unknown">坑 5</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：双 1、容量、长事务、大事务</h2>
+    <p class="lead">第一圈的坑都能从 ④ 推出来，旁边的标记点回去。标“实测”的在本机跑过。</p>
+  </div>
+
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-flush"><b><em>坑 1</em>为了快，把双 1 改成 2 和 0<a class="root" href="#m-2pc">← ④-4 承诺落在刷过盘的日志上</a><span class="seen">全景实测</span></b>
+      <dl><dt>现象</dt><dd>压测时提交太慢，改成 <code>innodb_flush_log_at_trx_commit=2</code>、<code>sync_binlog=0</code>，全景实测 300 次自动提交 p50 从 4.19 ms 降到 1.20 ms。平时一切正常，直到某次宿主机断电。</dd>
+      <dt>根源</dt><dd>2 是提交时只 <code>write()</code>，每秒 fsync 一次：mysqld 崩溃不丢，整机断电丢最近约 1 秒；0 连 write 都不做，mysqld 崩了也丢。<code>sync_binlog=0</code> 是交给操作系统决定什么时候刷，断电时 redo 和 binlog 各丢各的，可能主库没有、从库却有。</dd>
+      <dt>做法</dt><dd class="fix">管钱的库保持双 1（默认值）。要快靠组提交（并发越高摊得越薄，深 1）和更快的盘。能从别处重建的库（报表库、测试库）才放松。</dd></dl></div>
+    <div class="pit" id="p-cap"><b><em>坑 2</em>redo 容量太小，写入一阵一阵地卡<a class="root" href="#m-redo">← ④-1 检查点追不上 LSN</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>批量写的时候延迟忽高忽低，磁盘写得很忙，可数据量并不大。</dd>
+      <dt>根源</dt><dd>redo 一圈太短，checkpoint age 很快顶到上限，InnoDB 只能加速刷脏页来推检查点；同一个页刚写回又被改脏，再写一遍。下表是同样 30 万行、每批 5000 行的更新。</dd>
+      <dt>做法</dt><dd class="fix">看高峰期每分钟 LSN 涨多少，常见的经验是让容量装得下高峰期约一小时的 redo。8.0.30 起可以在线改：<code>SET GLOBAL innodb_redo_log_capacity = 2*1024*1024*1024</code>。</dd></dl></div>
+    <div class="pit" id="p-hll"><b><em>坑 3</em>一个开着的报表事务，让 undo 越积越多<a class="root" href="#m-undo">← ④-2 purge 要等最老的快照</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>History list length 一直涨；某些查询莫名变慢；undo 表空间越来越大。</dd>
+      <dt>根源</dt><dd>RR 下报表事务第一次读就拍了快照，只要它不结束，之后提交的所有旧版本都不能删。实测：它开着时 9527 被改了 2 万次，3 秒后 History list length 13 → 20000；它读 9527 要沿链往回走 2 万步，13.7～15.2 ms，新连接读 0.4～1.0 ms。它一提交，0.6 秒内清到 0。</dd>
+      <dt>做法</dt><dd class="fix">监控 History list length 和 <code>innodb_trx</code> 里最早的 <code>trx_started</code>；报表走从库、用短事务；连接池里别留着开了事务没提交的连接。</dd></dl></div>
+    <div class="pit" id="p-big"><b><em>坑 4</em>一个事务改 30 万行<a class="root" href="#m-binlog">← ④-3 binlog 提交时一次写</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>提交那一下很慢，从库延迟突然跳高；它要是崩在半路，重启后还要在后台回滚很久。</dd>
+      <dt>根源</dt><dd>binlog cache 只有 32 KB，30 万行的事件溢出到临时文件，提交时一次写出 46 MB 再 fsync（整条语句 2.4～3.0 s）。从库要把这 46 MB 收齐才能回放这个事务。kill 0 那次，恢复要用 undo 撤 30 万行。</dd>
+      <dt>做法</dt><dd class="fix">按主键分批，每批几千行一提交（坑 2 的实验就是 5000 行一批）。<code>max_binlog_cache_size</code> 可以给单个事务的 binlog 设上限，超了直接报错。</dd></dl></div>
+    <div class="pit" id="p-unknown"><b><em>坑 5</em>没收到 OK，不等于没提交<a class="root" href="#m-2pc">← ④-4 分界线在 binlog 上</a><span class="seen">实测</span></b>
+      <dl><dt>现象</dt><dd>应用的 <code>commit()</code> 抛了连接断开的异常，重试一次，结果扣了两次款。</dd>
+      <dt>根源</dt><dd>kill B 那次，客户端连接断了，没收到 OK，可 binlog 已经写完整，重启后事务被提交（qty 9 → 10）。崩在分界线右边，事务就在。</dd>
+      <dt>做法</dt><dd class="fix">把“提交时出错”当成<b>结果未知</b>：先按订单号查一次再决定；付款用条件更新 <code>WHERE status='CREATED'</code> 加幂等号，重试也只生效一次（见<a href="mysql-lock-wait-deadlock.html">两次付款同时到</a>）。</dd></dl></div>
+  </div>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>redo 容量</th><th>30 万行用时</th><th>最慢一批</th><th>写了 redo</th><th>检查点最多落后</th><th>期间刷了多少页</th></tr></thead>
+    <tbody>
+      <tr class="badrow"><th>8 MB（最小值）</th><td>3.2 s</td><td>118 ms</td><td>29.1 MB</td><td>5.9 MB（顶到上限）</td><td><b>3747 页（59 MB）</b></td></tr>
+      <tr><th>1 GB</th><td>2.8 s</td><td>74 ms</td><td>29.1 MB</td><td>28.8 MB</td><td>709 页（11 MB）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="cap"><span class="tag-real">实测</span> 坑 2 的数据。两轮开始前都先把脏页刷干净，只改定长的 <code>qty</code>，所以两轮写的 redo 一样多。表在内存里放得下，本机盘也快，用时只差 15%；刷页次数差 5 倍，盘越慢这 5 倍越疼。第一次跑时第一轮把 <code>paid_at</code> 从 NULL 改成有值、行变长，redo 多写了一倍，两轮不可比，那组数据没用。</p>
+
+  <h3>第二圈 · 使用规范</h3>
+  <div class="rules-list">
+    <div class="rl"><b>管钱的库保持双 1</b><p><code>innodb_flush_log_at_trx_commit=1</code>、<code>sync_binlog=1</code> 是默认值，改之前写清楚能接受丢多少。</p><p class="guard">断电丢已提交的事务、主从对不上（坑 1）</p></div>
+    <div class="rl"><b>binlog 用 ROW，行镜像用 FULL</b><p>都是 8.4 默认值。<code>binlog_format</code> 从 8.0.34 起被标为废弃，以后只剩 ROW。</p><p class="guard">STATEMENT 格式下 <code>NOW()</code>、<code>LIMIT</code> 在从库算出不同结果</p></div>
+    <div class="rl"><b>批量改分批提交</b><p>按主键范围，每批几千行。</p><p class="guard">提交卡几秒、从库延迟、崩溃后长时间回滚（坑 4）</p></div>
+    <div class="rl"><b>事务里不等人、不跑报表</b><p>报表走从库或短事务；连接还池子前确认事务已结束。</p><p class="guard">undo 堆积、读旧版本变慢（坑 3）</p></div>
+    <div class="rl"><b>盯四个数</b><p>checkpoint age 占容量的比例；History list length；最老事务开了多久；binlog 占了多少盘。</p><p class="guard">卡顿和磁盘写满都有前兆，提前看得到</p></div>
+    <div class="rl"><b>binlog 保留期 ≥ 两次全备的间隔</b><p>8.4 默认 30 天。按时间点恢复 = 最近一次全备 + 之后的 binlog。</p><p class="guard">误删数据后只能回到上一次全备</p></div>
+    <div class="rl"><b>提交出错按“结果未知”处理</b><p>先查再重试；接口幂等。</p><p class="guard">重复扣款（坑 5）</p></div>
+  </div>
+
+  <h3>第三圈 · 优化和深处</h3>
+  <div class="pits deep">
+    <div class="pit" id="d-gc"><b><em>深 1</em>组提交：一次 fsync 带走一组事务<span class="seen">源码</span></b>
+      <p>8.4 的 <code>MYSQL_BIN_LOG::ordered_commit</code> 把提交分成三段排队：flush 段由队首的线程把这一组的 redo prepare 记录刷盘（<code>ha_flush_logs</code>），再把各自的 binlog cache 依次写进文件；sync 段一次 fsync binlog；commit 段让 InnoDB 按 binlog 里的顺序逐个提交。并发越高，一组里的事务越多，每个事务分到的 fsync 越少。全景页 300 次<b>串行</b>提交测到的 4.19 ms，是没人分摊的最坏情况。<code>binlog_group_commit_sync_delay</code>（默认 0）可以让 sync 段多等几微秒，凑更大的组，代价是每个提交都慢这么多。</p></div>
+    <div class="pit" id="d-dw"><b><em>深 2</em>doublewrite：redo 修不了撕裂的页<span class="seen">手册 + 源码</span></b>
+      <p>redo 记的是“在这个页上改几个字节”，前提是页本身完整。16 KB 的页写到一半断电，磁盘上半新半旧，校验和对不上，redo 无从下手。所以 page cleaner 写页之前，先把页顺序写进 doublewrite 文件（8.0.20 起是单独的 <code>#ib_16384_0.dblwr</code> 这类文件，本机数据目录里就有两个），再写到 <code>.ibd</code> 的原位置；恢复时发现撕裂页，就从 doublewrite 里拿完整的副本。8.4 的 <code>innodb_doublewrite</code> 默认 ON。</p></div>
+    <div class="pit" id="d-rec"><b><em>深 3</em>恢复的时间花在哪<span class="seen">实测</span></b>
+      <p>错误日志按顺序是：找到最新检查点 → <code>Doing recovery: scanned up to log sequence number …</code>（扫 redo）→ <code>Applying a batch of 4921 redo log records</code>（重放）→ 列出要回滚的事务 → <code>Recovering after a crash using binlog</code> → XA 恢复（prepare 的事务按 binlog 定生死）→ 截 binlog → 开始接受连接，<b>未提交事务的回滚在后台继续</b>（<code>Starting in background the rollback of uncommitted transactions</code>）。所以重启慢，主要是检查点之后的 redo 多；而能连上不代表回滚做完了。</p></div>
+  </div>
+  <h3 id="d-ver">版本差异</h3>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>项</th><th>5.7 / 8.0 早期</th><th>8.0.30 起 / 8.4</th></tr></thead>
+    <tbody>
+      <tr><th>redo 大小</th><td><code>innodb_log_file_size</code> × <code>innodb_log_files_in_group</code>，改了要重启</td><td><code>innodb_redo_log_capacity</code>，默认 100 MB，8 MB～512 GB，在线可改；<code>#innodb_redo</code> 下约 32 个文件</td></tr>
+      <tr><th>看 binlog 位置</th><td><code>SHOW MASTER STATUS</code></td><td>8.4 删了，改用 <code>SHOW BINARY LOG STATUS</code></td></tr>
+      <tr><th><code>binlog_format</code></th><td>5.7.7 起默认 ROW</td><td>8.0.34 起参数本身标为废弃</td></tr>
+      <tr><th>purge 线程</th><td>8.0 默认 4</td><td>8.4：CPU ≤ 16 时默认 1，否则 4（本机 2 核，实测是 1）</td></tr>
+      <tr><th>doublewrite</th><td>在系统表空间 <code>ibdata1</code> 里</td><td>8.0.20 起单独的 <code>.dblwr</code> 文件</td></tr>
+      <tr><th>log buffer</th><td>16 MB</td><td>8.4 默认 64 MB（本机实测）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>面试官会怎么问</h3>
+  <div class="faq">
+    <details><summary>redo log 和 binlog 有什么区别？只留一个行不行？</summary><p>redo 是 InnoDB 的，记页上的物理修改，循环写，用于崩溃恢复；binlog 是 server 层的，记行的改前改后（ROW），按文件追加、按天过期，用于复制和按时间点恢复。只留 binlog 不行：它不能修页，也不知道哪些页已经写回；只留 redo 不行：它跟页布局绑定，循环覆盖，从库和 CDC 用不了（④-3、④-5）。</p></details>
+    <details><summary>为什么要两阶段提交？崩溃恢复时怎么判断一个事务要不要提交？</summary><p>两个文件不能一次写好，崩在中间就会主从不一致。InnoDB 先写 prepare 并刷盘，再写 binlog 并刷盘，最后写 commit。恢复时：没有 prepare 的事务用 undo 回滚；prepare 了的，binlog 里有它的 Xid 就提交，没有就回滚，并截掉 binlog 尾部不完整的部分（④-4，⑤ 实测）。</p></details>
+    <details><summary>commit 之后数据页还没写回磁盘，断电了怎么办？</summary><p>提交前 redo 已经 fsync。重启后从检查点开始重放 redo，把页改回最新。页写到一半的撕裂由 doublewrite 兜底（④-1、深 2）。</p></details>
+    <details><summary>undo 什么时候删？长事务有什么危害？</summary><p>提交后的 undo 要等到最老的活跃快照也用不到它，才由 purge 线程删。长事务（尤其 RR 下开着的读事务）会让 History list length 一直涨，undo 表空间变大，读旧版本的查询沿着很长的版本链走（坑 3 实测 2 万步 14 ms）。</p></details>
+    <details><summary><code>innodb_flush_log_at_trx_commit</code> 设成 0、1、2 有什么区别？</summary><p>1：每次提交 write + fsync；2：提交时 write，每秒 fsync，mysqld 崩溃不丢，断电丢约 1 秒；0：提交时什么都不做，每秒 write + fsync，mysqld 崩溃也可能丢约 1 秒（坑 1）。</p></details>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>主从复制：从库的 IO 线程、relay log、多线程回放（按 commit 组并行），以及复制延迟怎么看（J06 第 5 个知识点，接着这一页的 binlog）</li>
+    <li>GTID：kill A 后 binlog 被截掉的那段，从库是怎么知道自己缺了哪些事务的</li>
+    <li>按时间点恢复：全备 + <code>mysqlbinlog --stop-datetime</code>，把误删前一秒的库找回来</li>
+    <li>CDC：Canal、Debezium 怎么伪装成从库读 binlog，以及为什么它们要 ROW + FULL</li>
+    <li>源码：<code>log0write.cc</code> 里 log writer / flusher 线程怎么合并 fsync，<code>trx0purge.cc</code> 的 purge 怎么判断“没人需要了”</li>
+    <li>PostgreSQL 对照：一本 WAL、旧版本留在表里、VACUUM（J06 第 9 个知识点）</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：拿刚学的东西改靶场</h2>
+    <p class="lead">都在 <code>LogLab.java</code> 和 <code>crash.sh</code> 上改。先写下猜测再跑。</p>
+  </div>
+  <div class="rules-list">
+    <div class="rl"><b>1. 把报表事务换成 RC</b><p>在 <code>purge()</code> 里把报表事务的隔离级别改成 <code>READ COMMITTED</code>，重跑 <code>purge</code>。猜：History list length 还会涨到 2 万吗？报表事务读 9527 还要 14 ms 吗？</p><p class="guard">对照坑 3：purge 等的是“还开着的快照”，不是“还开着的事务”</p></div>
+    <div class="rl"><b>2. 让大事务变小</b><p>把 <code>crash.sh</code> 的 <code>BIG</code> 改成分批：每 5000 行一提交，在第 30 批时 kill。猜：重启后 9527 的 qty 变没变？错误日志里还有“300000 rows to undo”吗？</p><p class="guard">对照坑 4：每批是独立的事务，崩溃只影响正在提交的那一批</p></div>
+    <div class="rl"><b>3. 量一下组提交</b><p>写一个 <code>gc</code> 段：1 个、8 个、32 个线程各做 2000 次自动提交的单行 UPDATE，前后各读一次 <code>Innodb_os_log_fsyncs</code>。猜：每次提交平均几次 redo fsync？</p><p class="guard">对照深 1：线程越多，一次 fsync 带走的事务越多</p></div>
+  </div>
+
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华。</summary><p>commit 的承诺落在提交时刷过盘的 redo 和 binlog 上，而不在数据页上；undo 留旧值管回滚和 MVCC；redo 和 binlog 用两阶段提交对齐，重启时 prepare 了的事务按 binlog 里有没有 Xid 决定提交还是回滚。</p></details>
+    <details><summary>2. 提交时直接把数据页写回，痛在哪？</summary><p>一次只改几十字节，却要随机写整个 16 KB 页，碰几个页写几个；页写到一半断电还会撕裂。redo 只写几百字节、顺序追加。</p></details>
+    <details><summary>3. 头号坑“为了快改成 2 和 0”，根源是哪条原理？</summary><p>④-4：commit 能承诺不丢，是因为分界线左右的东西已经 fsync 过。2 和 0 把 fsync 交给了每秒一次的后台线程和操作系统，分界线之后的东西断电时还只在内存里。</p></details>
+    <details><summary>4. 预测：binlog 已经 fsync，InnoDB 还没写 commit 记录，整机断电。重启后 9527 是什么？从库呢？</summary><p>主库 PAID：redo 里有 prepare，binlog 里有完整的 Xid，恢复时提交。从库也会收到（binlog 里有）。应用没收到 OK，要按结果未知处理。</p><p class="from">从 ④-4 的分界线推出；可以在实验台第 5 格验证。</p></details>
+    <details><summary>5. 预测：<code>innodb_flush_log_at_trx_commit=2</code>、<code>sync_binlog=1</code>，应用收到 OK 后整机断电，会怎样？</summary><p>如果断电发生在提交后 1 秒内：binlog 已 fsync，从库会有这条付款；可 InnoDB 的 prepare 记录只 write 到了操作系统缓存，还没等到每秒一次的 fsync，丢了。重启后 InnoDB 根本不知道这个事务，主库是 CREATED，从库是 PAID，主从对不上。两个参数只放松一个，同样会出事。</p><p class="from">从 ④-4 推出：恢复规则只对“redo 里有 prepare”的事务查 binlog。页面上没有这个组合，实验台只给了双 1 和 2 + 0。</p></details>
+    <details><summary>6. 预测：一个事务开着（RR，已经读过一次），另一个连接把 9527 改了 10 万次。这个事务再读 9527，会比实测的 14 ms 快还是慢？它提交以后呢？</summary><p>更慢，大约是版本链长度的倍数（10 万步，按实测比例估算约 70 ms，没有实测）；它提交后，purge 很快把链清掉，再读就回到 1 ms 以内。</p><p class="from">从 ④-2 和坑 3 推出。</p></details>
+    <details><summary>7. 放回全景：第 8、9 站前后各发生了什么？redo 或 binlog 出了问题，整条链路会怎样？</summary><p>第 7 站把旧值写进 undo；第 8 站改 buffer pool 里的页 75、写 redo，binlog 先攒在 cache；第 9 站两阶段提交，redo prepare 和 binlog 都落盘后才回 OK（第 10 站），锁也在这里放掉；第 11 站从库拿到的就是这 5 个事件；第 12 站页 75 很久以后才写回。redo 太小时，第 8 站每条写入都可能被迫等刷页，持锁时间变长，第 6 站排队、第 1 站连接池被占满；binlog 不刷盘（<code>sync_binlog=0</code>）时，断电后第 11 站的从库和主库对不上，读从库的订单页看到的是另一个世界。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>标准档。<span class="tag-real">实测</span> 的数字来自本机：2 核 ARM，JDK 17.0.21，Connector/J 9.7.0，Docker 里的 MySQL 8.4.13（buffer pool 512 MB，其余默认），交易靶场 100 万行 <code>orders</code>；代码在 <a href="https://github.com/archeu/study-labs/tree/main/java/database/mysql-redo-undo-binlog">study-labs</a>。标“全景实测”的来自<a href="../java/pano-j06-update-to-disk.html">全景页</a>。两阶段提交的流程、恢复规则、redo 刷脏阈值、purge 线程默认值核对自 mysql-server 8.4 源码（<code>sql/binlog.cc</code>、<code>sql/binlog/recovery.cc</code>、<code>storage/innobase/handler/ha_innodb.cc</code>、<code>log0constants.h</code>、<code>log0files_capacity.cc</code>、<code>trx0trx.cc</code>）和 8.4 参考手册的 Redo Log 一节。实验台是按这些规则推演的模拟；“整机断电”没有实测，按最坏情况算。</p>
+  <p>相关：<a href="../java/pano-j06-update-to-disk.html">全景：一条 UPDATE 从应用到磁盘</a> · <a href="mysql-index-bplustree.html">索引与 B+ 树</a> · <a href="mysql-explain-tuning.html">执行计划与 SQL 调优</a> · <a href="mysql-mvcc-lock.html">事务、MVCC 与锁</a> · <a href="mysql-lock-wait-deadlock.html">两次付款同时到</a> · <a href="../kafka/kafka-storage-zerocopy.html">Kafka 存储与零拷贝</a> · <a href="../java/roadmap.html#j06">回到地图 J06</a></p>
+</footer>
+</main>
+
+<script>
+/*SIM-START*/
+// 崩溃点推演：一条付款事务（UPDATE 9527 → COMMIT）走到第 p 步时崩溃，重启后会怎样。
+// 规则：InnoDB 恢复先重放 redo；没有落盘的 prepare 记录 → 事务按“活跃”处理，靠 undo 回滚；
+// 有 prepare 记录 → 去 binlog 找它的 Xid，找到就提交，找不到就回滚（并截掉 binlog 末尾不完整的那段）。
+// “落盘”：fsync 过的一定在；只 write() 到操作系统缓存的，mysqld 崩溃时还在，整机断电时不在（按最坏情况算）。
+var CRASH_POINTS = [
+  {k:'upd',   t:'UPDATE 做完，还没 COMMIT', real:true},
+  {k:'prep',  t:'COMMIT：InnoDB 写 prepare 记录，还没落盘'},
+  {k:'prepd', t:'prepare 已落盘，binlog 写到一半', real:true},
+  {k:'binw',  t:'binlog 写完整（write），还没 fsync', real:true},
+  {k:'bins',  t:'binlog 已 fsync，InnoDB 还没写 commit'},
+  {k:'cmt',   t:'InnoDB 写了 commit，OK 还没回到应用'},
+  {k:'ok',    t:'应用已经收到 OK'}
+];
+// cfg: 'strict'（innodb_flush_log_at_trx_commit=1, sync_binlog=1）或 'loose'（2 和 0）
+// how: 'mysqld'（进程崩溃，操作系统还在）或 'power'（整机断电）
+function crashAt(p, cfg, how){
+  var strict = cfg === 'strict', os = how === 'mysqld';
+  // 各份记录：w = 已 write() 到操作系统，s = 已 fsync
+  var prepW = p >= 2, prepS = p >= 2 && strict;           // 双 1 时 prepare 在写 binlog 前刷盘；2 只写到 OS 缓存
+  var binComplete = p >= 3, binS = p >= 4 && strict;      // sync_binlog=0 时提交不等 fsync
+  var prepDurable = prepS || (prepW && os);
+  var binDurable = binComplete && (binS || os);
+  var clientOk = p >= 6;
+  var primary, replica = binDurable, how2;
+  if (!prepDurable) {
+    primary = 'CREATED';
+    how2 = p === 0 ? '事务还没提交：重放 redo 后它是活跃事务，按 undo 回滚'
+                   : 'redo 里找不到它的 prepare 记录：当它没提交过，改动被撤掉';
+  } else if (binDurable) {
+    primary = 'PAID'; how2 = 'prepare 状态，binlog 里找到它的 Xid：提交';
+  } else {
+    primary = 'CREATED'; how2 = 'prepare 状态，binlog 里没有完整的 Xid：回滚，binlog 末尾那半截被截掉';
+  }
+  var verdict;
+  if (clientOk && primary !== 'PAID') verdict = 'lost';           // 已经承诺的提交丢了
+  else if ((primary === 'PAID') !== replica) verdict = 'split';    // 主从对不上
+  else if (!clientOk && primary === 'PAID') verdict = 'unknown';   // 提交了，应用却没收到 OK
+  else verdict = 'ok';
+  return {primary:primary, replica:replica, clientOk:clientOk, how:how2, verdict:verdict,
+          prepDurable:prepDurable, binDurable:binDurable};
+}
+/*SIM-END*/
+(function(){
+  var lab=document.getElementById('crash'); if(!lab) return;
+  var list=document.getElementById('cp-list'), guessBox=document.getElementById('cp-guess');
+  var st={p:2, how:'mysqld', cfg:'strict', guessed:null, skip:false};
+  CRASH_POINTS.forEach(function(c,i){
+    var li=document.createElement('li'), b=document.createElement('button');
+    b.type='button'; b.dataset.p=i;
+    b.innerHTML='<b>'+i+'</b><span>'+c.t+'</span>'+(c.real?'<i>实测</i>':'');
+    b.addEventListener('click',function(){st.p=i;st.guessed=null;render();});
+    li.appendChild(b); list.appendChild(li);
+  });
+  lab.querySelectorAll('[data-how]').forEach(function(b){b.addEventListener('click',function(){st.how=b.dataset.how;st.guessed=null;render();});});
+  lab.querySelectorAll('[data-cfg]').forEach(function(b){b.addEventListener('click',function(){st.cfg=b.dataset.cfg;st.guessed=null;render();});});
+  guessBox.querySelectorAll('[data-g]').forEach(function(b){b.addEventListener('click',function(){
+    if(b.dataset.g==='skip'){st.skip=true;} else st.guessed=b.dataset.g; render();});});
+  lab.addEventListener('keydown',function(e){
+    if(e.target.closest&&e.target.closest('.opts')) return;
+    if(e.key==='ArrowRight'&&st.p<CRASH_POINTS.length-1){st.p++;st.guessed=null;render();e.preventDefault();}
+    if(e.key==='ArrowLeft'&&st.p>0){st.p--;st.guessed=null;render();e.preventDefault();}
+  });
+  var VERDICT={
+    ok:['v-ok','一致：主库、binlog、应用看到的是同一个结果。'],
+    unknown:['v-unknown','事务提交了，应用却没收到 OK：只能当“结果未知”，先查再决定要不要重试（坑 5）。'],
+    lost:['v-lost','丢了：应用已经收到 OK，重启后主库却是 CREATED。这就是放松双 1 的代价（坑 1）。'],
+    split:['v-split','主从对不上：主库和 binlog 说法不一致。']
+  };
+  function set(id,v){document.getElementById(id).textContent=v;}
+  function render(){
+    lab.querySelectorAll('[data-p]').forEach(function(b){b.setAttribute('aria-pressed',String(+b.dataset.p===st.p));});
+    lab.querySelectorAll('[data-how]').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.how===st.how));});
+    lab.querySelectorAll('[data-cfg]').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.cfg===st.cfg));});
+    var r=crashAt(st.p,st.cfg,st.how);
+    var show=st.skip||st.guessed!==null;
+    guessBox.hidden=st.skip;
+    guessBox.querySelectorAll('[data-g]').forEach(function(b){
+      b.classList.remove('right','wrong');
+      b.setAttribute('aria-pressed',String(b.dataset.g===st.guessed));
+      if(st.guessed&&b.dataset.g===st.guessed) b.classList.add(st.guessed===r.primary?'right':'wrong');
+    });
+    document.getElementById('cp-out').querySelectorAll('div').forEach(function(d){d.classList.toggle('masked',!show);});
+    var v=document.getElementById('cp-verdict');
+    if(!show){['o-primary','o-binlog','o-ok','o-how'].forEach(function(id){set(id,'?');});
+      set('o-ok', r.clientOk?'收到了':'没有');
+      v.className='cp-verdict'; v.textContent='第 '+st.p+' 格：'+CRASH_POINTS[st.p].t+'。先猜，再看。'; return;}
+    set('o-primary',r.primary); set('o-binlog',r.replica?'有，从库会收到':'没有');
+    set('o-ok',r.clientOk?'收到了':'没有'); set('o-how',r.how);
+    var head=st.guessed?(st.guessed===r.primary?'猜对了。':'猜错了，是 '+r.primary+'。'):'';
+    var why=r.prepDurable?'prepare 记录已落盘，':'prepare 记录没落盘，';
+    why+=r.binDurable?'binlog 里有完整的 Xid。':'binlog 里没有完整的 Xid。';
+    v.className='cp-verdict '+VERDICT[r.verdict][0];
+    v.textContent=head+why+VERDICT[r.verdict][1]+(CRASH_POINTS[st.p].real&&st.how==='mysqld'&&st.cfg==='strict'?' 这一格本机实测过，结果相同。':'');
+  }
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
