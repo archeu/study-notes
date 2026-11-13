@@ -1,0 +1,1199 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>改完价，详情页还卖 399：先改库还是先删缓存、延迟双删、订阅 binlog</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J07 knowledge point 1 "cache consistency: update DB then delete cache, delayed double delete, binlog subscription", stations 9-10 of the J07 panorama. Roles: bk = write path (ops admin changing the price) and the chosen scheme, of = read path (product service, Cache-Aside readers), pd = MySQL, rn = Redis, cg = binlog subscriber (Canal / Debezium), other = TTL-only old approach, bad = stale price stuck / pitfalls, good = consistent. Interaction: one race stepper (6 scenarios, guess the final Redis value first, prev/next/auto/reset, arrow keys). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Redis</span><span aria-hidden="true">/</span><span class="tb-here">缓存一致性：先改库还是先删缓存</span></div></nav>
+<main>
+<header class="hero">
+  <p class="kicker">Cache-Aside · 先改库后删缓存 · DEL 不是 SET · 延迟双删 · binlog 订阅（Canal / Debezium）· 版本号回填 · Redis 8.10 · MySQL 8.4</p>
+  <h1>改完价，详情页还卖 399：先改库还是先删缓存、延迟双删、订阅 binlog</h1>
+  <p class="lead">运营把 88 号商品从 399.00 改成 359.00，数据库一提交就是新价，Redis 里那份还是旧的。精华是：<b>数据库和 Redis 是两个系统，没法放进同一个事务一起提交，所以缓存总有一小段时间是旧的；能设计的只有三件事：这段时间多短，旧值会不会被写回去长期留着，写路径半路出事时靠什么兜底。</b>默认答案是先改库、再删缓存（删，不是改），缓存都带过期时间；删除要可靠，就交给订阅 binlog 的程序去删。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j07-product-detail-cache.html#s-9">一次商品详情查询 · 第 9、10 站</a></span><span>地图：<a href="../java/roadmap.html#j07">J07 · 缓存一致性：先改库还是先删缓存、延迟双删、订阅 binlog</a></span><span>⑤ 的数字在本机 Redis 8.10.3 + MySQL 8.4.13 上跑过 <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：改价以后，Redis 里那份怎么跟上</h2>
+    <p class="lead">在全景第 9、10 站，这一步要解决：运营在后台把 88 号改成 359.00，数据库提交了；可商品服务读的是 Redis 里的副本，它还是 399.00，而且还有 30 分钟才过期。地图给交易靶场定的标准是：改价后 1 秒内，所有读都拿到 359.00。本页管 Redis 这一层；4 个实例各自的 Caffeine（第 11 站）留给下一个知识点。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 270" role="img" aria-label="运营后台把 UPDATE 发给 MySQL，88 号变成 359.00；商品服务四个实例先读 Redis，Redis 里的 product:88 还是 399.00，30 分钟后才过期；没命中时才查 MySQL。问题是第 10 站：写路径怎么让 Redis 跟上。">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bk"/></marker>
+    <marker id="aho" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-of"/></marker>
+  </defs>
+  <rect x="20" y="30" width="190" height="78" rx="14" class="b-bk"/>
+  <text x="115" y="60" text-anchor="middle" class="t-h">运营后台</text>
+  <text x="115" y="84" text-anchor="middle" class="t-s">88 号：399.00 → 359.00</text>
+  <rect x="330" y="30" width="240" height="78" rx="14" class="b-pd"/>
+  <text x="450" y="58" text-anchor="middle" class="t-h">MySQL · trade.product</text>
+  <text x="450" y="84" text-anchor="middle" class="t-mono">id=88  price=359.00 ✓</text>
+  <rect x="330" y="170" width="240" height="78" rx="14" class="b-rn"/>
+  <text x="450" y="198" text-anchor="middle" class="t-h">Redis · product:88</text>
+  <text x="450" y="224" text-anchor="middle" class="t-mono">399.00 ✗  TTL 还剩 1800 s</text>
+  <rect x="720" y="100" width="220" height="78" rx="14" class="b-of"/>
+  <text x="830" y="130" text-anchor="middle" class="t-h">商品服务 × 4</text>
+  <text x="830" y="154" text-anchor="middle" class="t-s">先读 Redis，没有再查库</text>
+  <path d="M210 69 H322" class="e-ink" marker-end="url(#ah)"/>
+  <text x="266" y="58" text-anchor="middle" class="t-b">UPDATE + 提交</text>
+  <text x="266" y="90" text-anchor="middle" class="t-bk">第 9 站</text>
+  <path d="M720 160 L580 200" class="e-of" marker-end="url(#aho)"/>
+  <text x="664" y="208" text-anchor="middle" class="t-of">GET → 399.00</text>
+  <path d="M720 118 L580 82" class="e-ofd" marker-end="url(#aho)"/>
+  <text x="652" y="88" text-anchor="middle" class="t-xs">没命中才查库</text>
+  <path d="M115 108 V209 H322" class="e-ofd" style="stroke:var(--bk)" marker-end="url(#ahb)"/>
+  <text x="130" y="150" class="t-bk">第 10 站：</text>
+  <text x="130" y="170" class="t-s">写路径怎么让 Redis 跟上？</text>
+  <text x="130" y="190" class="t-xs">删掉？改成新值？什么时候动？</text>
+</svg>
+  </div>
+  <figcaption>两份数据：数据库是准的，Redis 是副本。改价只改了准的那份，副本要靠写路径去“通知”。</figcaption>
+  </figure>
+  <div class="goals3">
+    <div class="g3" data-role="bk"><h4>窗口短</h4><p>提交以后，旧价还能被读到的时间，靶场标准是 1 秒以内。</p></div>
+    <div class="g3" data-role="bad"><h4>旧值别写回去</h4><p>最怕的不是旧几毫秒，而是旧价被写回 Redis，一直卖到 30 分钟后过期。下文管这叫“卡住”。</p></div>
+    <div class="g3" data-role="cg"><h4>半路出事有兜底</h4><p>改完库，删缓存那一步失败了、进程正好重启了，也不能永远旧下去。</p></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>不用它会怎样：只靠过期时间</h2>
+    <p class="lead">最省事的做法是改价时什么也不动缓存，等它 30 分钟后自己过期。代码里一行都不用加，可旧价最长能卖 30 分钟。把过期时间调短到 1 秒能达标，但缓存一秒钟就失效一次，命中率掉下来，数据库压力又回来了。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 230" role="img" aria-label="时间轴：MySQL 在提交那一刻变成 359.00。只靠过期时，Redis 里的 399.00 一直留到 30 分钟后才过期，这一整段是卖旧价的时间；目标是提交后 1 秒内跟上。">
+  <text x="20" y="62" class="t-b">MySQL</text>
+  <rect x="150" y="44" width="110" height="28" rx="6" class="b-neu"/><text x="205" y="63" text-anchor="middle" class="t-mono">399.00</text>
+  <rect x="260" y="44" width="680" height="28" rx="6" class="b-pd"/><text x="600" y="63" text-anchor="middle" class="t-mono">359.00</text>
+  <text x="20" y="122" class="t-b">Redis · 只靠过期</text>
+  <rect x="150" y="104" width="110" height="28" rx="6" class="b-neu"/><text x="205" y="123" text-anchor="middle" class="t-mono">399.00</text>
+  <rect x="260" y="104" width="560" height="28" rx="6" class="b-bad"/><text x="540" y="123" text-anchor="middle" class="t-bad">399.00 · 卖旧价，最长 1800 秒</text>
+  <rect x="820" y="104" width="120" height="28" rx="6" class="b-pd"/><text x="880" y="123" text-anchor="middle" class="t-mono">359.00</text>
+  <path d="M520 96 l8 -6 l8 12 l8 -12 l8 6" class="e-mut"/>
+  <text x="20" y="182" class="t-b">Redis · 目标</text>
+  <rect x="150" y="164" width="110" height="28" rx="6" class="b-neu"/><text x="205" y="183" text-anchor="middle" class="t-mono">399.00</text>
+  <rect x="260" y="164" width="14" height="28" rx="3" class="b-warn"/>
+  <rect x="274" y="164" width="666" height="28" rx="6" class="b-good"/><text x="600" y="183" text-anchor="middle" class="t-good">359.00 · 提交后 1 秒内跟上</text>
+  <path d="M260 30 V210" class="e-ink" stroke-dasharray="4 4"/>
+  <text x="260" y="24" text-anchor="middle" class="t-b">提交</text>
+  <text x="267" y="214" class="t-xs">≤ 1 s</text>
+  <text x="840" y="96" text-anchor="middle" class="t-xs">30 分钟后过期</text>
+</svg>
+  </div>
+  </figure>
+  <ul class="pains">
+    <li>只靠过期：旧价最长 30 分钟，平均 15 分钟。用户在详情页看到 399，下单时按 359 扣款，客服电话就来了。</li>
+    <li>过期时间压到 1 秒：所有商品每秒失效一次，大部分读又打到数据库上，缓存等于没开。</li>
+    <li>典型误用：“改完库顺手把缓存也改成新值”。看起来最直接，两个人同时改价时会把旧值留下，④ 里拆开看。</li>
+  </ul>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种流派：写路径怎么动缓存</h2>
+    <p class="lead">读路径大家都一样，叫 Cache-Aside（旁路缓存）：先 GET，没命中就查库，查完 SET 回去。分歧都在写路径上：先动库还是先动缓存，动缓存是删还是改，由谁来动。</p>
+  </div>
+  <div class="tbl-wrap">
+  <table class="t">
+    <thead><tr><th>写法</th><th>写路径做什么</th><th>旧值会不会被写回去</th><th>代价</th><th>靶场实测（卡住轮数 / 20）</th></tr></thead>
+    <tbody>
+      <tr><th>先删缓存，再改库</th><td>DEL → UPDATE → 提交</td><td class="bad">很容易：删完到提交之间来一个读就会</td><td>没有</td><td class="num bad">15～18</td></tr>
+      <tr class="pick"><th>先改库，再删缓存</th><td>UPDATE → 提交 → DEL</td><td>很难：要缓存正好空着、读又比写慢</td><td>没有</td><td class="num good">0</td></tr>
+      <tr><th>先改库，再改缓存</th><td>UPDATE → 提交 → SET 新值</td><td class="bad">两人同时改、SET 乱序时会</td><td>没人读的商品也要算一遍新值</td><td class="num">0（人为乱序时卡住）</td></tr>
+      <tr><th>延迟双删</th><td>DEL → UPDATE → 提交 → 等 N ms → 再 DEL</td><td>读的停顿短于 N 时不会</td><td>写请求多等 N ms，N 靠估</td><td class="num good">0</td></tr>
+      <tr class="pick"><th>订阅 binlog 删</th><td>业务代码只改库；一个伪装成从库的程序读 binlog，看到改动就 DEL</td><td>和“先改库再删”一样</td><td>多一个组件要运维；延迟多几毫秒到几百毫秒</td><td class="num good">提交后 0.7～1.7 ms 删掉</td></tr>
+      <tr><th>Read / Write-Through、Write-Behind</th><td>缓存层替你读写数据库，应用只跟缓存打交道</td><td>由缓存层保证</td><td>Redis 不带这个能力，要自己写一层；Write-Behind 宕机会丢写</td><td class="num">—</td></tr>
+      <tr><th>强一致：读写加锁</th><td>改价时锁住 88 号，读也要拿锁</td><td>不会</td><td>读要等写，缓存的快就没了</td><td class="num">—</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="pick-line"><b>选择规则：</b>默认先改库、再删缓存，所有缓存都带过期时间兜底；删除必须可靠时，把删交给 binlog 订阅；连几毫秒旧值都不能容忍的数据，比如下单时的价格和库存，干脆不从缓存读。本页学这条主线，延迟双删和版本号回填当作补丁来学。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>核心取舍：两个系统，没有共同的提交点</h2>
+    <p class="lead">所有写法都在同一个约束下做选择：改库和动缓存是两次独立的写，中间总有空隙，空隙里可能插进来一个读请求。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li>读路径（Cache-Aside）：GET 没命中 → SELECT → SET 回 Redis，带 30 分钟过期。就是<a href="../java/pano-j07-product-detail-cache.html#s-2">全景第 2～7 站</a>。</li>
+      <li>事务提交前，新值只有改它的那条连接看得见，别的连接 SELECT 拿到的还是旧值（<a href="../database/mysql-mvcc-lock.html">MVCC</a>）。</li>
+      <li>binlog 在事务提交时才写进去，没提交、回滚了的改动不会出现在 binlog 里（<a href="../database/mysql-redo-undo-binlog.html">redo、undo、binlog 与两阶段提交</a>）。</li>
+      <li>从库比主库晚一点，刚提交的新值在从库上可能还读不到（<a href="../database/mysql-replication-lag.html">主从复制与复制延迟</a>）。</li>
+    </ul>
+  </div>
+
+  <div class="formula" id="s4-core">
+    <p class="f">数据库提交 <em>≠</em> 缓存更新：两次写之间的空隙消不掉</p>
+    <p>MySQL 的事务管不到 Redis，Redis 的 MULTI 也管不到 MySQL。想让两边一起提交，只能上两阶段提交这类分布式事务，或者让读等写，代价都比“旧几毫秒”大得多。所以设计目标退一步，变成三条：空隙尽量短；空隙里的读不要把旧值写回去；空隙后面那一步（删缓存）丢了也有人补。</p>
+  </div>
+
+  <div class="sub" id="s4-del">
+    <h3><span class="sn">④-1</span>为什么删，不改</h3>
+    <div class="design">
+      <div class="way" data-role="bad">
+        <h4>改：SET 新值<small>两人同时改价</small></h4>
+<svg viewBox="0 0 440 260" class="sv" role="img" aria-label="运营 A 先提交 359.00，B 后提交 329.00，数据库最终是 329.00；B 先 SET 329.00，A 卡了 30 毫秒后 SET 359.00，Redis 最终留下 359.00，和数据库不一致。">
+  <text x="70" y="22" text-anchor="middle" class="t-b">运营 A</text>
+  <text x="200" y="22" text-anchor="middle" class="t-b">运营 B</text>
+  <text x="360" y="22" text-anchor="middle" class="t-b">Redis</text>
+  <path d="M70 32 V240 M200 32 V240 M360 32 V240" class="e-axis" stroke-dasharray="3 4"/>
+  <rect x="20" y="44" width="100" height="26" rx="6" class="b-pd"/><text x="70" y="62" text-anchor="middle" class="t-s">提交 359 · v9</text>
+  <rect x="150" y="84" width="100" height="26" rx="6" class="b-pd"/><text x="200" y="102" text-anchor="middle" class="t-s">提交 329 · v10</text>
+  <path d="M200 132 H352" class="e-ink" marker-end="url(#ah)"/><text x="276" y="126" text-anchor="middle" class="t-s">SET 329</text>
+  <text x="70" y="150" text-anchor="middle" class="t-xs">卡了 30 ms</text>
+  <path d="M70 182 H352" class="e-bad" marker-end="url(#ah)"/><text x="210" y="176" text-anchor="middle" class="t-bad">SET 359（后到）</text>
+  <rect x="300" y="200" width="120" height="30" rx="8" class="b-bad"/><text x="360" y="220" text-anchor="middle" class="t-mono">359 ≠ 库里 329</text>
+</svg>
+        <ul class="pains"><li>SET 的结果由“谁最后到”决定，和数据库里谁最后提交没关系。</li><li>改价后没人看的商品，也白白算了一遍新值。</li></ul>
+      </div>
+      <div class="way" data-role="done">
+        <h4>删：DEL<small>同样的先后</small></h4>
+<svg viewBox="0 0 440 260" class="sv" role="img" aria-label="同样的先后顺序，A 和 B 都改成 DEL：不管谁先到，Redis 里都是空的；下一次读从数据库拿到 329.00。">
+  <text x="70" y="22" text-anchor="middle" class="t-b">运营 A</text>
+  <text x="200" y="22" text-anchor="middle" class="t-b">运营 B</text>
+  <text x="360" y="22" text-anchor="middle" class="t-b">Redis</text>
+  <path d="M70 32 V240 M200 32 V240 M360 32 V240" class="e-axis" stroke-dasharray="3 4"/>
+  <rect x="20" y="44" width="100" height="26" rx="6" class="b-pd"/><text x="70" y="62" text-anchor="middle" class="t-s">提交 359 · v9</text>
+  <rect x="150" y="84" width="100" height="26" rx="6" class="b-pd"/><text x="200" y="102" text-anchor="middle" class="t-s">提交 329 · v10</text>
+  <path d="M200 132 H352" class="e-ink" marker-end="url(#ah)"/><text x="276" y="126" text-anchor="middle" class="t-s">DEL</text>
+  <text x="70" y="150" text-anchor="middle" class="t-xs">卡了 30 ms</text>
+  <path d="M70 182 H352" class="e-good" marker-end="url(#ah)"/><text x="210" y="176" text-anchor="middle" class="t-good">DEL（后到也无所谓）</text>
+  <rect x="300" y="200" width="120" height="30" rx="8" class="b-good"/><text x="360" y="220" text-anchor="middle" class="t-mono">空 → 读库得 329</text>
+</svg>
+        <ul class="pains"><li class="ok">删几次、谁先谁后，结果都是“没有”：DEL 是幂等的，和顺序无关。</li><li class="ok">新值留给下一个读请求去数据库拿，只有一个来源。</li></ul>
+      </div>
+    </div>
+    <p class="verdict" data-role="bk"><b>决定胜负的约束：</b>写路径之间没法保证到达 Redis 的顺序。删把“排序”这件事交还给数据库：缓存里只要不存东西，读到的就是数据库按行锁排好序的最终结果。Facebook 在 2013 年的 memcache 论文里给的理由也是这一条：选择删而不是改，因为删是幂等的。</p>
+  </div>
+
+  <div class="sub" id="s4-order">
+    <h3><span class="sn">④-2</span>为什么先改库，再删缓存</h3>
+    <figure>
+    <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="上半：先删缓存再改库。DEL 到 COMMIT 之间是整个写事务，几毫秒；读请求在这段里没命中、查库读到 399、SET 回去，提交后 Redis 一直是旧价。下半：先改库再删缓存。旧价只在 COMMIT 到 DEL 之间被读到；要把旧价写回去，读请求得在提交前查完库、又在 DEL 之后才回填，还要缓存正好是空的。">
+  <text x="20" y="28" class="t-h">先删缓存，再改库</text>
+  <text x="20" y="66" class="t-bk">写</text>
+  <text x="20" y="116" class="t-of">读</text>
+  <rect x="140" y="40" width="300" height="100" rx="8" style="fill:var(--bad-tint);stroke:none"/>
+  <text x="290" y="156" text-anchor="middle" class="t-bad">这段时间里任何一次没命中，都会把 399 写回去</text>
+  <circle cx="140" cy="62" r="7" class="f-bk"/><text x="140" y="86" text-anchor="middle" class="t-mono">DEL</text>
+  <rect x="160" y="50" width="280" height="24" rx="6" class="b-bk"/><text x="300" y="67" text-anchor="middle" class="t-s">UPDATE … 等锁、写 redo / binlog（4～9 ms）</text>
+  <circle cx="440" cy="62" r="7" class="f-pd"/><text x="440" y="40" text-anchor="middle" class="t-mono">COMMIT</text>
+  <circle cx="220" cy="112" r="6" class="f-of"/><text x="220" y="132" text-anchor="middle" class="t-xs">GET 没命中</text>
+  <circle cx="280" cy="112" r="6" class="f-of"/><text x="285" y="104" text-anchor="middle" class="t-xs">SELECT 399</text>
+  <circle cx="340" cy="112" r="6" class="f-bad"/><text x="345" y="132" text-anchor="middle" class="t-bad">SET 399</text>
+  <rect x="470" y="96" width="260" height="30" rx="8" class="b-bad"/><text x="600" y="116" text-anchor="middle" class="t-s">之后一直卖 399，到过期为止</text>
+  <text x="760" y="116" class="t-bad">实测 15～18 / 20 轮卡住</text>
+
+  <path d="M20 182 H940" class="e-axis" stroke-dasharray="3 5"/>
+
+  <text x="20" y="208" class="t-h">先改库，再删缓存</text>
+  <text x="20" y="246" class="t-bk">写</text>
+  <text x="20" y="296" class="t-of">读</text>
+  <rect x="160" y="230" width="280" height="24" rx="6" class="b-bk"/><text x="300" y="247" text-anchor="middle" class="t-s">UPDATE … 等锁、写 redo / binlog</text>
+  <circle cx="440" cy="242" r="7" class="f-pd"/><text x="440" y="222" text-anchor="middle" class="t-mono">COMMIT</text>
+  <rect x="440" y="234" width="40" height="16" rx="3" class="b-warn"/>
+  <circle cx="480" cy="242" r="7" class="f-bk"/><text x="490" y="222" text-anchor="middle" class="t-mono">DEL</text>
+  <text x="460" y="268" text-anchor="middle" class="t-xs">1～3 ms</text>
+  <circle cx="250" cy="292" r="6" class="f-of"/><text x="250" y="314" text-anchor="middle" class="t-xs">① 缓存正好空着</text>
+  <circle cx="330" cy="292" r="6" class="f-of"/><text x="335" y="314" text-anchor="middle" class="t-xs">② 提交前查到 399</text>
+  <path d="M336 292 H554" class="e-ofd"/>
+  <circle cx="560" cy="292" r="6" class="f-bad"/><text x="560" y="314" text-anchor="middle" class="t-bad">③ DEL 之后才 SET 399</text>
+  <text x="640" y="264" class="t-s">三条同时满足才会卡住。读一次库约 0.4 ms，</text>
+  <text x="640" y="282" class="t-s">写一次库要 4～9 ms，平时很难碰上：</text>
+  <text x="640" y="300" class="t-good">自然跑 0 / 20 轮；读人为停 50 ms 才复现</text>
+</svg>
+    </div>
+    <figcaption>空隙的长度不一样：先删时，空隙是整个写事务；先改时，空隙只是“提交”到“DEL”这一两毫秒，而且读请求要比写请求还慢才能钻进来。</figcaption>
+    </figure>
+    <p class="verdict" data-role="bk"><b>决定胜负的约束：</b>读一次库比写一次库快得多（写要等行锁、提交时刷 redo 和 binlog）。先删缓存，等于给最快的那个操作留了最长的窗口；先改库，要求读比写还慢，概率小了几个数量级。不是不可能，下面的推演台第三个场景就是它。</p>
+  </div>
+
+  <div class="sub" id="s4-race">
+    <h3><span class="sn">④-3</span>推演台：一步一步看谁把旧价写了回去</h3>
+    <div class="race" id="race" tabindex="0" aria-label="竞态推演台，左右方向键单步">
+      <div class="presets" role="group" aria-label="选一种写法">
+        <button type="button" data-scn="delFirst" aria-pressed="true"><b>① 先删，再改库</b><span>读线程每 1 ms 读一次</span></button>
+        <button type="button" data-scn="updDel" aria-pressed="false"><b>② 先改库，再删</b><span>缓存是热的</span></button>
+        <button type="button" data-scn="updDelSlow" aria-pressed="false"><b>② 碰上慢读</b><span>缓存刚过期，读停 50 ms</span></button>
+        <button type="button" data-scn="double" aria-pressed="false"><b>③ 延迟双删</b><span>等 100 ms，读停 50 ms</span></button>
+        <button type="button" data-scn="twoSet" aria-pressed="false"><b>④ SET 新值</b><span>两个运营几乎同时改</span></button>
+        <button type="button" data-scn="tomb" aria-pressed="false"><b>⑤ 墓碑 + 版本</b><span>读停 150 ms</span></button>
+      </div>
+      <div class="guess">
+        <p>先猜：走完以后，Redis 里的 88 号和数据库一致吗？</p>
+        <div class="opts">
+          <button type="button" data-guess="ok" aria-pressed="false">一致，读到新价</button>
+          <button type="button" data-guess="stuck" aria-pressed="false">卡在旧价，等 30 分钟过期</button>
+        </div>
+      </div>
+      <div class="race-ctl">
+        <button type="button" class="btn" data-act="prev">← 上一步</button>
+        <button type="button" class="btn primary" data-act="next">下一步 →</button>
+        <button type="button" class="btn" data-act="auto">自动播放</button>
+        <button type="button" class="btn" data-act="reset">从头来</button>
+        <span class="tip race-info">第 0 步</span>
+      </div>
+      <div class="evt-wrap">
+        <table class="evt">
+          <thead><tr><th>#</th><th>谁</th><th>做了什么</th><th>MySQL（已提交）</th><th>Redis product:88</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="race-out" data-role="other">先猜：走完以后，Redis 里的 88 号和数据库一致吗？</p>
+    </div>
+    <p class="tip">v 后面是版本号，每提交一次加一。红色是 Redis 和数据库对不上的时刻。推演逻辑和 ⑤ 的实测程序用的是同一套规则。</p>
+  </div>
+
+  <div class="sub" id="s4-binlog">
+    <h3><span class="sn">④-4</span>订阅 binlog：让“删”不会丢</h3>
+    <p>前面几种写法都假设 DEL 一定会执行。可改完库、还没删，进程就被发布系统重启了，或者 Redis 那一下超时了，旧价就留下来了。还有些写入口根本不经过商品服务：运营直接跑的 SQL 脚本、别的服务改的同一张表。这时把“删”从业务代码里拿出来，交给一个读 binlog 的程序。</p>
+    <figure>
+    <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="任何写入口（商品服务、SQL 脚本、别的服务）改了 trade.product 并提交；MySQL 把这次改动按行写进 binlog；订阅者伪装成从库拉 binlog，看到 product 表 id=88 的 UPDATE 就 DEL product:88；订阅者把读到的位置存下来，挂了从这个位置重新读，可能重复删一次，DEL 幂等所以没关系。">
+  <defs><marker id="ahc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-cg"/></marker></defs>
+  <rect x="20" y="40" width="170" height="110" rx="14" class="b-bk"/>
+  <text x="105" y="70" text-anchor="middle" class="t-h">任何写入口</text>
+  <text x="105" y="96" text-anchor="middle" class="t-s">商品服务</text>
+  <text x="105" y="116" text-anchor="middle" class="t-s">运营跑的 SQL 脚本</text>
+  <text x="105" y="136" text-anchor="middle" class="t-s">别的服务</text>
+  <rect x="250" y="40" width="190" height="110" rx="14" class="b-pd"/>
+  <text x="345" y="70" text-anchor="middle" class="t-h">MySQL</text>
+  <text x="345" y="96" text-anchor="middle" class="t-s">提交时写 binlog</text>
+  <rect x="268" y="108" width="154" height="30" rx="6" class="f-code" style="stroke:var(--pd);stroke-width:1.5"/>
+  <text x="345" y="128" text-anchor="middle" class="t-monos">Update_rows id=88</text>
+  <rect x="510" y="40" width="210" height="110" rx="14" class="b-cg"/>
+  <text x="615" y="70" text-anchor="middle" class="t-h">binlog 订阅者</text>
+  <text x="615" y="96" text-anchor="middle" class="t-s">伪装成一个从库</text>
+  <text x="615" y="116" text-anchor="middle" class="t-s">Canal / Debezium /</text>
+  <text x="615" y="136" text-anchor="middle" class="t-s">BinaryLogClient</text>
+  <rect x="790" y="40" width="150" height="110" rx="14" class="b-rn"/>
+  <text x="865" y="80" text-anchor="middle" class="t-h">Redis</text>
+  <text x="865" y="108" text-anchor="middle" class="t-mono">DEL product:88</text>
+  <path d="M190 95 H242" class="e-ink" marker-end="url(#ah)"/>
+  <text x="216" y="86" text-anchor="middle" class="t-xs">只改库</text>
+  <path d="M440 95 H502" class="e-ink" style="stroke:var(--cg)" marker-end="url(#ahc)"/>
+  <text x="471" y="86" text-anchor="middle" class="t-xs">拉 binlog</text>
+  <path d="M720 95 H782" class="e-ink" style="stroke:var(--cg)" marker-end="url(#ahc)"/>
+  <text x="751" y="86" text-anchor="middle" class="t-xs">DEL</text>
+  <rect x="510" y="180" width="430" height="52" rx="10" class="b-dash"/>
+  <text x="525" y="202" class="t-s">记下读到哪儿了：binlog.000002 / 87322（或 GTID）</text>
+  <text x="525" y="222" class="t-s">挂了从记下的位置重读 → 同一条可能删两次，DEL 幂等，没关系</text>
+  <text x="20" y="190" class="t-b">只有提交了的改动才会进 binlog：</text>
+  <text x="20" y="212" class="t-s">回滚的事务不会触发删除，</text>
+  <text x="20" y="232" class="t-s">删除一定发生在提交之后。</text>
+</svg>
+    </div>
+    </figure>
+    <p class="verdict" data-role="cg"><b>为什么它和“删”是一对：</b>订阅者为了不丢，挂了以后会从上次记下的位置重读，同一个改动可能处理两次（至少一次）。如果动作是 SET 新值，重复和乱序都会出错；动作是 DEL，重复删、乱序删都没影响。它解决的是“删会不会丢”，不解决 ④-2 那个慢读回填：删除发生在提交后约 1 ms，比业务代码自己删还早，慢读照样能在它后面写回旧值（⑤ 里实测了）。</p>
+  </div>
+
+  <div class="sub" id="s4-api">
+    <h3><span class="sn">④-5</span>最少的写法</h3>
+    <div class="two">
+      <div class="codebox">
+        <div class="code-bar"><span class="n">读</span><span>商品服务：Cache-Aside</span></div>
+<pre><code>String v = redis.get("product:" + id);
+if (v != null) return v;
+v = toJson(productMapper.selectById(id));      <span class="cm">// 没命中才查库</span>
+redis.setex("product:" + id, 1800 + rnd(300), v); <span class="cm">// 一定带过期</span>
+return v;</code></pre>
+      </div>
+      <div class="codebox">
+        <div class="code-bar"><span class="n">写</span><span>运营后台：先改库，提交后再删</span></div>
+<pre><code>@Transactional
+public void changePrice(long id, BigDecimal price) {
+    productMapper.updatePrice(id, price);
+    <span class="cm">// 不能在这里直接删：事务还没提交，等于“先删后改”</span>
+    TransactionSynchronizationManager.registerSynchronization(
+        new TransactionSynchronization() {
+            @Override public void afterCommit() {
+                redis.del("product:" + id);   <span class="cm">// 失败要重试</span>
+            }
+        });
+}</code></pre>
+      </div>
+    </div>
+    <p class="tip">放到第⑥步的细节：删除失败怎么重试、读从库时怎么办、延迟双删等多久、版本号回填的 Lua、binlog 订阅的位点和顺序。</p>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>套进场景：交易靶场里把几种写法各跑 20 轮</h2>
+    <p class="lead">一个 Java 程序扮演商品服务和运营后台：4 个读线程每 1 ms 读一次 88 号（Cache-Aside），写线程按某种写法把价格从 399.00 改成 359.00。写完等 300 ms，对比 Redis 和数据库：Redis 里留着和库里不一样的值，就记一次“卡住”。</p>
+  </div>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">依赖</span><span>JDK 8 写法，<code>--release 8</code> 编译</span></div>
+<pre><code>io.lettuce:lettuce-core:6.8.2.RELEASE
+com.mysql:mysql-connector-j:9.7.0
+com.zendesk:mysql-binlog-connector-java:0.31.0
+<span class="cm"># 容器：redis:8.10.3-alpine、mysql:8.4（默认开 binlog，ROW 格式）</span></code></pre>
+    </div>
+    <div class="codebox">
+      <div class="code-bar"><span class="n">跑</span><span>交易靶场 · study-labs</span></div>
+<pre><code>cd java/redis/cache-consistency
+DOCKER="sudo docker" ./run.sh     <span class="cm"># 起两个容器，三组全跑，约 80 秒</span>
+./run.sh forced                   <span class="cm"># 容器留着，只跑一组</span>
+./run.sh clean                    <span class="cm"># 删容器</span></code></pre>
+    </div>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">核心</span><span><code>PriceChange.java</code> 里的读路径和几种写法</span></div>
+<pre><code><span class="cm">// 读：没命中 → 查库 → 回填（pauseMs 用来模拟查完库后停顿，只在 forced 组里用）</span>
+String v = r.get(KEY);
+if (v != null &amp;&amp; v.charAt(0) != '#') return;
+String fresh = dbValue(c);                          <span class="cm">// "399.00|v8"</span>
+if (pauseMs &gt; 0) sleep(pauseMs);
+r.setex(KEY, TTL, fresh);
+
+<span class="cm">// 写：每种写法一行</span>
+deleteFirst()   = p -&gt; { R.del(KEY); updatePrice(W, p); };
+updateDelete()  = p -&gt; { updatePrice(W, p); R.del(KEY); };
+updateSet()     = p -&gt; { long v = updatePrice(W, p); R.setex(KEY, TTL, p + "|v" + v); };
+doubleDelete(n) = p -&gt; { R.del(KEY); updatePrice(W, p); sleep(n); R.del(KEY); };</code></pre>
+  </div>
+
+  <div class="res-grid">
+    <div class="tbl-wrap">
+    <table class="t" style="min-width:440px">
+      <thead><tr><th>第一组 · 不做手脚</th><th>缓存开始时</th><th class="num">卡住 / 20</th></tr></thead>
+      <tbody>
+        <tr><th>① 先删缓存，再改库</th><td>热</td><td class="num bad">15，18</td></tr>
+        <tr><th>② 先改库，再删缓存</th><td>热</td><td class="num good">0，0</td></tr>
+        <tr><th>② 先改库，再删缓存</th><td>空（刚过期）</td><td class="num good">0，0</td></tr>
+        <tr><th>③ 先删 → 改库 → 等 100 ms → 再删</th><td>热</td><td class="num good">0，0</td></tr>
+        <tr><th>④ 先改库再 SET，两人同时改</th><td>热</td><td class="num good">0，0</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="tbl-wrap">
+    <table class="t" style="min-width:440px">
+      <thead><tr><th>第二组 · 排出最坏的先后</th><th>最后 Redis / DB</th><th>结果</th></tr></thead>
+      <tbody>
+        <tr><th>② 先改库再删，读停 50 ms</th><td><code>399 / 359</code></td><td class="bad">卡住</td></tr>
+        <tr><th>③ 延迟双删 100 ms，读停 50 ms</th><td><code>359 / 359</code></td><td class="good">一致</td></tr>
+        <tr><th>③ 延迟双删 100 ms，读停 150 ms</th><td><code>399 / 359</code></td><td class="bad">卡住</td></tr>
+        <tr><th>④ SET 新值，A 停 30 ms</th><td><code>359 / 329</code></td><td class="bad">卡住</td></tr>
+        <tr><th>⑤ 墓碑 + 带版本回填，读停 150 ms</th><td><code>359 / 359</code></td><td class="good">一致</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+  <pre class="console"><code><b>== binlog</b>：一个伪装成从库的客户端读 binlog，看到 trade.product 的 UPDATE 就 DEL product:&lt;id&gt;
+<span class="w">   改完库没删缓存（模拟进程挂了），500 ms 后 Redis 里 product:88 已被 binlog 订阅者删掉</span>
+<span class="w">   提交返回 → binlog 订阅者删完：p50 0.7 ms，最大 1.8 ms（20 次）</span>     <span class="cm"># 另一轮 p50 1.7 ms，最大 3.0 ms</span>
+<span class="r">   缓存刚过期 + 读停 50 ms 才回填：Redis=399.00|v275  DB=359.00|v276  卡住</span></code></pre>
+  <ul class="callouts">
+    <li><b>1</b><span>先删缓存基本必卡：删完到提交有 4～9 ms，4 个读线程每 1 ms 一次，几乎每轮都有一个读在这段里把 399 写回去。两次完整运行，分别是 15 轮和 18 轮。</span></li>
+    <li><b>2</b><span>先改库再删，自然跑一次也没碰上；第二组人为让读停 50 ms，才把它排出来。这个停顿在线上就是一次 Full GC 或一次网络重传。</span></li>
+    <li><b>3</b><span>延迟双删有用，但只防得住比“等待时间”短的停顿；墓碑加版本号不靠等，停多久都拦得住（墓碑 60 秒有效期内）。</span></li>
+    <li><b>4</b><span>binlog 订阅把“进程挂了没删”补上了，提交后一两毫秒就删掉；但它补不了第 2 条那个慢读。</span></li>
+  </ul>
+  <p class="tip">完整代码 → <a href="https://github.com/archeu/study-labs/tree/main/java/redis/cache-consistency">study-labs/java/redis/cache-consistency</a>（<code>PriceChange.java</code>、<code>run.sh</code>、README 里有预期输出和练习）</p>
+  <div class="done-box">到这里已经能交差了：写路径改成“提交后删缓存”，缓存都带过期时间，第 9、10 站就从“最长 30 分钟旧价”变成了“提交后几毫秒”。已知还没处理的细节：删失败怎么办（<a href="#p3">⑥ 坑 3</a>）、读从库会怎样（<a href="#p4">⑥ 坑 4</a>）、慢读回填要不要堵（<a href="#d1">⑥ 第三圈</a>）、4 个实例本地那份（下一个知识点）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>反例和误用：名字叫“先改库后删”，做出来不是</h2>
+  </div>
+
+  <div class="round"><span class="rb">第一圈 · 注意事项</span><span class="tip">每条都能从 ④ 推出来，点右边的标记跳回去</span></div>
+  <div class="pits">
+    <div class="pit" id="p1"><b><em>坑 1</em>在 <code>@Transactional</code> 方法里直接删缓存<a class="rootmark" href="#s4-order">← ④-2 先删的窗口</a></b>
+      <dl><dt>现象</dt><dd>代码顺序写的是“先 update 再 del”，线上却和“先删后改”一样频繁卡住。</dd>
+      <dt>根源</dt><dd>事务要等方法返回才提交，方法里的 DEL 其实发生在提交之前。</dd>
+      <dt>做法</dt><dd class="fix">放进 <code>afterCommit()</code>，或者用 <code>@TransactionalEventListener</code>（默认就是提交后执行）。</dd></dl></div>
+    <div class="pit" id="p2"><b><em>坑 2</em>改完库把缓存 SET 成新值<a class="rootmark" href="#s4-del">← ④-1 删不改</a></b>
+      <dl><dt>现象</dt><dd>两个运营前后脚改价，库里 329，缓存里 359。</dd>
+      <dt>根源</dt><dd>数据库按行锁排了先后，到达 Redis 的顺序没人排。</dd>
+      <dt>做法</dt><dd class="fix">写路径只 DEL。确实要预热，就在 DEL 之后让读路径去重建。</dd></dl></div>
+    <div class="pit" id="p3"><b><em>坑 3</em>DEL 失败了没人管<a class="rootmark" href="#s4-core">← ④ 没有共同提交点</a></b>
+      <dl><dt>现象</dt><dd>某次发布后零星几个商品卖旧价，半小时后自己好了。</dd>
+      <dt>根源</dt><dd>库已经提交，DEL 超时或者进程正好被重启，两次写只成功了一次。</dd>
+      <dt>做法</dt><dd class="fix">失败进重试队列（Redis Stream、MQ）；更省心的是统一交给 binlog 订阅删；过期时间是最后一道兜底，不能省。</dd></dl></div>
+    <div class="pit" id="p4"><b><em>坑 4</em>回填时读的是从库<a class="rootmark" href="#s4-order">← ④-2 读比写慢</a></b>
+      <dl><dt>现象</dt><dd>先改库再删也照样卡住，而且比平时频繁得多。</dd>
+      <dt>根源</dt><dd>主库提交、DEL 都做完了，从库还没追上；读请求没命中，从从库读到 399 写了回去。复制延迟把“读比写慢”从小概率变成了常态。</dd>
+      <dt>做法</dt><dd class="fix">回填缓存的那次查询走主库；或者延迟双删，等待时间要大于复制延迟（<a href="../database/mysql-replication-lag.html">复制延迟</a>那页量过它能有多大）。</dd></dl></div>
+    <div class="pit" id="p5"><b><em>坑 5</em>延迟双删的 sleep 写在请求线程里<a class="rootmark" href="#s4-race">← ④-3 推演台 ③</a></b>
+      <dl><dt>现象</dt><dd>改价接口每次都慢 500 ms；有时等了也没用，照样卡住。</dd>
+      <dt>根源</dt><dd>第二刀要晚于最慢那次回填，这个时长只能估：估短了没用（实测读停 150 ms、等 100 ms 时卡住），估长了接口变慢。</dd>
+      <dt>做法</dt><dd class="fix">第二次删放进延迟队列异步执行；它是概率上的补丁，别当成保证。</dd></dl></div>
+    <div class="pit" id="p6"><b><em>坑 6</em>缓存不设过期时间<a class="rootmark" href="#s4-core">← ④ 兜底</a></b>
+      <dl><dt>现象</dt><dd>一个商品的旧价卖了三天，直到有人手动删 key。</dd>
+      <dt>根源</dt><dd>上面任何一种竞态都可能留下旧值；没有过期时间，它就永远留着。</dd>
+      <dt>做法</dt><dd class="fix">所有缓存都带过期时间，再加随机抖动，防止同时过期（<a href="cache-problems.html">缓存雪崩</a>）。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈 · 使用规范</span></div>
+  <div class="rules-list">
+    <div class="rl"><b>写路径只删不改，删在提交之后</b><p>Spring 里用 <code>afterCommit</code> 或 <code>@TransactionalEventListener</code>。</p><p class="guard">坑 1、坑 2</p></div>
+    <div class="rl"><b>每个缓存 key 都有过期时间，加随机抖动</b><p>比如 <code>1800 + rnd(300)</code> 秒。</p><p class="guard">坑 6，以及缓存雪崩</p></div>
+    <div class="rl"><b>一张表的缓存只由一个地方负责删</b><p>要么业务代码删，要么 binlog 订阅统一删，别两边各删一套、出了事互相以为对方删了。</p><p class="guard">坑 3，以及 SQL 脚本改表后没人删</p></div>
+    <div class="rl"><b>回填缓存的查询走主库</b><p>读从库的只能是“不往缓存里写”的查询。</p><p class="guard">坑 4</p></div>
+    <div class="rl"><b>钱和库存不信缓存</b><p>详情页可以旧几毫秒；下单算钱、扣库存按数据库里的值来。</p><p class="guard">缓存旧值直接变成资损</p></div>
+    <div class="rl"><b>缓存值里带上版本号或更新时间</b><p>像 <code>359.00|v9</code> 这样，排查时一眼看出 Redis 里是哪一次的值，也给版本号回填留了口子。</p><p class="guard">排查“到底旧了多久”时无从下手</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈 · 深处</span></div>
+  <div class="deep">
+    <div class="dp" data-role="bk" id="d1">
+      <h4>把慢读回填彻底堵上：墓碑 + 版本号</h4>
+      <p>写路径不 DEL，而是写一个带新版本号的墓碑 <code>#|v9</code>（60 秒过期）；读路径回填时用 Lua 比版本，比缓存里旧就不写。比较和写入在 Redis 里一次做完，中间插不进别的命令。</p>
+<pre><code>local cur = redis.call('GET', KEYS[1])
+if cur then
+  local v = tonumber(string.match(cur, '|v(%d+)$'))
+  local tomb = string.sub(cur, 1, 1) == '#'
+  local mine = tonumber(ARGV[2])
+  if v and ((tomb and v &gt; mine) or ((not tomb) and v &gt;= mine))
+  then return 0 end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3]) return 1</code></pre>
+      <p>Facebook 的 memcache 用的是同一个思路，叫 lease：没命中时发一个令牌，期间来一次删除就让令牌作废，拿着作废令牌的回填被拒绝。代价是读写都要多带一个版本号，墓碑过期后的极端慢读仍然拦不住。多数业务用不着，详情页价格这种“旧几毫秒没关系”的更用不着。</p>
+    </div>
+    <div class="dp" data-role="cg" id="d2">
+      <h4>binlog 订阅在生产上要多管的几件事</h4>
+      <ul>
+        <li><b>格式</b>：要 ROW 格式的 binlog 才拿得到行的前后值。MySQL 5.7.7 起默认就是 ROW；Debezium 还要求 <code>binlog_row_image=FULL</code>（也是默认值）。</li>
+        <li><b>位点</b>：订阅者记下读到的文件和位置（或 GTID），重启后从那里接着读。所以是“至少一次”，配上幂等的 DEL 正好。</li>
+        <li><b>延迟</b>：本机直连实测提交后 0.7～1.7 ms 删掉。生产上常见的链路是 Canal 或 Debezium → Kafka → 消费者删缓存，多了两跳，延迟按几十到几百毫秒估（估算，没有实测），离 1 秒的标准还有余量，但要监控它。</li>
+        <li><b>顺序</b>：同一个 key 的删除乱序没关系；要是想顺手做别的事（比如发改价通知），就得按主键分区保证顺序。</li>
+      </ul>
+    </div>
+    <div class="dp" data-role="pd" id="d3">
+      <h4>为什么不追求强一致</h4>
+      <p>要让任何时刻读到的都是新价，只有两条路：读写互斥（改价时读请求要等），或者 Redis 和 MySQL 做两阶段提交。前者让每个读都可能被一次写卡住，后者 Redis 根本不支持。缓存的意义就是用“可能旧一点”换“快很多”，所以合理的目标是“最终一致，而且窗口有上限”：先改后删管住常态，binlog 订阅管住丢删，过期时间管住剩下的所有意外。</p>
+    </div>
+    <div class="dp" data-role="of" id="d4">
+      <h4>1 秒的预算花在哪</h4>
+      <p>靶场标准是改价后 1 秒内都卖新价。Redis 这一层花掉的是“提交 → DEL”：业务代码删 1～3 ms，binlog 直连 1～2 ms，经过 Kafka 按几百毫秒估。剩下的预算要留给第 11 站：4 个实例的 Caffeine 本地缓存还没动，它们只靠 Pub/Sub 广播失效，<a href="../java/pano-j07-product-detail-cache.html#s-11">全景</a>里实测 11～26 ms 跟上。这是下一个知识点“多级缓存”要讲的。</p>
+    </div>
+  </div>
+  <p class="tip">版本说明：<code>TransactionSynchronization</code> 从 Spring 5.3 起是带默认方法的接口，可以直接 <code>new</code> 匿名类只重写 <code>afterCommit</code>；5.2 及以前要继承 <code>TransactionSynchronizationAdapter</code>（5.3 起已标记废弃）。</p>
+
+  <div class="todo">
+    <b>下一圈</b>
+    <ul class="next">
+      <li>多级缓存：Caffeine 加 Redis，4 个实例本地那份怎么在 1 秒内跟上（J07 下钻第 2 个）</li>
+      <li>binlog 订阅整条链路：Canal 或 Debezium → Kafka → 消费者，位点、重试、监控延迟</li>
+      <li>改价要同时发消息给别的系统：本地消息表（outbox）和事务消息</li>
+      <li>删掉一个热 key 的那一刻就是一次缓存击穿：改价和<a href="cache-problems.html">重建锁</a>怎么配合</li>
+      <li>跨机房：两个机房各有一套 Redis，失效消息怎么送过去</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：把靶场里的写路径改好</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="bk"><h4>1 · 删失败要重试</h4><p>在 <code>updateDelete()</code> 里让 DEL 有 30% 概率抛异常（模拟超时），先看卡住几轮；再加一个重试队列（失败的 key 放进 List，后台线程每 100 ms 重删），再跑。</p><p class="uses">用到：坑 3</p></div>
+    <div class="exc" data-role="of"><h4>2 · 读从库</h4><p>照 <a href="../database/mysql-replication-lag.html">复制延迟</a>那页的实验加一个从库，让读线程回填时查从库，看 ② 先改库再删还卡不卡；再把回填改回主库，或换成延迟双删。</p><p class="uses">用到：坑 4、规范“回填走主库”</p></div>
+    <div class="exc" data-role="cg"><h4>3 · 只留 binlog 删</h4><p>把业务代码里的 DEL 全部去掉，只靠 <code>binlog</code> 组里的订阅者删，再跑第一组；再用 <code>docker exec</code> 直接执行一条 UPDATE，看缓存有没有被删。</p><p class="uses">用到：④-4、规范“一个地方负责删”</p></div>
+  </div>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这页的精华。</summary><p>数据库和 Redis 没法一起提交，缓存一定会短暂地旧；设计目标是窗口短、旧值不被写回去、删除丢了有兜底，所以“先改库，提交后删缓存，删不是改，带过期时间，删除要可靠就订阅 binlog”。</p></details>
+    <details><summary>2. 只靠过期时间，痛在哪？</summary><p>过期时间长，旧价能卖到过期为止（30 分钟）；过期时间短，命中率掉下来，缓存失去意义。两头都不行，所以写路径得主动去让缓存失效。</p></details>
+    <details><summary>3. “先删缓存再改库”为什么几乎每轮都卡住？根源是哪条原理？</summary><p>④-2：删除到提交之间是整个写事务（几毫秒），这段时间里新值没提交、别人读不到（MVCC），任何一次没命中的读都会从库里读到旧值再写回去。读比写快得多，所以几乎必中。</p></details>
+    <details><summary>4. 预测：把回填缓存的查询从主库改成从库，复制延迟 200 ms，“先改库再删”会怎样？延迟双删要等多久？</summary><p>会频繁卡住：DEL 之后的第一个读从从库拿到 399 写回去，概率不再取决于“读停顿”，而是取决于这 200 ms 里有没有读请求。延迟双删的等待要明显大于复制延迟加一次读的耗时，比如 500 ms 以上，而且要异步做。从 ④-2 “读比写慢”这个条件推出来：复制延迟让读系统性地比写慢。</p></details>
+    <details><summary>5. 预测：订阅 binlog 删缓存以后，还要不要在业务代码里删？如果两边都删会怎样？</summary><p>可以不删。两边都删不会出错（DEL 幂等），只是多一次网络往返；麻烦在维护上：哪天有人只改了一边，另一边以为对方会删。规范是一张表只由一个地方负责。至于慢读回填，两边都删也堵不住，因为两次删除都早于那次慢回填（④-4）。</p></details>
+    <details><summary>6. 放回全景：第 9、10 站前后各发生了什么？这一页讲的东西坏了，整条链路会怎样？</summary><p>前面是第 1～8 站的读：Caffeine 没命中 → Redis 没命中 → 布隆过滤器 → 重建锁 → 查库 → 回填 Redis 和本地。第 9 站运营改库提交，第 10 站删 Redis，第 11 站 Pub/Sub 广播让 4 个实例作废本地那份。第 10 站坏了（顺序反了、删失败、改成了 SET），Redis 里留下 399，第 11 站广播之后各实例本地作废、再来读 Redis，又把 399 拿回本地。也就是说，第 11 站做得再好也救不了第 10 站，整条链路卖 399 直到 Redis 过期。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>标准档。<span class="tag-real">实测</span> 的数字来自本机：2 核 ARM，JDK 17.0.21（<code>--release 8</code>），Lettuce 6.8.2，Connector/J 9.7.0，mysql-binlog-connector-java 0.31.0，Docker 里的 <code>redis:8.10.3-alpine</code> 和 <code>mysql:8.4</code>（8.4.13，默认配置）；第一组完整跑了两遍，两遍的数字都列出来了。生产链路（Canal / Debezium 经 Kafka）的延迟是估算。Spring 的 <code>afterCommit</code> 和 <code>@TransactionalEventListener</code> 来自 Spring Framework 参考文档；“删而不改，因为删是幂等的”和 lease 来自 Nishtala 等，<i>Scaling Memcache at Facebook</i>，NSDI 2013；binlog 格式要求来自 MySQL 8.4 参考手册和 Debezium MySQL 连接器文档。</p>
+  <p>相关：<a href="../java/pano-j07-product-detail-cache.html">全景：一次商品详情查询</a> · <a href="cache-problems.html">缓存穿透、击穿与雪崩</a> · <a href="redis-lua-tx.html">Redis Lua 脚本与事务</a> · <a href="redis-stream-mq.html">Redis Stream 与消息队列</a> · <a href="../database/mysql-redo-undo-binlog.html">redo、undo、binlog 与两阶段提交</a> · <a href="../database/mysql-replication-lag.html">主从复制与复制延迟</a> · <a href="../database/mysql-mvcc-lock.html">MVCC 与锁</a> · <a href="../java/roadmap.html#j07">Java 地图 J07</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 竞态推演：数据库只认已提交的值；Redis 里的值带版本号；墓碑是 #|v版本。
+var WHO = {
+  w:  ['运营后台', 'bk'], wA: ['运营 A', 'bk'], wB: ['运营 B', 'bk'],
+  r:  ['读请求 1', 'of'], r2: ['读请求 2', 'of'], sub: ['binlog 订阅者', 'cg']
+};
+var SCN = {
+  delFirst: { name: '① 先删缓存，再改库', warm: true, ops: [
+    ['w', 'del'], ['w', 'update', '359.00'], ['r', 'get'], ['r', 'select'], ['r', 'set'], ['w', 'commit'], ['r2', 'get']
+  ]},
+  updDel: { name: '② 先改库，再删缓存', warm: true, ops: [
+    ['w', 'updc', '359.00'], ['r', 'get'], ['w', 'del'], ['r2', 'get'], ['r2', 'select'], ['r2', 'set']
+  ]},
+  updDelSlow: { name: '② 先改库再删，碰上慢读', warm: false, ops: [
+    ['r', 'get'], ['r', 'select'], ['r', 'pause', 50], ['w', 'updc', '359.00'], ['w', 'del'], ['r', 'set'], ['r2', 'get']
+  ]},
+  double: { name: '③ 延迟双删（等 100 ms）', warm: true, ops: [
+    ['w', 'del'], ['r', 'get'], ['r', 'select'], ['r', 'pause', 50], ['w', 'updc', '359.00'], ['r', 'set'],
+    ['w', 'wait', 100], ['w', 'del'], ['r2', 'get'], ['r2', 'select'], ['r2', 'set']
+  ]},
+  twoSet: { name: '④ 改完库 SET 新值，两人同时改', warm: true, ops: [
+    ['wA', 'updc', '359.00'], ['wA', 'pause', 30], ['wB', 'updc', '329.00'], ['wB', 'wset'], ['wA', 'wset'], ['r', 'get']
+  ]},
+  tomb: { name: '⑤ 墓碑 + 带版本回填', warm: false, ops: [
+    ['r', 'get'], ['r', 'select'], ['r', 'pause', 150], ['w', 'updc', '359.00'], ['w', 'tomb'],
+    ['r', 'gset'], ['r2', 'get'], ['r2', 'select'], ['r2', 'gset']
+  ]}
+};
+
+function fmt(x) { return x == null ? '（空）' : (x.tomb ? '墓碑 v' + x.v : x.p + ' v' + x.v); }
+
+function simulate(id) {
+  var sc = SCN[id];
+  var db = { p: '399.00', v: 8 };
+  var redis = sc.warm ? { p: '399.00', v: 8, tomb: false } : null;
+  var pend = {}, row = {}, wrote = {};
+  var steps = [];
+  sc.ops.forEach(function (op) {
+    var who = op[0], kind = op[1], text = '', chg = '';
+    if (kind === 'del') {
+      text = redis == null ? 'DEL product:88（本来就是空的，什么也没删）' : 'DEL product:88';
+      redis = null; chg = 'redis';
+    } else if (kind === 'update') {
+      pend[who] = op[2];
+      text = 'UPDATE price = ' + op[2] + '，事务还没提交（等锁、写 redo 和 binlog）。别的连接看不见新价';
+    } else if (kind === 'commit') {
+      db = { p: pend[who], v: db.v + 1 }; wrote[who] = db; delete pend[who];
+      text = 'COMMIT，新价对所有人可见'; chg = 'db';
+    } else if (kind === 'updc') {
+      db = { p: op[2], v: db.v + 1 }; wrote[who] = db;
+      text = 'UPDATE price = ' + op[2] + ' 并提交'; chg = 'db';
+    } else if (kind === 'get') {
+      if (redis && !redis.tomb) { text = 'GET product:88 命中，返回 ' + redis.p + (redis.p !== db.p ? '（旧价）' : ''); }
+      else if (redis && redis.tomb) { text = 'GET product:88 拿到墓碑，当成没命中'; }
+      else { text = 'GET product:88 没命中'; }
+    } else if (kind === 'select') {
+      row[who] = { p: db.p, v: db.v };
+      text = 'SELECT 读到 ' + db.p + ' v' + db.v + (Object.keys(pend).length ? '（新价还没提交，读到的是旧的）' : '');
+    } else if (kind === 'pause') {
+      text = '停了 ' + op[2] + ' ms 才接着走（Full GC、序列化大对象、网络抖动）';
+    } else if (kind === 'wait') {
+      text = 'sleep ' + op[2] + ' ms，等可能的旧值回填落地';
+    } else if (kind === 'set') {
+      redis = { p: row[who].p, v: row[who].v, tomb: false };
+      text = 'SET product:88 ' + row[who].p + ' EX 1800（回填）'; chg = 'redis';
+    } else if (kind === 'wset') {
+      redis = { p: wrote[who].p, v: wrote[who].v, tomb: false };
+      text = 'SET product:88 ' + wrote[who].p + '（写路径直接改缓存）'; chg = 'redis';
+    } else if (kind === 'tomb') {
+      redis = { p: null, v: db.v, tomb: true };
+      text = 'SET product:88 "#|v' + db.v + '" EX 60（留墓碑，记下最新版本号）'; chg = 'redis';
+    } else if (kind === 'gset') {
+      var mine = row[who];
+      var reject = redis && ((redis.tomb && redis.v > mine.v) || (!redis.tomb && redis.v >= mine.v));
+      if (reject) { text = 'Lua 回填：缓存里是 v' + redis.v + '，比手里的 v' + mine.v + ' 新，放弃回填'; }
+      else { redis = { p: mine.p, v: mine.v, tomb: false }; text = 'Lua 回填：版本不比缓存里旧，写入 ' + mine.p + ' v' + mine.v; chg = 'redis'; }
+    }
+    steps.push({ who: who, text: text, db: fmt(db), redis: fmt(redis), chg: chg,
+      stale: !!(redis && !redis.tomb && redis.p !== db.p) });
+  });
+  var stuck = !!(redis && !redis.tomb && redis.p !== db.p);
+  return { name: sc.name, steps: steps, stuck: stuck, db: fmt(db), redis: fmt(redis) };
+}
+/*SIM-END*/
+
+(function () {
+  var NOTE = {
+    delFirst: '删掉到提交之间是一整个写事务那么长（实测 4～9 ms），读请求查库只要几百微秒，这段时间里任何一次没命中都会把旧价写回去。靶场实测 20 轮卡住 15～18 轮。',
+    updDel: '旧价只在“提交”到“DEL”之间被读到，实测 1～3 ms；删掉以后下一个读请求从库里重建。靶场实测 20 轮 0 轮卡住。',
+    updDelSlow: '要同时满足三件事：缓存正好空着、读在提交前查完库、回填晚于 DEL。读一次库通常比写一次库快，所以平时很难碰上（自然跑 20 轮 0 次），读线程人为停 50 ms 才复现。',
+    double: '第二次 DEL 把慢读写回去的旧价清掉了。前提是读的停顿短于这 100 ms；靶场里读停 150 ms 时，回填落在第二次删之后，照样卡住。',
+    twoSet: '数据库按行锁排好了先后（A 先 B 后），Redis 的两次 SET 却是 B 先 A 后到。SET 的结果取决于谁最后到，DEL 不管谁先谁后，结果都是“没有”。',
+    tomb: '写路径留下带新版本号的墓碑，慢读手里的版本更旧，回填被 Lua 拒掉；下一次读把墓碑当成没命中，从库里拿到新价。不用 sleep，也不怕读停多久（墓碑 60 秒内）。'
+  };
+  var box = document.getElementById('race');
+  if (!box) return;
+  var btns = box.querySelectorAll('[data-scn]');
+  var guessBtns = box.querySelectorAll('[data-guess]');
+  var body = box.querySelector('tbody');
+  var out = box.querySelector('.race-out');
+  var info = box.querySelector('.race-info');
+  var autoBtn = box.querySelector('[data-act="auto"]');
+  var cur = 'delFirst', res = null, at = 0, guess = null, timer = null;
+
+  function render() {
+    var html = '';
+    res.steps.forEach(function (s, i) {
+      var cls = i + 1 > at ? 'fut' : (i + 1 === at ? 'cur' : '');
+      var w = WHO[s.who];
+      html += '<tr class="' + cls + '"><td class="n">' + (i + 1) + '</td><td class="who"><span data-role="' + w[1] + '">' + w[0] + '</span></td><td>' + s.text +
+        '</td><td class="st' + (s.chg === 'db' ? ' chg new' : '') + '">' + s.db + '</td><td class="st' + (s.chg === 'redis' ? ' chg' : '') + (s.stale ? ' old' : '') + '">' + s.redis + '</td></tr>';
+    });
+    body.innerHTML = html;
+    info.textContent = '第 ' + at + ' / ' + res.steps.length + ' 步';
+    if (at < res.steps.length) {
+      out.setAttribute('data-role', 'other');
+      out.innerHTML = guess ? '你猜：' + (guess === 'stuck' ? '卡在旧价' : '和数据库一致') + '。点“下一步”往下走。' : '先猜：走完以后，Redis 里的 88 号和数据库一致吗？';
+    } else {
+      out.setAttribute('data-role', res.stuck ? 'bad' : 'done');
+      var verdict = res.stuck ? '<b>卡住：</b>数据库 ' + res.db + '，Redis ' + res.redis + '，要等 30 分钟过期才好。' : '<b>一致：</b>数据库 ' + res.db + '，Redis ' + res.redis + '。';
+      var g = guess ? ((guess === 'stuck') === res.stuck ? '猜对了。' : '猜错了。') : '';
+      out.innerHTML = g + verdict + ' ' + NOTE[cur];
+    }
+    guessBtns.forEach(function (b) {
+      b.classList.remove('right', 'wrong');
+      if (at >= res.steps.length && b.getAttribute('aria-pressed') === 'true') {
+        b.classList.add((b.dataset.guess === 'stuck') === res.stuck ? 'right' : 'wrong');
+      }
+    });
+  }
+  function stop() { if (timer) { clearInterval(timer); timer = null; autoBtn.textContent = '自动播放'; } }
+  function load(id) {
+    stop(); cur = id; res = simulate(id); at = 0; guess = null;
+    btns.forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.scn === id ? 'true' : 'false'); });
+    guessBtns.forEach(function (b) { b.setAttribute('aria-pressed', 'false'); });
+    render();
+  }
+  function step(d) { at = Math.max(0, Math.min(res.steps.length, at + d)); render(); if (at >= res.steps.length) stop(); }
+  btns.forEach(function (b) { b.addEventListener('click', function () { load(b.dataset.scn); }); });
+  guessBtns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      guess = b.dataset.guess;
+      guessBtns.forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+      render();
+    });
+  });
+  box.querySelector('[data-act="prev"]').addEventListener('click', function () { stop(); step(-1); });
+  box.querySelector('[data-act="next"]').addEventListener('click', function () { stop(); step(1); });
+  box.querySelector('[data-act="reset"]').addEventListener('click', function () { stop(); at = 0; render(); });
+  autoBtn.addEventListener('click', function () {
+    if (timer) { stop(); return; }
+    if (at >= res.steps.length) at = 0;
+    autoBtn.textContent = '暂停';
+    timer = setInterval(function () { step(1); }, 1100);
+  });
+  box.addEventListener('keydown', function (e) {
+    if (e.target.closest && e.target.closest('button')) return;
+    if (e.key === 'ArrowRight') { stop(); step(1); e.preventDefault(); }
+    if (e.key === 'ArrowLeft') { stop(); step(-1); e.preventDefault(); }
+  });
+  load('delFirst');
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
