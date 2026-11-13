@@ -113,6 +113,7 @@
 | 12 | [改完价，详情页还卖 399：先改库还是先删缓存、延迟双删、订阅 binlog](https://archeu.github.io/study-notes/redis/cache-consistency.html) | 先删后改为什么必卡、删不改、先改后删剩下的慢读竞态、延迟双删、订阅 binlog 删缓存、墓碑加版本号回填、交易靶场 6 种写法实测，竞态推演台 |
 | 13 | [4 台机器各存一份 88 号：Caffeine 加 Redis 两级缓存](https://archeu.github.io/study-notes/redis/cache-multilevel.html) | 两级缓存读写路径、为什么广播删除再配短过期、先删 Redis 再广播、get(key, loader) 和桶锁、订阅断线丢消息与断线即清、CLIENT TRACKING / Redisson / JetCache 对比、refreshAfterWrite 版本差异，两级缓存推演台 |
 | 14 | [88 号过期那一刻：缓存穿透、击穿、雪崩与大 key、热 key](https://archeu.github.io/study-notes/redis/cache-five-holes.html) | J07 第 3 个下钻知识点（第二圈）：交易靶场里实测穿透、击穿、雪崩三组对比，挡在前面、排队、打散、允许旧四类防法的取舍，重建锁对逻辑过期，大 key 堵住共享连接，HOTKEYS 找热 key，DEL 对 UNLINK，击穿实验台 |
+| 15 | [锁过期时 A 还在查库：看门狗、fencing token 与 Lua 条件写](https://archeu.github.io/study-notes/redis/redis-lock-expire-fencing.html) | 锁是租约所以会过期、A 自己判断为什么不行、锁守卫与版本守卫（fencing token）、DEL 换墓碑、Redisson 看门狗挡不住进程停住、Lua 脚本 BUSY 与 NOSCRIPT、Redlock 之争，三条时间线 × 五种回填写法实验台 |
 
 ## Kafka
 

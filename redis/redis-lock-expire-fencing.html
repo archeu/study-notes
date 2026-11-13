@@ -1,0 +1,1191 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>锁过期时 A 还在查库：看门狗、fencing token 与 Lua 条件写</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J07 knowledge point 4 "distributed lock + Lua" (second round), stations 5 and 7 of the J07 panorama. Roles: of = instance A / the rebuild lock it holds, pd = instance B, cg = background price change (stations 9-10), bk = guarded write on the Redis side (Lua lock guard / version guard / fencing), rn = Redisson watchdog, g2 = Lua script running inside Redis; bad / done / neutral keep their repo-wide meaning. Interactive: one timeline lab in section 6 (guess first, 3 timelines x 5 write methods, rendered as an SVG timeline). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Redis</span><span aria-hidden="true">/</span><span class="tb-here">锁过期时 A 还在查库</span></div></nav>
+<main>
+<header class="hero">
+  <p class="kicker">SET NX PX · Lua 条件写 · fencing token · 版本墓碑 · Redisson 看门狗 · RFencedLock · busy-reply-threshold · EVALSHA · Redis 8.10 · Redisson 4.8</p>
+  <h1>锁过期时 A 还在查库：看门狗、fencing token 与 Lua 条件写</h1>
+  <p class="lead">Redis 上的锁其实是一份<b>租约</b>：时间一到就被收回，拿锁的进程自己并不知道。所以锁只能把同时查库的人减到大约一个，<b>写得对不对，要由被写的那一方把关</b>：写之前在那里比一下“我还算数吗”，比锁的 token，或者比数据的版本号。比和写必须一步做完，这一步用 Lua 在 Redis 里完成。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j07-product-detail-cache.html#s-5">一次商品详情查询 · 第 5、7 站</a></span><span>地图：<a href="../java/roadmap.html#j07">J07 · 分布式锁与 Lua</a></span><span>第一圈：<a href="redis-distributed-lock.html">Redis 分布式锁</a>、<a href="redis-lua-tx.html">Redis Lua 脚本与事务</a></span><span>⑤ 和 ⑥ 的代码：<a href="https://github.com/archeu/study-labs/tree/main/java/redis/redis-lock-expire-fencing">完整代码 →</a></span></p>
+  <p class="scene"><b>下一圈</b><span>第一圈讲了锁的五次进化、Redisson 和 Lua 的基本用法；<a href="cache-five-holes.html">88 号过期那一刻</a>讲了重建锁让人排队。这一圈只盯一个时刻：锁到点过期了，拿锁的 A 还没干完。A 回来写的那一下，会不会把旧价写进缓存？</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：A 回来的时候，锁已经不是它的了</h2>
+    <p class="lead">在全景第 5 站，这一步要解决的是：88 号刚过期，4 个实例几百个请求同时没命中，只放一个去查库。第 7 站回填以后用 Lua 解锁，只删自己的锁。这两站都假定 A 在 3 秒内干完。可锁的 <code>PX 3000</code> 是估出来的：慢 SQL、一次长 GC、一次网络重传，都能让 A 晚回来。这期间运营刚好把 88 号从 399 改成 299，A 手里却还是 399 那一行。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="时间线 T1：A 在 0 秒抢到锁并查到 399 元；1 秒时后台把价格改成 299 并删缓存；3 秒时 A 的锁到点过期；3.3 秒 B 来读，缓存空、锁已过期，B 抢到锁、查到 299、回填；4 秒 A 停顿结束，SET 399，缓存从 299 变回 399，还要挂 30 分钟。">
+  <text x="10" y="50" class="t-b">锁</text><text x="10" y="64" class="t-monos">lock:product:88</text>
+  <rect x="140" y="34" width="480" height="30" rx="6" class="b-of"/><text x="380" y="54" text-anchor="middle" class="t-of">A 的锁，PX 3000</text>
+  <rect x="668" y="34" width="16" height="30" rx="4" class="b-pd"/><text x="692" y="54" class="t-pd">B 的锁（用完就放）</text>
+
+  <text x="10" y="104" class="t-b">A（实例 1）</text>
+  <rect x="140" y="88" width="24" height="30" rx="6" class="b-neu"/><text x="152" y="108" text-anchor="middle" class="t-xs">查</text>
+  <rect x="166" y="88" width="436" height="30" rx="6" class="b-of"/><text x="384" y="108" text-anchor="middle" class="t-of">拿到 399（version 1），还在处理</text>
+  <rect x="604" y="88" width="176" height="30" rx="6" class="b-bad"/><text x="692" y="108" text-anchor="middle" class="t-bad">GC 停顿 1.1 s</text>
+  <circle cx="780" cy="103" r="6" class="f-bad"/><text x="792" y="108" class="t-bad">SET 399</text>
+
+  <text x="10" y="156" class="t-b">后台改价</text>
+  <path d="M300,140 l9,11 l-9,11 l-9,-11 z" class="f-cg"/><text x="316" y="156" class="t-cg">改成 299（version 2），DEL 缓存</text>
+
+  <text x="10" y="208" class="t-b">B（实例 2）</text>
+  <text x="660" y="208" text-anchor="end" class="t-s">3.3 s 来读：缓存空、锁已过期 →</text>
+  <rect x="668" y="192" width="40" height="30" rx="6" class="b-pd"/><text x="716" y="212" class="t-pd">抢锁、查到 299、回填</text>
+
+  <text x="10" y="258" class="t-b">缓存</text><text x="10" y="272" class="t-monos">product:88</text>
+  <rect x="140" y="242" width="526" height="30" rx="6" class="b-dash"/><text x="403" y="262" text-anchor="middle" class="t-xs">空（88 号刚过期）</text>
+  <rect x="668" y="242" width="110" height="30" rx="6" class="b-good"/><text x="723" y="262" text-anchor="middle" class="t-good">299 ✓</text>
+  <rect x="780" y="242" width="170" height="30" rx="6" class="b-bad"/><text x="865" y="262" text-anchor="middle" class="t-bad">399 ✗ 挂 30 分钟</text>
+
+  <line x1="620" y1="24" x2="620" y2="280" class="e-dash"/><text x="616" y="20" text-anchor="end" class="t-bad">3.0 s 锁到点</text>
+  <line x1="140" y1="290" x2="940" y2="290" class="e-axis"/>
+  <text x="140" y="300" class="t-xs" text-anchor="middle">0 s</text><text x="300" y="300" class="t-xs" text-anchor="middle">1 s</text><text x="460" y="300" class="t-xs" text-anchor="middle">2 s</text><text x="780" y="300" class="t-xs" text-anchor="middle">4 s</text>
+</svg>
+  </div>
+  <figcaption>交易靶场实测的 T1 时间线，回填用的是普通的 <code>SET</code>。A 不知道自己的锁 3.0 s 就没了，4.0 s 回来照样写，把 B 刚填好的 299 盖成 399。下一次过期是 30 分钟以后，这期间详情页一直卖 399。</figcaption>
+  </figure>
+  <p class="pick-line">要做成的事：锁过期是常态，不是事故。A 回来时，缓存里绝不能留下比数据库旧的价格。地图给 J07 定的过关标准里有一条：<b>说出你选的一致性方案能接受的最坏情况</b>。这一页就是把“锁过期”这条最坏情况讲完。</p>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>不用它会怎样：三条时间线，直接写都错</h2>
+    <p class="lead">在交易靶场里把 A 的慢做成三种情况，每种跑一遍回填。数据库用一个可以改的变量代替，第 1 秒改价，第 4.6 秒看缓存里最后是几块钱。</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t mx">
+      <thead><tr><th>回填的写法</th><th>T1 有人接手<br><small>A 4.0 s 才写，B 3.3 s 已填好 299</small></th><th>T2 没人接手<br><small>A 4.0 s 才写，没有别人来读</small></th><th>T3 锁没过期<br><small>A 2.0 s 写，锁 3.0 s 才到期</small></th></tr></thead>
+      <tbody>
+        <tr><td>直接 <code>SET</code></td><td class="c bad">399 ✗</td><td class="c bad">399 ✗</td><td class="c bad">399 ✗</td></tr>
+        <tr><td>先 <code>GET</code> 锁比 token，是自己的再 <code>SET</code></td><td class="c bad">399 ✗<small>2.9 s 比对时锁还在</small></td><td class="c bad">399 ✗</td><td class="c bad">399 ✗</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip"><span class="tag-real">实测</span> Redis 8.10.3 同机容器，两次运行结果相同。✗ 的格子里，399 都还要挂 30 分钟。完整的 3 × 5 张表在 ⑤。</p>
+  <div class="two">
+    <div class="verdict" data-role="bad"><b>第二行是最常见的误用。</b>看上去已经很小心了：写之前先确认锁还是自己的。可确认发生在 2.9 s，写发生在 4.0 s，中间那 1.1 s 的 GC 停顿里，锁过期了，B 进来了。<b>客户端看到的“锁还在”，传到 Redis 时已经过时了。</b></div>
+    <div class="verdict" data-role="other"><b>T3 说明锁本来就管不着改价。</b>A 的锁一直有效，A 照样把 399 写回去了：A 在 0 s 读库，改价发生在 1 s。这是<a href="cache-consistency.html">缓存一致性</a>那页讲的“读到旧值、晚写回去”。锁只保证同一时刻只有一个人在重建，管不着重建期间数据库变了。</div>
+  </div>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种流派：让锁别过期，还是让迟到的写不进去</h2>
+    <p class="lead">一类想办法让锁别在 A 干完之前过期，另一类承认锁会过期，改在被写的那一方挡住迟到的写。</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>流派</th><th>做法</th><th>挡得住</th><th>挡不住</th></tr></thead>
+      <tbody>
+        <tr><th style="color:var(--of)">把锁定长一点</th><td><code>PX 30000</code>，估一个“肯定够”的时间</td><td>偶尔的慢查询</td><td>拿锁的实例挂了，锁要等 30 秒才放，这 30 秒里所有人都在等；更长的停顿照样挡不住</td></tr>
+        <tr><th style="color:var(--rn)">看门狗续期</th><td>Redisson <code>lock()</code> 不带 leaseTime：后台每 10 秒续一次，续到 30 秒</td><td>活干多久，锁就续多久；进程挂了，最多 30 秒后自动放</td><td>整个进程停住（长 GC、<code>SIGSTOP</code>、虚机被挂起），或者连不上 Redis：续期也跟着停。<span class="tag-real">实测</span>停住 2.07 s 后锁就过期了（看门狗设的 3 s）</td></tr>
+        <tr><th style="color:var(--bk)">锁守卫</th><td>回填用一段 Lua：锁里还是我的 token，才 <code>SET</code> 并解锁</td><td>锁过期以后才到的写（T1、T2）</td><td>锁没过期、但数据库已经改了（T3）</td></tr>
+        <tr><th style="color:var(--bk)">版本守卫（fencing token）</th><td>回填用一段 Lua：缓存里那份的 version 不比我新，才 <code>SET</code>；改价时写一个带新 version 的墓碑，不 <code>DEL</code></td><td>T1、T2、T3 全挡住，不管锁过没过期</td><td>表里要有单调递增的 version；墓碑过期以后才到的写</td></tr>
+        <tr><th style="color:var(--neutral)">换一种锁服务</th><td>ZooKeeper、etcd：会话或租约加上单调递增的 revision；Redlock：向 5 个互相独立的 Redis 主节点加锁，过半成功才算</td><td>Redis 主从切换时锁丢失</td><td>停顿照样会让租约过期；写的那一方不检查编号，照样有迟到的写</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line">选择规则：<b>锁保护的是谁，就在谁那里把关</b>。锁本身只用来少查几次库，写得对不对靠条件写。交易靶场的选法：看门狗减少锁过期的次数；回填用版本守卫；改价写墓碑。没有 version 列的表，退一步用锁守卫，T3 那种情况交给延迟双删或订阅 binlog。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>核心取舍：拿锁的人说了不算，被写的那一方说了算</h2>
+    <p class="lead">锁一定会过期，拿锁的进程又一定会停顿，这两件事都改不了。能改的只有一件：<b>谁来判断“这次写还算不算数”</b>。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li>重建锁是 <code>SET lock:product:88 &lt;token&gt; NX PX 3000</code>，解锁先比 token 再删：<a href="redis-distributed-lock.html">Redis 分布式锁</a>（第一圈“五次进化”）。</li>
+      <li>Redis 一个主线程按顺序执行命令，一段 Lua 脚本整个算一条命令：<a href="redis-threading-io.html">线程模型与 IO 多路复用</a>，<a href="redis-lua-tx.html">Lua 脚本与事务</a>。</li>
+      <li>改价是先改库、再删缓存（全景<a href="../java/pano-j07-product-detail-cache.html#s-9">第 9</a>、<a href="../java/pano-j07-product-detail-cache.html#s-10">10 站</a>），为什么这个顺序：<a href="cache-consistency.html">缓存一致性</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="lease">锁是一份租约，到点就收</h3>
+  <div class="facts">
+    <div class="fact" data-role="of" id="w-lease"><h4>为什么非过期不可</h4><p>不设过期时间，拿锁的实例一挂，锁就永远不放，88 号再也建不起缓存。设了过期时间，锁就成了<b>租约</b>（lease）：Redis 按自己的时钟到点收回，不管 A 干完没有。</p></div>
+    <div class="fact" data-role="bad"><h4>A 为什么不知道</h4><p>A 能做的只是问一句：<code>GET</code> 一下锁，或者 <code>PTTL</code> 一下。答案说的是 Redis 处理这条命令那一刻的情况，等它传回 A、A 再发下一条命令，中间每一步都可能停下来。</p></div>
+    <div class="fact" data-role="other"><h4>会停多久</h4><p>停顿没有上限：一次 Full GC 几百毫秒到几秒，虚机被宿主机挂起，网络重传、丢包。<span class="tag-real">实测</span>把持锁进程 <code>kill -STOP</code> 5 秒，它醒来时锁早就归别人了。</p></div>
+    <div class="fact" data-role="bk"><h4>所以</h4><p>“我还拿着锁”这句话，A 说了不算。能说了算的，只有<b>执行写入的那一方，在执行写入的那一刻</b>。</p></div>
+  </div>
+
+  <h3 id="design">为什么这样设计：在 A 这边判断，还是在 Redis 那边判断</h3>
+  <div class="design">
+    <div class="way" data-role="bad">
+      <h4>A 自己判断<small>被放弃的</small></h4>
+<svg viewBox="0 0 420 220" role="img" aria-label="A 在 2.9 秒 GET 锁，得到“是我的”；然后 GC 停顿 1.1 秒；4.0 秒发出 SET 399。Redis 这边 3.0 秒锁过期，3.3 秒 B 写入 299，4.0 秒收到 A 的 SET 照做，缓存变成 399。">
+  <text x="0" y="40" class="t-b">A</text>
+  <rect x="44" y="24" width="96" height="26" rx="5" class="b-neu"/><text x="92" y="41" text-anchor="middle" class="t-monos">GET lock</text>
+  <text x="92" y="66" text-anchor="middle" class="t-good">是我的 ✓</text>
+  <rect x="146" y="24" width="120" height="26" rx="5" class="b-bad"/><text x="206" y="41" text-anchor="middle" class="t-bad">GC 停顿 1.1 s</text>
+  <rect x="272" y="24" width="96" height="26" rx="5" class="b-of"/><text x="320" y="41" text-anchor="middle" class="t-monos">SET 399</text>
+  <text x="0" y="122" class="t-b">Redis</text>
+  <line x1="44" y1="117" x2="410" y2="117" class="e-axis"/>
+  <circle cx="92" cy="117" r="5" class="f-ink"/><text x="92" y="140" text-anchor="middle" class="t-xs">2.9 s</text>
+  <circle cx="176" cy="117" r="5" class="f-bad"/><text x="176" y="105" text-anchor="middle" class="t-bad">3.0 锁过期</text>
+  <circle cx="236" cy="117" r="5" class="f-pd"/><text x="236" y="140" text-anchor="middle" class="t-pd">3.3 B 写 299</text>
+  <circle cx="320" cy="117" r="5" class="f-bad"/><text x="320" y="105" text-anchor="middle" class="t-bad">4.0 照做</text>
+  <text x="0" y="184" class="t-bad">比和写是两条命令，中间的空隙谁也管不着</text>
+  <text x="0" y="204" class="t-xs">实测：T1、T2、T3 全部 399 ✗</text>
+</svg>
+      <ul class="pains">
+        <li>比对时的答案，写入时已经过时</li>
+        <li>把两条命令挨得再近也没用，停顿可能正好落在中间</li>
+      </ul>
+    </div>
+    <div class="way" data-role="bk">
+      <h4>Redis 那边判断<small>锁守卫、版本守卫</small></h4>
+<svg viewBox="0 0 420 220" role="img" aria-label="A 在 4.0 秒发出一条 EVAL。Redis 主线程把这段脚本当成一整块执行：GET 锁，发现不是 A 的，返回 0，不写。缓存还是 B 写的 299。">
+  <text x="0" y="40" class="t-b">A</text>
+  <rect x="44" y="24" width="180" height="26" rx="5" class="b-bad"/><text x="134" y="41" text-anchor="middle" class="t-bad">一样停顿，到 4.0 s</text>
+  <rect x="230" y="24" width="96" height="26" rx="5" class="b-bk"/><text x="278" y="41" text-anchor="middle" class="t-monos">EVAL 守卫</text>
+  <text x="0" y="112" class="t-b">Redis</text>
+  <rect x="44" y="84" width="370" height="50" rx="8" class="b-bk"/>
+  <text x="56" y="104" class="t-monos">GET lock → 不是 A 的 token → return 0</text>
+  <text x="56" y="124" class="t-bk">一整块执行，中间插不进别的命令</text>
+  <text x="0" y="184" class="t-bk">比的那一刻就是写的那一刻</text>
+  <text x="0" y="204" class="t-xs">实测：锁守卫 T1、T2 ✓；版本守卫加墓碑三条全 ✓</text>
+</svg>
+      <ul class="pains">
+        <li class="ok">比和写之间没有空隙，A 停多久都不怕</li>
+        <li class="ok">多一次 <code>EVAL</code>，服务端几十微秒</li>
+        <li>脚本在主线程上跑，写长了会卡住所有人（⑥ 第一圈 5）</li>
+      </ul>
+    </div>
+  </div>
+  <p class="pick-line">决定胜负的约束：<b>A 会停多久，A 自己控制不了，也觉察不到</b>；Redis 执行一段脚本时，却不会被别的命令插队。所以判断必须挪到 Redis 这边，跟写入放进同一段脚本。</p>
+
+  <h3 id="fence">fencing token：被写的一方要记得见过的最大号</h3>
+  <p>锁守卫比的是“锁还在不在”，只管得住锁过期以后才到的写。T3 里 A 的锁一直没过期，写的却是旧数据。比锁更可靠的，是给每次写带上一个<b>只增不减的号</b>，被写的那一方记住见过的最大号，号比它小的写一律拒绝。Martin Kleppmann 2016 年那篇谈分布式锁的文章，管这个号叫 <b>fencing token</b>。在交易靶场里，这个号不用另外发：<code>product</code> 表每改一次价，<code>version</code> 就加 1，查出来的那一行本身就带着号。</p>
+  <figure id="f-fence">
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="同一条 T2 时间线，两种作废方式。上面一行用 DEL：1 秒时缓存被删空，4 秒 A 带着 version 1 来写，缓存是空的，比不出来，写入 399，错。下面一行写墓碑：1 秒时缓存变成“version 2，已作废”，4 秒 A 带着 version 1 来写，1 小于 2，拒绝；下一次读看到墓碑，当作没命中，查库拿到 299，对。">
+  <text x="10" y="30" class="t-xs">T2 没人接手：A 4.0 s 才回来，期间没人来读</text>
+  <text x="10" y="80" class="t-b">作废用 DEL</text>
+  <rect x="150" y="62" width="150" height="30" rx="6" class="b-dash"/><text x="225" y="82" text-anchor="middle" class="t-xs">空（刚过期）</text>
+  <path d="M308,62 l8,15 l-8,15 l-8,-15 z" class="f-cg"/><text x="308" y="56" text-anchor="middle" class="t-cg">1 s 改价</text>
+  <rect x="320" y="62" width="300" height="30" rx="6" class="b-dash"/><text x="470" y="82" text-anchor="middle" class="t-xs">又是空：v2 这件事，缓存不记得</text>
+  <rect x="628" y="62" width="140" height="30" rx="6" class="b-of"/><text x="698" y="82" text-anchor="middle" class="t-monos">A: v1 → 比不出</text>
+  <rect x="776" y="62" width="174" height="30" rx="6" class="b-bad"/><text x="863" y="82" text-anchor="middle" class="t-bad">写入 399 ✗</text>
+
+  <text x="10" y="160" class="t-b">作废写墓碑</text>
+  <rect x="150" y="142" width="150" height="30" rx="6" class="b-dash"/><text x="225" y="162" text-anchor="middle" class="t-xs">空（刚过期）</text>
+  <path d="M308,142 l8,15 l-8,15 l-8,-15 z" class="f-cg"/><text x="308" y="136" text-anchor="middle" class="t-cg">1 s 改价</text>
+  <rect x="320" y="142" width="300" height="30" rx="6" class="b-cg"/><text x="470" y="162" text-anchor="middle" class="t-monos">{"version":2,"gone":true}</text>
+  <rect x="628" y="142" width="140" height="30" rx="6" class="b-bk"/><text x="698" y="162" text-anchor="middle" class="t-monos">A: v1 &lt; v2</text>
+  <rect x="776" y="142" width="174" height="30" rx="6" class="b-good"/><text x="863" y="162" text-anchor="middle" class="t-good">拒绝 ✓ 下次读拿 299</text>
+
+  <text x="150" y="214" class="t-s">墓碑就是缓存对“见过的最大号”的记忆。读的时候把墓碑当作没命中；它的过期时间要比最长的一次重建还长。</text>
+  <text x="150" y="236" class="t-xs">实测：T2 用 DEL 是 399 ✗，用墓碑是 ✓；T3 也一样。</text>
+</svg>
+  </div>
+  </figure>
+
+  <h3 id="lua">为什么用 Lua：要“先读、再看着办”</h3>
+  <figure id="f-lua">
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 200" role="img" aria-label="Redis 主线程上的命令队列：B 的 GET，A 的 EVAL 守卫脚本，C 的 GET。EVAL 是一整块：先 GET 缓存里的 version，比较，再决定 SET 还是 return 0。下面对比 MULTI EXEC：GET 和 SET 一起排进队列，SET 在 GET 的结果出来之前就定好了，不能根据读到的值决定写不写。">
+  <text x="10" y="44" class="t-b">主线程</text>
+  <rect x="100" y="24" width="120" height="34" rx="6" class="b-pd"/><text x="160" y="46" text-anchor="middle" class="t-monos">B: GET</text>
+  <rect x="226" y="24" width="470" height="34" rx="6" class="b-bk"/><text x="461" y="46" text-anchor="middle" class="t-monos">A: EVAL ── GET product:88 → 比 version → SET 或 return 0</text>
+  <rect x="702" y="24" width="120" height="34" rx="6" class="b-neu"/><text x="762" y="46" text-anchor="middle" class="t-monos">C: GET</text>
+  <text x="461" y="78" text-anchor="middle" class="t-bk">读、比、写连着做完，B 和 C 只能排在它前后</text>
+
+  <text x="10" y="134" class="t-b">MULTI/EXEC</text>
+  <rect x="100" y="114" width="96" height="34" rx="6" class="b-neu"/><text x="148" y="136" text-anchor="middle" class="t-monos">MULTI</text>
+  <rect x="202" y="114" width="150" height="34" rx="6" class="b-neu"/><text x="277" y="136" text-anchor="middle" class="t-monos">GET product:88</text>
+  <rect x="358" y="114" width="150" height="34" rx="6" class="b-neu"/><text x="433" y="136" text-anchor="middle" class="t-monos">SET product:88 …</text>
+  <rect x="514" y="114" width="96" height="34" rx="6" class="b-neu"/><text x="562" y="136" text-anchor="middle" class="t-monos">EXEC</text>
+  <text x="620" y="128" class="t-bad">也是一整块，但 SET 在 GET 的</text>
+  <text x="620" y="146" class="t-bad">结果出来之前就排好了</text>
+  <text x="100" y="182" class="t-xs">WATCH 加 MULTI 能做到“被改过就整个作废、重来”，但要客户端循环重试；Lua 一次往返就完。代价：脚本跑多久，后面的人等多久。</text>
+</svg>
+  </div>
+  </figure>
+
+  <div class="codebox">
+    <div class="code-bar"><span class="n">最少的语法</span><span>参数、脚本缓存、集群规则放到第 ⑥ 步</span></div>
+<pre><code><span class="cm">-- EVAL 脚本 key的个数 key… arg…；脚本里 KEYS[i]、ARGV[i] 从 1 开始</span>
+EVAL "if redis.call('get', KEYS[1]) ~= ARGV[1] then return 0 end
+      redis.call('set', KEYS[2], ARGV[2], 'PX', ARGV[3]) redis.call('del', KEYS[1]) return 1"
+     2 lock:product:88 product:88 &lt;token&gt; &lt;json&gt; 1800000
+SCRIPT LOAD "…"  →  sha1；之后 EVALSHA sha1 2 …   <span class="cm">-- 只传 40 字节的摘要，不重复传脚本</span>
+</code></pre>
+<pre><code><span class="cm">// Redisson（4.8.0，仍然按 Java 8 编译）</span>
+RLock lock = redisson.getLock("lock:product:88");
+lock.lock();                       <span class="cm">// 不带 leaseTime：看门狗每 10 s 把锁续回 30 s</span>
+lock.lock(3, TimeUnit.SECONDS);    <span class="cm">// 带了 leaseTime：没有看门狗，3 s 到点就过期</span>
+RFencedLock f = redisson.getFencedLock("lock:product:88");
+Long token = f.lockAndGetToken();  <span class="cm">// 每次加锁号加 1；号要交给被写的那一方去比</span>
+</code></pre>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>套进场景：交易靶场的回填，换成版本守卫</h2>
+    <p class="lead">第 7 站的回填从 <code>SET</code> 换成一段 Lua：缓存里那份的 version 比我新，就不写。第 10 站的作废从 <code>DEL</code> 换成写墓碑。第 5 站的锁不动。依赖：Lettuce 6.8.2、Redisson 4.8.0，按 JDK 8 写；Redis 8.10.3。</p>
+  </div>
+  <div class="two">
+    <div class="codebox">
+      <div class="code-bar"><span class="n">ProductCache</span><span>第 7 站回填、第 10 站作废</span></div>
+<pre><code><span class="kw">static final</span> String VERSION_GUARD_LUA =
+  "local cur = redis.call('get', KEYS[1])\n" +
+  "if cur then\n" +
+  "  local ok, old = pcall(cjson.decode, cur)\n" +
+  "  <span class="hl">if ok and type(old) == 'table' and tonumber(old.version)\n" +
+  "     and tonumber(old.version) &gt; tonumber(ARGV[2]) then return 0 end</span>\n" +
+  "end\n" +
+  "redis.call('set', KEYS[1], ARGV[1], 'PX', ARGV[3])\n" +
+  "return 1";
+
+<span class="cm">// 第 7 站：row 是查库拼好的 JSON，带 version</span>
+Long r = redis.eval(VERSION_GUARD_LUA, INTEGER,
+    <span class="kw">new</span> String[]{"product:88"},
+    row, String.valueOf(version(row)), "1800000");
+unlock(lockKey, token);       <span class="cm">// 解锁照旧：比 token 再删</span>
+
+<span class="cm">// 第 10 站：改完价，不 DEL，写墓碑</span>
+redis.set("product:88",
+    "{\"id\":88,\"version\":" + newVersion + ",\"gone\":true}",
+    SetArgs.Builder.px(10_000));  <span class="cm">// 比最长的一次重建长</span>
+
+<span class="cm">// 第 3 站：读到墓碑当作没命中</span>
+<span class="kw">if</span> (v != <span class="kw">null</span> &amp;&amp; !isTombstone(v)) <span class="kw">return</span> v;
+</code></pre>
+    </div>
+    <div>
+      <div class="codebox">
+        <div class="code-bar"><span class="n">跑起来</span><span>需要 docker</span></div>
+<pre><code>cd study-labs/java/redis/redis-lock-expire-fencing
+./run.sh stale      <span class="cm"># 起 Redis 8.10.3 容器，三条时间线 × 五种写法</span>
+./run.sh clean      <span class="cm"># 删掉容器</span></code></pre>
+      </div>
+      <div class="tbl-wrap">
+        <table class="t mx" style="min-width:0">
+          <thead><tr><th>回填</th><th>T1</th><th>T2</th><th>T3</th></tr></thead>
+          <tbody>
+            <tr><td>直接 <code>SET</code></td><td class="c bad">399 ✗</td><td class="c bad">399 ✗</td><td class="c bad">399 ✗</td></tr>
+            <tr><td>先 GET 比 token 再 SET</td><td class="c bad">399 ✗</td><td class="c bad">399 ✗</td><td class="c bad">399 ✗</td></tr>
+            <tr><td>Lua 锁守卫</td><td class="c good">299 ✓</td><td class="c good">空 ✓</td><td class="c bad">399 ✗</td></tr>
+            <tr><td>Lua 版本守卫 + DEL</td><td class="c good">299 ✓</td><td class="c bad">399 ✗</td><td class="c bad">399 ✗</td></tr>
+            <tr><td>Lua 版本守卫 + 墓碑</td><td class="c good">299 ✓</td><td class="c good">墓碑 ✓</td><td class="c good">墓碑 ✓</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="tip"><span class="tag-real">实测</span> 本机 2 核 ARM，JDK 17.0.21，Redis 8.10.3 同机容器，跑了两遍结果相同。T1 查库 2 次（A、B 各一次），T2、T3 各 1 次。“空”和“墓碑”表示下一次读会查库，拿到 299。</p>
+    </div>
+  </div>
+  <div class="done-box">
+    <p><b>到这里已经能交差了：</b>锁过期、A 停顿多久、改价落在什么时候，缓存里都不会留下比数据库旧的价格，最坏的情况是多查一次库。</p>
+    <p><b>已知还没处理的细节：</b>Redisson 设了 leaseTime 就没有看门狗（<a href="#p1">⑥-1</a>）；看门狗挡不住进程停住（<a href="#p2">⑥-2</a>）；墓碑的过期时间该定多长（<a href="#p4">⑥-4</a>）；Lua 脚本写长了会卡住整个 Redis（<a href="#p5">⑥-5</a>）；上了集群，锁和数据两个 key 得在同一个槽里（<a href="#p6">⑥-6</a>）。</p>
+  </div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>反例和误用：以为锁在，以为脚本快</h2>
+    <p class="lead">第一圈的坑出在锁本身：没 token、没过期时间、锁在事务里面。这一圈的坑多半出在两种“以为”上：以为续期了锁就不会丢，以为一段脚本反正很快。</p>
+  </div>
+
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p1"><b><em>1</em>传了 leaseTime，看门狗就不干活了<a class="root" href="#s3">← ③ 看门狗</a></b>
+      <dl><dt>现象</dt><dd>以为用了 Redisson 就有自动续期，写的却是 <code>lock(3, SECONDS)</code>。查库一慢，锁照样到点没了。<span class="seen">实测：<code>lock(2, SECONDS)</code> 以后 PTTL 依次是 1994 → 994 → 93 → -2，2.1 s 时 <code>isHeldByCurrentThread()</code> 返回 false</span></dd>
+      <dt>根源</dt><dd>Redisson 4.8.0 的 <code>tryAcquireAsync</code>：<code>leaseTime &gt; 0</code> 时直接用它当过期时间，只有不传（-1）时才启动续期任务。</dd>
+      <dt>做法</dt><dd class="fix">不知道要干多久，就别传 leaseTime；要传，就设成查库超时的几倍，并且给查库本身也设一个超时。</dd></dl></div>
+    <div class="pit" id="p2"><b><em>2</em>看门狗挡不住整个进程停住<a class="root" href="#lease">← ④ 租约</a></b>
+      <dl><dt>现象</dt><dd>持锁的进程停了一会儿，醒来接着干，可锁早就被别人拿走了，两个人都以为自己在锁里。<span class="seen">实测：看门狗设 3 s，持锁进程被 <code>kill -STOP</code>，2069 ms 后锁过期，另一个进程马上 <code>tryLock</code> 成功；5 s 后 <code>kill -CONT</code>，原来那个进程解锁时抛 <code>IllegalMonitorStateException</code></span></dd>
+      <dt>根源</dt><dd>续期是同一个 JVM 里的定时任务，每隔 <code>lockWatchdogTimeout / 3</code> 跑一次。进程停了，它也跟着停。默认 30 s 的租约，只要停顿超过离到期还剩的时间（20～30 s），锁就会丢。连不上 Redis 时也一样。</dd>
+      <dt>做法</dt><dd class="fix">看门狗只用来减少锁过期的次数，正确性交给条件写（④）。GC 日志里盯住长停顿，停顿长的服务不要拿锁做正确性保证。</dd></dl></div>
+    <div class="pit" id="p3"><b><em>3</em>解锁失败，catch 一下就算了<a class="root" href="#lease">← ④ 租约</a></b>
+      <dl><dt>现象</dt><dd>日志里偶尔有一行 <code>attempt to unlock lock, not locked by current thread</code>，或者手写的解锁脚本返回 0，没人当回事。</dd>
+      <dt>根源</dt><dd>这说明你干活的时候锁丢过，那段时间别人也在锁里。这次侥幸没出事，靠的是条件写挡住了，或者两个人写的正好一样。</dd>
+      <dt>做法</dt><dd class="fix">打点、告警、按 key 统计次数。次数一多，说明锁的 PX 短了，或者停顿变长了。不要因为解锁失败就重试写入。</dd></dl></div>
+    <div class="pit" id="p4"><b><em>4</em>墓碑过期得太早，迟到的写又进来了<a class="root" href="#fence">← ④ fencing</a></b>
+      <dl><dt>现象</dt><dd>用了版本守卫加墓碑，偶尔还是有旧价，而且一挂就是 30 分钟。</dd>
+      <dt>根源</dt><dd>墓碑记的就是“见过的最大号”，它一过期，缓存就把这个号忘了。A 停顿得比墓碑的寿命还长，回来一比，缓存是空的，就写进去了。<code>DEL</code> 等于墓碑寿命为 0，这就是 ② 里 T2 出错的原因。</dd>
+      <dt>做法</dt><dd class="fix">墓碑只有几十字节，不妨和数据存一样久（30 分钟）。至少要比“锁的 PX + 查库超时 + 可能的停顿”长。↺ 练习 1 把它改成 2 s，自己看一次。</dd></dl></div>
+    <div class="pit" id="p5"><b><em>5</em>Lua 脚本跑太久，整个 Redis 都在等<a class="root" href="#lua">← ④ 一整块执行</a></b>
+      <dl><dt>现象</dt><dd>有人在脚本里写了循环，或者 <code>HGETALL</code> 一个大 key。所有客户端一起超时，过几秒开始收到 <code>BUSY Redis is busy running a script</code>。<span class="seen">实测：脚本空转 6 s，第 1.0 s 发出的 PING 等到 5.0 s 收到 BUSY；只读脚本 <code>SCRIPT KILL</code> 能杀掉；先写过一个 key 的脚本，<code>SCRIPT KILL</code> 回 <code>UNKILLABLE</code>，只能等它跑完</span></dd>
+      <dt>根源</dt><dd>脚本在主线程上一整块跑完，这正是它原子的原因。超过 <code>busy-reply-threshold</code>（默认 5000 ms，7.0 以前叫 <code>lua-time-limit</code>，旧名字现在还能用），Redis 才开始给别人回 BUSY。脚本已经写过数据时，杀掉它会留下写了一半的结果，所以 Redis 不让杀，剩下的办法只有 <code>SHUTDOWN NOSAVE</code>，上次持久化以后的写全部丢掉。</dd>
+      <dt>做法</dt><dd class="fix">脚本只做 O(1) 的比和写，不循环，不碰大 key。用 <code>SLOWLOG</code> 盯 <code>EVAL</code> 的耗时。</dd></dl></div>
+    <div class="pit" id="p6"><b><em>6</em>上了集群，锁和数据不在一个槽<a class="root" href="#lua">← ④ 一整块执行</a></b>
+      <dl><dt>现象</dt><dd>单机跑得好好的锁守卫，换到 Redis 集群就报错。</dd>
+      <dt>根源</dt><dd>一段脚本只能在一个节点上执行，它碰的 key 都要通过 <code>KEYS</code> 传进去，并且落在同一个槽。<code>lock:product:88</code> 和 <code>product:88</code> 按整个名字算槽，多半分在两个节点上。</dd>
+      <dt>做法</dt><dd class="fix">用 hash tag：起名 <code>{product:88}</code> 和 <code>lock:{product:88}</code>，槽只按花括号里那段算。Redisson 也是这么做的：它的频道、解锁记录、fencing 号这几个 key，名字都用 <code>prefixName</code> 拼成 <code>redisson_lock__channel:{lock:product:88}</code> 这种形式。</dd></dl></div>
+    <div class="pit" id="p7"><b><em>7</em>重启或主从切换以后，EVALSHA 报 NOSCRIPT<a class="root" href="#lua">← ④ 一整块执行</a></b>
+      <dl><dt>现象</dt><dd>为了省流量改用 <code>EVALSHA</code>，Redis 一重启，所有带脚本的请求报 <code>NOSCRIPT No matching script</code>。<span class="seen">实测：<code>SCRIPT FLUSH</code> 以后再 <code>EVALSHA</code>，就是这个错</span></dd>
+      <dt>根源</dt><dd>脚本缓存只在内存里，不持久化。重启、从库升为主库、<code>SCRIPT FLUSH</code>，都会把它清空。</dd>
+      <dt>做法</dt><dd class="fix">Spring Data Redis 的 <code>DefaultScriptExecutor</code> 先发 <code>EVALSHA</code>，收到 NOSCRIPT 再退回 <code>EVAL</code>（4.1.2 源码），用 <code>RedisScript</code> 就不用管。直接用 Lettuce 的要自己补这一步。Redis 7 起的 Functions（<code>FUNCTION LOAD</code> / <code>FCALL</code>）会跟着持久化和复制，不会出现这个问题。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范：团队里该怎么写</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>回填只有一个入口，里面是条件写</b><p>业务代码里不出现往 <code>product:*</code> 直接 <code>SET</code> 的写法。</p><p class="guard">有人图省事绕过守卫，迟到的写又进来了。</p></div>
+    <div class="rl"><b>作废写墓碑，不 DEL；墓碑和数据存一样久</b><p>读路径把墓碑当作没命中。</p><p class="guard">版本守卫失忆（⑥-4）。</p></div>
+    <div class="rl"><b>锁只管“少查几次库”</b><p>评审时问一句：这把锁要是丢了，会多查几次库，还是会写错数据？答案是“会写错”，就得在被写的那一方加条件写。</p><p class="guard">把正确性押在 PX 和看门狗上。</p></div>
+    <div class="rl"><b>leaseTime 要么不传，要么远大于查库超时</b><p>查库自己设超时，比锁短。</p><p class="guard">⑥-1：锁比活先到期。</p></div>
+    <div class="rl"><b>解锁失败要打点</b><p>手写脚本返回 0、Redisson 抛 <code>IllegalMonitorStateException</code>，都算锁丢过一次。</p><p class="guard">锁过期悄悄发生，没人知道。</p></div>
+    <div class="rl"><b>脚本 O(1)，key 全走 KEYS，集群用 hash tag</b><p>用 <code>RedisScript</code> 或 Functions 加载，不手拼 <code>EVALSHA</code>。</p><p class="guard">⑥-5、6、7。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>优化和深处</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="rn" id="d-redisson">
+      <h4>Redisson 的锁长什么样（4.8.0 源码）</h4>
+      <p>锁是一个 Hash：<code>lock:product:88</code> 里一个字段 <code>&lt;客户端 id&gt;:&lt;线程 id&gt;</code>，值是重入次数。加锁是一段 Lua：</p>
+<pre class="code"><code>if (redis.call('exists', KEYS[1]) == 0)
+   or (redis.call('hexists', KEYS[1], ARGV[2]) == 1) then
+  redis.call('hincrby', KEYS[1], ARGV[2], 1)
+  redis.call('pexpire', KEYS[1], ARGV[1])
+  return nil
+end
+return redis.call('pttl', KEYS[1])</code></pre>
+      <ul>
+        <li><b>没抢到的人不轮询</b>：订阅频道 <code>redisson_lock__channel:{…}</code>，在本地信号量上等，最多等锁剩下的 PTTL。解锁脚本删锁的同时发一条消息，把它们叫醒。“88 号过期那一刻”里是每 10 ms <code>GET</code> 一次。</li>
+        <li><b>续期</b>：<code>RenewalTask</code> 每 <code>lockWatchdogTimeout / 3</code> 跑一次，本客户端持有的锁分批续，一批一段脚本。</li>
+        <li><b>解锁可以重试</b>：解锁脚本顺手写一个 <code>redisson_unlock_latch:{…}:&lt;requestId&gt;</code>，网络超时后重发同一个解锁请求，能拿到第一次的结果，不会误判成“不是你的锁”。</li>
+      </ul>
+    </div>
+    <div class="dp" data-role="bk" id="d-redlock">
+      <h4>Redlock 之争，吵完剩下的共识</h4>
+      <div class="tbl-wrap"><table class="t" style="min-width:0">
+        <thead><tr><th></th><th>Kleppmann（2016-02）</th><th>antirez（2016-02）</th></tr></thead>
+        <tbody>
+          <tr><th>锁拿来干什么</th><td>只为效率（少干重复活），单个 Redis 就够；为正确性，Redlock 也不够</td><td>Redlock 在它声明的假设下是安全的</td></tr>
+          <tr><th>停顿和时钟</th><td>进程停顿、网络延迟、时钟跳变都没有上限，按时间算的租约挡不住</td><td>停顿发生在拿到锁之后，任何租约锁都一样；时钟要求可以通过运维满足</td></tr>
+          <tr><th>fencing token</th><td>必须有；Redlock 发不出单调递增的号</td><td>随机 token 加上被写的一方做“比较再写”，也能达到同样效果</td></tr>
+        </tbody>
+      </table></div>
+      <p>两边都同意的一点，正是本页的结论：<b>真正把关的，是被写的那一方的条件写</b>。交易靶场用的号，就是 MySQL 里的 <code>version</code>。</p>
+    </div>
+    <div class="dp" data-role="of" id="d-fenced">
+      <h4>RFencedLock：Redisson 发的号</h4>
+      <p>2022 年 12 月加进 Redisson（issue #4684）。每次加锁，对 <code>redisson_lock_token:{…}</code> 做一次 <code>INCR</code>，把结果作为 fencing token 返回。接口注释写明：被保护的服务要检查这个号不比上一个小，否则拒绝。</p>
+      <ul>
+        <li>写 MySQL 时，表里加一列 <code>fence</code>：<code>UPDATE … SET …, fence = ? WHERE id = ? AND fence &lt; ?</code>。</li>
+        <li>它的号存在 Redis 里。按 Redis 主从异步复制推断，主从切换时最近几次 <code>INCR</code> 可能丢失，号会重复。交易靶场的回填用 MySQL 的 <code>version</code>，号来自数据本身，没有这个问题。</li>
+      </ul>
+    </div>
+    <div class="dp" data-role="g2" id="d-ver">
+      <h4>版本差异</h4>
+      <div class="tbl-wrap"><table class="t" style="min-width:0">
+        <thead><tr><th>版本</th><th>变化</th></tr></thead>
+        <tbody>
+          <tr><td>Redis 7.0</td><td>脚本只复制效果（执行出的写命令），不再整段复制，所以脚本里可以用 <code>TIME</code> 这类每次结果都不同的命令；有了 Functions、<code>EVAL_RO</code>；<code>lua-time-limit</code> 改名 <code>busy-reply-threshold</code></td></tr>
+          <tr><td>Redis 8.10.3</td><td><span class="tag-real">实测</span><code>busy-reply-threshold</code> 默认 5000，旧名 <code>lua-time-limit</code> 也能查到同一个值；Lua 里自带 <code>cjson</code>，⑤ 的版本守卫就靠它解析 JSON</td></tr>
+          <tr><td>Redisson 3.x → 4.x</td><td>4.8.0 仍按 Java 8 编译（<code>maven.compiler.release 8</code>）；加锁、解锁脚本和 3.52.0 一样。依赖 Netty 4.2.18，和 Lettuce 6.8.2 带的 Netty 4.1.125 混在一起，<span class="tag-real">实测</span>报 <code>NoSuchMethodError</code>，用 <code>netty-bom</code> 统一到 4.2 才能跑</td></tr>
+          <tr><td>Spring Data Redis 4.1.2</td><td><code>DefaultScriptExecutor</code> 先 <code>EVALSHA</code>，NOSCRIPT 再退回 <code>EVAL</code></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <h3 id="lab-h">实验台：同一条时间线，换五种回填</h3>
+  <div class="lab" id="lab" data-role="bk">
+    <div class="guess" id="guess">
+      <p><b>先猜：</b>T2 没人接手：A 4.0 s 才回来，期间没人来读。回填用“Lua 版本守卫”，改价时照旧 <code>DEL</code>。缓存最后是？</p>
+      <div class="opts">
+        <button type="button" data-g="a">299，版本守卫挡住了 A</button>
+        <button type="button" data-g="b">399，A 写进去了</button>
+        <button type="button" data-g="c">空，A 被拒，下次读查库</button>
+      </div>
+      <p class="res" id="guess-res" hidden></p>
+    </div>
+    <div class="presets" role="group" aria-label="时间线" id="tls">
+      <button type="button" data-t="t1"><b>T1 有人接手</b><span>A 4.0 s 写，B 3.3 s 来读</span></button>
+      <button type="button" data-t="t2"><b>T2 没人接手</b><span>A 4.0 s 写，没人来读</span></button>
+      <button type="button" data-t="t3"><b>T3 锁没过期</b><span>A 2.0 s 写，锁 3.0 s 到期</span></button>
+    </div>
+    <div class="presets" role="group" aria-label="回填的写法" id="modes">
+      <button type="button" data-m="plain"><b>直接 SET</b><span>不比任何东西</span></button>
+      <button type="button" data-m="check"><b>先 GET 再 SET</b><span>在 A 这边比 token</span></button>
+      <button type="button" data-m="lock"><b>Lua 锁守卫</b><span>锁还是我的才写</span></button>
+      <button type="button" data-m="ver"><b>Lua 版本守卫 + DEL</b><span>版本不比缓存旧才写</span></button>
+      <button type="button" data-m="tomb"><b>Lua 版本守卫 + 墓碑</b><span>作废时留下 v2</span></button>
+    </div>
+    <div class="fig-box wide" id="tl-box"></div>
+    <div class="facts" id="tiles">
+      <div class="tile" data-role="of"><small>A 的回填</small><b id="t-a"></b><span id="t-a2"></span></div>
+      <div class="tile" data-role="pd"><small>B 拿到</small><b id="t-b"></b><span id="t-b2"></span></div>
+      <div class="tile" data-role="other"><small>查库</small><b id="t-db"></b><span>次</span></div>
+      <div class="tile" data-role="done" id="t-fin-box"><small>缓存最后</small><b id="t-fin"></b><span id="t-fin2"></span></div>
+    </div>
+    <div class="lab-res" id="lab-res" data-role="bk"></div>
+    <p class="tip">十五种组合的结果，都和 <code>./run.sh stale</code> 实测的一致。时间按实测脚本里定的写：锁 PX 3000，第 1 s 改价，墓碑存 10 s。</p>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span><h3>这一层没有尽头</h3></div>
+  <ul class="next">
+    <li>etcd 的锁：租约加上每次写都递增的 revision，号由锁服务自己发，主节点换了号也不会倒退</li>
+    <li>主从切换时锁和墓碑一起丢：<code>WAIT</code> 能挡住多少，代价是什么（<a href="redis-ha-cluster.html">主从、哨兵与集群</a>）</li>
+    <li>扣库存要的是另一种锁：锁要包住整个事务，或者干脆不用锁，改用 <code>UPDATE … WHERE stock &gt;= ?</code>（第一圈“锁在事务里面”）</li>
+    <li>不用锁也能防迟到的写：改价消息按商品 id 分区，用 MQ 保证同一个商品的更新按顺序到</li>
+    <li>Redis Functions 的写法和部署：库怎么分版本，<code>FUNCTION RESTORE</code> 怎么跟着发版走</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到第⑤步：改一改交易靶场</h2>
+    <p class="lead">先猜结果，再运行。代码和预期输出在 <a href="https://github.com/archeu/study-labs/tree/main/java/redis/redis-lock-expire-fencing">study-labs</a>。</p>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="bk"><h4>1 · 墓碑只存 2 秒</h4><p>把 <code>Lab.stale</code> 里墓碑那一行的 <code>10_000L</code> 改成 <code>2_000L</code>，跑 <code>./run.sh stale</code>。“版本守卫 + 墓碑”在 T2、T3 还都是 ✓ 吗？</p><p class="uses">用到：⑥ 第一圈 4</p></div>
+    <div class="exc" data-role="rn"><h4>2 · 看门狗调回默认 30 秒</h4><p>把 <code>redissonConfig(3000)</code> 两处都改成 <code>30000</code>，跑 <code>./run.sh dog</code>。持锁进程被停 5 秒，另一个进程还能拿到锁吗？要停多久才会丢？</p><p class="uses">用到：⑥ 第一圈 2</p></div>
+    <div class="exc" data-role="g2"><h4>3 · 脚本只空转 3 秒</h4><p>把 <code>lua</code> 段只读脚本的 6000 改成 3000。第 1.0 s 发出的 PING 什么时候回来？回的是 BUSY 吗？</p><p class="uses">用到：⑥ 第一圈 5</p></div>
+  </div>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>锁是租约，会在拿锁的人不知情时过期；所以锁只用来少干重复活，写得对不对，要由被写的那一方在写的那一刻原子地比一下：比锁的 token，或者比只增不减的版本号，比和写放进同一段 Lua。</p></details>
+    <details><summary>2. 写之前先 GET 一下锁、确认是自己的，为什么还会写错？</summary><p>确认和写是两条命令，中间 A 可能停顿。实测 2.9 s 确认时锁还在，GC 停了 1.1 s，4.0 s 的 SET 到达时锁已经过期，B 已经填好了 299，A 把它盖成 399。</p><p class="from">从 ④“为什么这样设计”推出</p></details>
+    <details><summary>3. 用了 Redisson 的看门狗，为什么锁还会丢？</summary><p>续期是持锁进程里的一个定时任务。进程整个停住（长 GC、<code>SIGSTOP</code>、虚机挂起）或者连不上 Redis，续期也就停了，租约照样到期。实测停住 2.07 s 锁就没了（看门狗 3 s）。另外，传了 leaseTime 的话根本没有看门狗。</p><p class="from">从 ④“锁是一份租约”推出</p></details>
+    <details><summary>4. 预测：不用看门狗，把锁的 PX 从 3 秒改成 30 秒，T1 会怎样？</summary><p>A 4.0 s 回来时锁还在，T1 就变成了 T3：B 3.3 s 抢不到锁，只能等；A 写下 399，B 等来的也是 399。锁守卫拦不住，因为锁确实还是 A 的；只有版本守卫加墓碑能拒掉 A 那份 version 1。锁变长，只是把“锁过期”的问题换成了“锁没过期、数据已经变了”。</p><p class="from">从 ④ fencing token 推出</p></details>
+    <details><summary>5. 预测：改价写下墓碑后 0.5 秒，Redis 主从切换，墓碑没来得及复制过去。A 回来时会怎样？</summary><p>新主上没有墓碑，缓存是空的，版本守卫比不出来，A 的 399 写进去了。这和用 DEL 是一个情况：守卫靠的是被写的一方记得最大号，Redis 异步复制丢了这份记忆，守卫也就失效了。兜底靠两样：缓存过期时间，以及订阅 binlog 再删一次。</p><p class="from">从 ⑥-4 的根源推出</p></details>
+    <details><summary>6. 放回全景：第 5、7 站前后各发生了什么？锁坏了、回填又没守卫，整条链路会怎样？</summary><p>第 5 站之前，第 4 站的布隆过滤器说 88 号“可能有”；第 5 站抢锁，第 6 站查库，第 7 站回填并解锁，第 8 站再放进本地的 Caffeine。锁坏了只会多查几次库。回填没有守卫，Redis 里就会留下 399，第 8 站各实例从 Redis 加载时都拿到 399，而第 11 站的失效广播早在改价那一刻发过了，不会再发第二次：4 个实例都卖旧价，直到 30 分钟后过期。</p><p class="from">从全景第 8、11 站和 ② 推出</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。Redis 8.10.3（同机容器），Lettuce 6.8.2，Redisson 4.8.0，代码按 JDK 8 写、在 JDK 17.0.21 上跑，本机 2 核 ARM。</p>
+  <p>标“实测”的都在本机跑过：三条时间线 × 五种回填写法（跑了两遍，结果相同），<code>lock(2, SECONDS)</code> 的 PTTL，看门狗续期和 <code>kill -STOP</code> 以后丢锁，Lua 脚本的 BUSY、<code>SCRIPT KILL</code>、<code>UNKILLABLE</code>、NOSCRIPT，<code>busy-reply-threshold</code> 默认值，Netty 版本冲突。Redisson 的加锁、解锁、续期、等锁、fencing 号来自 4.8.0 源码（解锁脚本和 3.52.0 对比过），RFencedLock 加入的时间来自 GitHub 提交记录；Spring 的 NOSCRIPT 退回来自 spring-data-redis 4.1.2 源码；Redis 7.0 的变化、脚本缓存在主从切换后清空、集群下脚本的 key 规则来自 Redis 官方文档；Redlock 之争来自双方 2016 年 2 月的两篇文章。</p>
+  <p>相关：<a href="../java/pano-j07-product-detail-cache.html">全景：一次商品详情查询</a> · <a href="redis-distributed-lock.html">Redis 分布式锁（第一圈）</a> · <a href="redis-lua-tx.html">Redis Lua 脚本与事务（第一圈）</a> · <a href="cache-five-holes.html">88 号过期那一刻</a> · <a href="cache-consistency.html">缓存一致性</a> · <a href="cache-multilevel.html">多级缓存</a> · <a href="../java/roadmap.html#j07">Java 地图 J07</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+var TL = {
+  t1: {name: 'T1 有人接手', slow: 2900, write: 4000, b: 3300, end: 4600},
+  t2: {name: 'T2 没人接手', slow: 2900, write: 4000, b: -1, end: 4600},
+  t3: {name: 'T3 锁没过期', slow: 1500, write: 2000, b: -1, end: 4600}
+};
+var MODES = {
+  plain: '直接 SET', check: '先 GET 锁比 token，再 SET', lock: 'Lua 锁守卫',
+  ver: 'Lua 版本守卫 + DEL', tomb: 'Lua 版本守卫 + 墓碑'
+};
+var PX = 3000, TOMB_TTL = 10000, CHANGE_AT = 1000;
+
+/* 和 study-labs 的 ProductCache 同一套规则，按时间顺序处理事件 */
+function simulate(tlKey, mode) {
+  var tl = TL[tlKey];
+  var lock = {owner: 'A', from: 0, exp: PX, rel: null};
+  var lockSegs = [lock];
+  var cache = null, cacheSegs = [{from: 0, val: null}];
+  var db = {price: 399, v: 1}, dbHits = 0, ev = [];
+  function holder(t) {
+    if (!lock) return null;
+    if (lock.rel !== null && t >= lock.rel) return null;
+    return t < lock.exp ? lock.owner : null;
+  }
+  function setCache(t, val) { cache = val; cacheSegs.push({from: t, val: val}); }
+  function cacheAt(t) {
+    if (cache && cache.kind === 'tomb' && t >= cache.at + TOMB_TTL) return null;
+    return cache;
+  }
+  function verOk(cur, v) { return !(cur && cur.v > v); }
+
+  // 0 s：A 没命中，抢到锁，查库
+  dbHits++;
+  var aRow = {price: db.price, v: db.v};
+  ev.push({t: 0, who: 'A', text: '抢到锁，查到 ' + aRow.price + '（v' + aRow.v + '）'});
+  var steps = [{t: CHANGE_AT, k: 'change'}, {t: tl.write, k: 'aWrite'}];
+  if (mode === 'check') steps.push({t: tl.slow, k: 'aCheck'});
+  if (tl.b >= 0) steps.push({t: tl.b, k: 'b'});
+  steps.sort(function (x, y) { return x.t - y.t; });
+  var mine = null, aFill = null, bGot = null;
+  steps.forEach(function (s) {
+    var t = s.t;
+    if (s.k === 'change') {
+      db = {price: 299, v: 2};
+      if (mode === 'tomb') setCache(t, {kind: 'tomb', v: 2, at: t});
+      else setCache(t, null);
+      ev.push({t: t, who: 'X', text: mode === 'tomb' ? '改成 299（v2），写墓碑' : '改成 299（v2），DEL 缓存'});
+    } else if (s.k === 'aCheck') {
+      mine = holder(t) === 'A';
+      ev.push({t: t, who: 'A', text: 'GET 锁：' + (mine ? '是我的' : '不是我的')});
+    } else if (s.k === 'b') {
+      var cur = cacheAt(t);
+      if (cur && cur.kind === 'data') { bGot = cur.price; return; }
+      if (holder(t) !== null) { bGot = 'wait'; return; }
+      lock = {owner: 'B', from: t, exp: t + PX, rel: null};
+      lockSegs.push(lock);
+      dbHits++;
+      var row = {kind: 'data', price: db.price, v: db.v};
+      var ok = (mode === 'ver' || mode === 'tomb') ? verOk(cacheAt(t), row.v) : true;
+      if (ok) setCache(t, row);
+      lock.rel = t + 1;
+      bGot = row.price;
+      ev.push({t: t, who: 'B', text: '抢到锁，查到 ' + row.price + '，回填'});
+    } else if (s.k === 'aWrite') {
+      var row2 = {kind: 'data', price: aRow.price, v: aRow.v}, ok2;
+      if (mode === 'plain') ok2 = true;
+      else if (mode === 'check') ok2 = mine;
+      else if (mode === 'lock') ok2 = holder(t) === 'A';
+      else ok2 = verOk(cacheAt(t), row2.v);
+      if (ok2) setCache(t, row2);
+      if (holder(t) === 'A') lockSegs[0].rel = t;
+      aFill = ok2;
+      ev.push({t: t, who: 'A', text: ok2 ? '回填 399：写入' : '回填 399：被拒'});
+    }
+  });
+  var fin = cacheAt(tl.end);
+  var finKind = !fin ? 'empty' : fin.kind === 'tomb' ? 'tomb' : (fin.price === 299 ? 'fresh' : 'stale');
+  return {tl: tl, mode: mode, aFill: aFill, bGot: bGot, dbHits: dbHits, fin: fin, finKind: finKind,
+          good: finKind !== 'stale', lockSegs: lockSegs, cacheSegs: cacheSegs, ev: ev, mineAtCheck: mine};
+}
+/*SIM-END*/
+
+(function () {
+  var state = {t: 't2', m: 'ver'};
+  var $ = function (id) { return document.getElementById(id); };
+  var X0 = 150, SC = 0.17, X = function (t) { return X0 + t * SC; };   // 0..4.6 s → 150..932
+  var esc = function (s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); };
+
+  function cacheLabel(v) {
+    if (!v) return {cls: 'b-dash', txt: '空', tcls: 't-xs'};
+    if (v.kind === 'tomb') return {cls: 'b-cg', txt: '墓碑 v2', tcls: 't-cg'};
+    return v.price === 299 ? {cls: 'b-good', txt: '299', tcls: 't-good'} : {cls: 'b-bad', txt: '399 ✗', tcls: 't-bad'};
+  }
+
+  function draw(r) {
+    var tl = r.tl, s = [];
+    s.push('<svg viewBox="0 0 960 300" role="img" aria-label="' + esc(tl.name + '，' + MODES[r.mode] + '：缓存最后 ' + cacheLabel(r.fin).txt) + '">');
+    var lanes = [['锁', 52], ['A', 106], ['后台改价', 160], ['B', 214], ['缓存', 264]];
+    lanes.forEach(function (l) { s.push('<text x="10" y="' + l[1] + '" class="t-b">' + l[0] + '</text>'); });
+    // lock lane
+    r.lockSegs.forEach(function (L) {
+      var end = Math.min(L.exp, L.rel === null ? Infinity : L.rel);
+      var w = Math.max(14, X(end) - X(L.from));
+      var cls = L.owner === 'A' ? 'b-of' : 'b-pd';
+      s.push('<rect x="' + X(L.from) + '" y="36" width="' + w + '" height="26" rx="5" class="' + cls + '"/>');
+      if (w > 120) s.push('<text x="' + (X(L.from) + w / 2) + '" y="54" text-anchor="middle" class="t-of">A 的锁' + (L.rel !== null && L.rel < L.exp ? '，A 解锁' : '，到点过期') + '</text>');
+      else s.push('<text x="' + (X(L.from) + w + 6) + '" y="54" class="t-pd">' + L.owner + ' 的锁</text>');
+    });
+    s.push('<line x1="' + X(PX) + '" y1="28" x2="' + X(PX) + '" y2="280" class="e-dash"/><text x="' + (X(PX) - 4) + '" y="24" text-anchor="end" class="t-bad">3.0 s A 的锁到点</text>');
+    // A lane
+    var aw = X(tl.write);
+    s.push('<rect x="' + X(0) + '" y="90" width="' + (X(tl.slow) - X(0)) + '" height="26" rx="5" class="b-of"/>');
+    s.push('<text x="' + ((X(0) + X(tl.slow)) / 2) + '" y="108" text-anchor="middle" class="t-of">查到 399（v1），处理中</text>');
+    s.push('<rect x="' + X(tl.slow) + '" y="90" width="' + (aw - X(tl.slow)) + '" height="26" rx="5" class="b-bad"/>');
+    if (aw - X(tl.slow) > 60) s.push('<text x="' + ((X(tl.slow) + aw) / 2) + '" y="108" text-anchor="middle" class="t-bad">停顿</text>');
+    if (r.mode === 'check') s.push('<circle cx="' + X(tl.slow) + '" cy="86" r="5" class="' + (r.mineAtCheck ? 'f-good' : 'f-bad') + '"/><text x="' + X(tl.slow) + '" y="80" text-anchor="middle" class="t-xs">GET 锁：' + (r.mineAtCheck ? '是我的' : '不是') + '</text>');
+    s.push('<circle cx="' + aw + '" cy="103" r="6" class="' + (r.aFill ? 'f-bad' : 'f-bk') + '"/><text x="' + (aw + 10) + '" y="108" class="' + (r.aFill ? 't-bad' : 't-bk') + '">' + (r.aFill ? '写入 399' : '被拒') + '</text>');
+    // change lane
+    var cx = X(CHANGE_AT);
+    s.push('<path d="M' + cx + ',146 l8,12 l-8,12 l-8,-12 z" class="f-cg"/><text x="' + (cx + 14) + '" y="164" class="t-cg">改成 299（v2），' + (r.mode === 'tomb' ? '写墓碑' : 'DEL 缓存') + '</text>');
+    // B lane
+    if (tl.b >= 0) {
+      var bx = X(tl.b);
+      s.push('<rect x="' + bx + '" y="198" width="30" height="26" rx="5" class="b-pd"/>');
+      s.push('<text x="' + (bx - 6) + '" y="216" text-anchor="end" class="t-s">3.3 s 来读，缓存没有 →</text>');
+      s.push('<text x="' + (bx + 36) + '" y="216" class="t-pd">' + (r.bGot === 'wait' ? '等锁' : '抢锁、查到 ' + r.bGot + '、回填') + '</text>');
+    } else {
+      s.push('<text x="' + X(0) + '" y="216" class="t-xs">这条时间线里没人来读</text>');
+    }
+    // cache lane
+    for (var i = 0; i < r.cacheSegs.length; i++) {
+      var c = r.cacheSegs[i], from = c.from, to = i + 1 < r.cacheSegs.length ? r.cacheSegs[i + 1].from : tl.end;
+      if (to <= from) continue;
+      var val = c.val;
+      // tombstone expiry inside the window
+      if (val && val.kind === 'tomb' && val.at + TOMB_TTL < to) to = val.at + TOMB_TTL;
+      var lab = cacheLabel(val), w2 = X(to) - X(from) - 2;
+      s.push('<rect x="' + X(from) + '" y="248" width="' + w2 + '" height="26" rx="5" class="' + lab.cls + '"/>');
+      if (w2 > 36) s.push('<text x="' + (X(from) + w2 / 2) + '" y="266" text-anchor="middle" class="' + lab.tcls + '">' + lab.txt + '</text>');
+    }
+    s.push('<line x1="' + X(0) + '" y1="288" x2="' + X(4600) + '" y2="288" class="e-axis"/>');
+    for (var k = 0; k <= 4; k++) s.push('<text x="' + X(k * 1000) + '" y="299" text-anchor="middle" class="t-xs">' + k + ' s</text>');
+    s.push('</svg>');
+    return s.join('');
+  }
+
+  function render() {
+    var r = simulate(state.t, state.m);
+    $('tl-box').innerHTML = draw(r);
+    $('t-a').textContent = r.aFill ? '写入' : '被拒';
+    $('t-a2').textContent = r.tl.write / 1000 + ' s 发出';
+    $('t-b').textContent = r.bGot === null ? '—' : r.bGot === 'wait' ? '等锁' : r.bGot;
+    $('t-b2').textContent = r.tl.b >= 0 ? '3.3 s 来读' : '没人来读';
+    $('t-db').textContent = r.dbHits;
+    var map = {empty: ['空', '下次读查库拿 299'], tomb: ['墓碑', '下次读查库拿 299'], fresh: ['299', '和数据库一致'], stale: ['399', '旧价还要挂 30 分钟']};
+    $('t-fin').textContent = map[r.finKind][0];
+    $('t-fin2').textContent = map[r.finKind][1];
+    $('t-fin-box').setAttribute('data-role', r.good ? 'done' : 'bad');
+    var why;
+    if (r.mode === 'plain') why = '直接 SET 不比任何东西，A 什么时候回来都写得进去。';
+    else if (r.mode === 'check') why = '比对发生在 ' + r.tl.slow / 1000 + ' s，那时锁' + (r.mineAtCheck ? '还是 A 的' : '已经不是 A 的') + '；写发生在 ' + r.tl.write / 1000 + ' s。中间的停顿里发生了什么，A 看不见。';
+    else if (r.mode === 'lock') why = r.aFill ? '锁一直是 A 的，守卫放行；可 A 手里那行是改价之前读的。锁守卫管得住锁过期，管不住数据变了。' : 'Redis 在执行脚本的那一刻比 token：锁已经过期' + (r.tl.b >= 0 ? '、被 B 拿过' : '') + '，A 的回填被拒。';
+    else if (r.mode === 'ver') why = r.aFill ? '改价时 DEL 了缓存，A 来写时缓存是空的，没东西可比，v1 就写进去了。被写的一方忘了见过 v2。' : '缓存里已经是 B 写的 v2，A 带着 v1 来，被拒。';
+    else why = r.aFill ? 'A 写进去了。' : '缓存里留着 v2 的墓碑（存 10 s），A 带着 v1 来，被拒。墓碑记住了见过的最大号。';
+    $('lab-res').innerHTML = '<b>' + esc(r.tl.name + ' · ' + MODES[r.mode]) + '：</b>' + esc(why);
+    $('lab-res').setAttribute('data-role', r.good ? 'bk' : 'bad');
+    document.querySelectorAll('#tls button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.t === state.t); });
+    document.querySelectorAll('#modes button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.m === state.m); });
+  }
+
+  document.querySelectorAll('#tls button').forEach(function (b) { b.addEventListener('click', function () { state.t = b.dataset.t; render(); }); });
+  document.querySelectorAll('#modes button').forEach(function (b) { b.addEventListener('click', function () { state.m = b.dataset.m; render(); }); });
+
+  var guessed = false;
+  document.querySelectorAll('#guess .opts button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (guessed) return;
+      guessed = true;
+      var r = simulate('t2', 'ver');
+      var answer = r.finKind === 'stale' ? 'b' : r.finKind === 'fresh' ? 'a' : 'c';
+      document.querySelectorAll('#guess .opts button').forEach(function (o) {
+        o.setAttribute('aria-pressed', o === b);
+        if (o.dataset.g === answer) o.classList.add('right');
+        else if (o === b) o.classList.add('wrong');
+      });
+      var res = $('guess-res');
+      res.hidden = false;
+      res.innerHTML = (b.dataset.g === answer ? '<b>猜对了。</b>' : '<b>没猜对。</b>') +
+        '缓存最后是 399。改价时 DEL 把缓存删空了，A 回来一比，缓存里什么都没有，v1 就写进去了。版本守卫要求被写的一方记得见过的最大号，DEL 把这份记忆也删了（④ fencing token）。下面已经切到这个组合。';
+      state.t = 't2'; state.m = 'ver'; render();
+    });
+  });
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
