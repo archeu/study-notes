@@ -1,0 +1,1008 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>全景：一条 UPDATE 从应用到磁盘</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, same family as the other notes; a scenario panorama (reverse-learn) for Java map J06: hero + 12-stop strip, scene card + code lines tagged with stop numbers, panorama map (top band = order-service JVM with stops 1, 2, 10; big zone = MySQL primary with server layer 3-4, InnoDB row 5-8, commit row 9 + page cleaner 12, disk files at the bottom; right zone = replica with stop 11), a time ruler, a measured-output table, a 12-step walk synced to the map, node table, retell/predictions/next loop. Roles: of = app side and connections (HikariCP, Connector/J, connection thread), pd = parser/optimizer, cg = B+ tree and buffer pool, rn = locks/undo/MVCC, bk = redo/binlog/commit/checkpoint, g2 = replication; red only for things that go wrong, green = measured tag. Interaction: only the stepper (prev/next/auto/reset, arrow keys, click a box or a strip pill). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:80px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:22px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:22px}
+.lead{color:var(--muted);max-width:46em}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .stop[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--bk)}
+.strip{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:4px;scrollbar-width:thin}
+.strip a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:5px 12px 5px 6px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.strip a:hover{border-color:var(--rc)}
+.strip a b{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--rc);color:var(--on-accent);font-family:var(--font-mono);font-size:12px;font-weight:600}
+.strip i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.where a{font-weight:500}
+
+/* ---------- scene ---------- */
+.scene-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:18px;align-items:start}
+.card{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:18px 20px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.facts{display:grid;grid-template-columns:4.2em minmax(0,1fr);gap:8px 12px;margin:0;font-size:15px}
+.facts dt{font-weight:700;color:var(--muted)}
+.facts dd{margin:0;min-width:0}
+.facts code{overflow-wrap:anywhere}
+.result{border-top:1.5px dashed var(--line);padding-top:12px;font-size:14.5px}
+.result b{color:var(--good)}
+.result .bad{color:var(--bad);font-weight:700}
+.tag-real{display:inline-block;font-size:12px;font-weight:700;padding:0 7px;border-radius:6px;background:var(--good-tint);color:var(--good);vertical-align:1px}
+.tag-doc{display:inline-block;font-size:12px;font-weight:700;padding:0 7px;border-radius:6px;background:var(--neutral-tint);color:var(--neutral);vertical-align:1px}
+.code-card h3{font-size:18px}
+.code-card p.cap{font-size:13.5px;color:var(--muted)}
+.code{margin:0;background:var(--code-bg);border:1px solid var(--line);border-radius:12px;padding:12px 0;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.6}
+.code .ln{display:grid;grid-template-columns:3.4em max-content;white-space:pre;padding-right:14px}
+.code .ln i{font-style:normal;text-align:center;font-family:var(--font-body);font-weight:700;color:var(--rc,transparent)}
+.code .ln.hl{background:color-mix(in srgb,var(--rc) 9%,transparent)}
+.code .cm{color:var(--muted)}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:56em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto;min-width:760px}
+.sv text{font-family:var(--font-body)}
+.sv .mono{font-family:var(--font-mono)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13.5px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend span::before{content:"";width:12px;height:12px;border-radius:3px;background:var(--rt);border:2px solid var(--rc)}
+
+/* map svg */
+.pmap .box rect{fill:var(--card);stroke:var(--rc);stroke-width:2}
+.pmap .box .bt{font-size:14px;font-weight:700;fill:var(--ink)}
+.pmap .box .bn{fill:var(--rc)}
+.pmap .box .bs{font-size:12px;fill:var(--muted)}
+.pmap .box{cursor:pointer;transition:opacity .25s}
+.pmap .box rect{transition:fill .25s,stroke-width .25s}
+.pmap .zone{fill:none;stroke:var(--line-strong);stroke-width:1.4;stroke-dasharray:6 5}
+.pmap .zl{font-size:12.5px;fill:var(--muted)}
+.pmap .client rect{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.pmap .client text{fill:var(--ink)}
+.pmap .host rect{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.pmap .host text{font-size:12px;fill:var(--ink)}
+.pmap .host.bad rect{fill:var(--bad-tint);stroke:var(--bad)}
+.pmap .host.bad text{fill:var(--bad)}
+.pmap .ed line,.pmap .ed path{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.pmap .ed.ret line,.pmap .ed.ret path{stroke-dasharray:5 4}
+.pmap .ed.bad line{stroke:var(--bad)}
+.pmap .ed{transition:opacity .25s}
+.pmap .el{font-size:11px;fill:var(--muted)}
+.pmap .el.bad{fill:var(--bad);font-weight:700}
+.pmap .mk{fill:var(--line-strong)}
+.pmap .mk-bad{fill:var(--bad)}
+/* walk highlighting (only on the clone inside .walk) */
+.walk .pmap .box{opacity:.28}
+.walk .pmap .box.past{opacity:.6}
+.walk .pmap .box.on{opacity:1}
+.walk .pmap .box.on rect{fill:var(--rt);stroke-width:3.2}
+.walk .pmap .ed{opacity:.3}
+.walk .pmap .ed.hot{opacity:1}
+.walk .pmap .ed.hot line,.walk .pmap .ed.hot path{stroke:var(--ink);stroke-width:2}
+.walk .pmap .ed.hot.bad line{stroke:var(--bad)}
+
+/* timing svg */
+.tim .lane{font-size:12px;fill:var(--ink)}
+.tim .pt{font-size:14px;font-weight:700;fill:var(--ink)}
+.tim .ps{font-size:12px;fill:var(--muted)}
+.tim .bar{fill:var(--bk)}
+.tim .bar.bad{fill:var(--bad)}
+.tim .bv{font-size:11.5px;fill:var(--muted)}
+.tim .bin{font-size:11.5px;fill:var(--on-accent);font-weight:700}
+.tim .tot{stroke:var(--ink);stroke-width:1.6;stroke-dasharray:4 3}
+.tim .tl{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.tim .ax{stroke:var(--line-strong);stroke-width:1.2}
+.tim .tk{font-size:11px;fill:var(--muted)}
+.tim .grid{stroke:var(--line);stroke-width:1}
+
+/* ---------- walk ---------- */
+.walk{display:flex;flex-direction:column;gap:14px;outline:none}
+.ctrl{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.btn[aria-pressed="true"]{background:var(--bk-tint);border-color:var(--bk)}
+.cnt{margin-left:auto;font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.walk-fig:empty{display:none}
+.stops{display:flex;flex-direction:column;gap:14px}
+.stop{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;padding:16px 18px;display:flex;flex-direction:column;gap:8px}
+.stop h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:21px}
+.stop h3 .no{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:50%;background:var(--rc);color:var(--on-accent);font-family:var(--font-mono);font-size:14px;font-weight:600;flex:none;align-self:center}
+.stop p{font-size:15px;max-width:60em}
+.stop p > b:first-child{display:inline-block;min-width:5.2em;font-size:13px;color:var(--muted)}
+.stop .risk > b:first-child{color:var(--bad)}
+.stop .down > b:first-child{color:var(--rc)}
+.stop .jv{color:var(--muted);font-size:14px}
+.stop code{overflow-wrap:anywhere}
+.todo-chip{display:inline-block;font-size:12px;font-weight:700;padding:0 7px;border-radius:6px;border:1.5px dashed var(--line-strong);color:var(--muted);vertical-align:1px}
+.walk.js .stop{display:none}
+.walk.js .stop.cur{display:flex}
+
+/* ---------- nodes ---------- */
+.tbl{overflow-x:auto;background:var(--card);border:1.5px solid var(--line);border-radius:16px}
+table.nodes{border-collapse:collapse;width:100%;min-width:720px;font-size:14.5px;line-height:1.55}
+table.nodes th,table.nodes td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+table.nodes th{font-size:13px;color:var(--muted);font-weight:700}
+table.nodes tr:last-child td{border-bottom:0}
+table.nodes td.st{font-family:var(--font-mono);white-space:nowrap}
+table.nodes td.ord{white-space:nowrap}
+table.nodes td.ord b{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--ink);color:var(--paper);font-family:var(--font-mono);font-size:12.5px;margin-right:8px}
+table.nodes .why{color:var(--muted);font-size:13.5px}
+.dp{font-size:12px;color:var(--muted);white-space:nowrap}
+.aside-box{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:14px 18px;display:flex;flex-direction:column;gap:8px;font-size:14.5px}
+.aside-box h3{font-size:18px}
+.aside-box ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:6px}
+
+/* ---------- back ---------- */
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}
+.retell{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:8px}
+.retell li{padding-left:4px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p{font-size:14.5px}
+details p + p{margin-top:6px}
+details .from{font-size:13px;color:var(--muted)}
+.preds{display:flex;flex-direction:column;gap:10px}
+.mines{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:8px;font-size:15px}
+.next{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+.next .card h4{font-size:18px}
+.next .card p{font-size:14.5px;color:var(--muted)}
+
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+
+@media (max-width:860px){
+  .scene-grid,.two,.next{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:520px){
+  main{gap:64px;padding-block:28px 56px}
+  .facts{grid-template-columns:minmax(0,1fr);gap:2px 0}
+  .facts dd{margin-bottom:6px}
+  .cnt{margin-left:0;width:100%}
+}
+/* ---------- this page ---------- */
+.stop .log{font-size:13.5px;color:var(--muted);background:var(--code-bg);border:1px solid var(--line);border-radius:10px;padding:6px 10px}
+.stop .log code{font-size:12.5px;color:var(--ink)}
+.result .from{font-size:13px;color:var(--muted);margin-top:6px}
+#map > h3{font-size:20px;margin-top:8px}
+.note-p{font-size:14px;color:var(--muted);max-width:56em}
+table.runs td.num{font-family:var(--font-mono);white-space:nowrap;font-variant-numeric:tabular-nums}
+table.runs .bad-t{color:var(--bad);font-weight:700}
+/* race timeline */
+.race .lane{font-size:14px;font-weight:700;fill:var(--ink);font-family:var(--font-mono)}
+.race .lsub{font-size:12px;fill:var(--muted)}
+.race .axis{stroke:var(--line-strong);stroke-width:1.2}
+.race .tk{font-size:11.5px;fill:var(--muted)}
+.race .ev rect{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.race .ev text{font-size:13px;font-weight:700;fill:var(--ink)}
+.race .ev text.r{font-size:12px;font-weight:400;fill:var(--muted)}
+.race .ev.off rect{fill:none;stroke:var(--line-strong);stroke-dasharray:5 4}
+.race .ev.off text{fill:var(--muted);font-weight:400}
+.race .qv rect{fill:var(--card);stroke:var(--line-strong);stroke-width:1.4}
+.race .qv text{font-family:var(--font-mono);font-size:15px;font-weight:700;fill:var(--ink)}
+.race .qv.bad rect{fill:var(--bad-tint);stroke:var(--bad)}
+.race .qv.bad text{fill:var(--bad)}
+.race .lk{stroke:var(--line-strong);stroke-width:1.2;stroke-dasharray:3 3}
+.race .lk.bad{stroke:var(--bad)}
+.race .note{font-size:12.5px;fill:var(--muted)}
+.race .note.bad{fill:var(--bad);font-weight:700}
+
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+table.runs td.why code.bad{color:var(--bad)}
+/* J04: measured latency bars and connection dots */
+.lat .bar rect{fill:var(--rt);stroke:var(--rc);stroke-width:1.6}
+.lat .bl{font-size:12.5px;fill:var(--ink)}
+.lat .bv{font-size:12.5px;font-weight:700;fill:var(--ink);font-family:var(--font-mono)}
+.lat .gl{stroke:var(--line);stroke-width:1}
+.lat .gt{font-size:11px;fill:var(--muted);font-family:var(--font-mono)}
+.lat .dl{stroke:var(--bad);stroke-width:1.6;stroke-dasharray:5 4}
+.lat .dt{font-size:11.5px;fill:var(--bad);font-weight:700}
+.conn .dot{fill:var(--rt);stroke:var(--rc);stroke-width:1.4}
+.conn .ct{font-size:13px;font-weight:700;fill:var(--ink)}
+.conn .cs{font-size:12px;fill:var(--muted)}
+.conn .pipe{fill:var(--rt);stroke:var(--rc);stroke-width:2}
+.swipe{display:none;margin:0 0 6px;font-size:12px;color:var(--muted)}
+@media (max-width:800px){.swipe{display:block}}
+.tim .seg{fill:var(--rt);stroke:var(--rc);stroke-width:1.5}
+.tim .seg.bad{fill:var(--bad-tint);stroke:var(--bad)}
+.tim .sl{font-size:11.5px;fill:var(--ink)}
+.tim .sv2{font-size:11.5px;fill:var(--ink);font-family:var(--font-mono);font-weight:600}
+.tim .ld{stroke:var(--line-strong);stroke-width:1}
+.pmap .dep{font-size:11px;fill:var(--muted);font-family:var(--font-mono)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 后端架构</span><span aria-hidden="true">/</span><span class="tb-here">全景：一条 UPDATE 从应用到磁盘</span></div></nav>
+<main>
+
+<header class="hero">
+  <p class="kicker">JAVA 后端架构 · J06 MySQL 与 PostgreSQL · 场景全景</p>
+  <h1>一条 UPDATE 从应用到磁盘</h1>
+  <p class="lead">用户 1024 付款成功，订单服务发出一条 <code>UPDATE orders SET status='PAID' … WHERE id=9527</code>。应用这边 <b>7～9 ms</b> 就拿到了“提交成功”，可实测提交两分钟后，磁盘上数据文件里的 9527 <b>还是 CREATED</b>：改过的那一页一直躺在内存里没写回去。这张全景回答：这条 UPDATE 在 MySQL 里经过哪 12 站，没写回数据文件凭什么也不会丢，从库又是怎么跟上的；J06 的 10 个知识点各管哪一站。</p>
+  <nav class="strip" aria-label="十二站">
+    <a href="#s-1" data-role="of"><b>1</b>借连接</a><i>›</i>
+    <a href="#s-2" data-role="of"><b>2</b>发 SQL</a><i>›</i>
+    <a href="#s-3" data-role="of"><b>3</b>连接线程</a><i>›</i>
+    <a href="#s-4" data-role="pd"><b>4</b>解析优化</a><i>›</i>
+    <a href="#s-5" data-role="cg"><b>5</b>B+ 树找页</a><i>›</i>
+    <a href="#s-6" data-role="rn"><b>6</b>行锁</a><i>›</i>
+    <a href="#s-7" data-role="rn"><b>7</b>undo</a><i>›</i>
+    <a href="#s-8" data-role="bk"><b>8</b>改页 + redo</a><i>›</i>
+    <a href="#s-9" data-role="bk"><b>9</b>两阶段提交</a><i>›</i>
+    <a href="#s-10" data-role="of"><b>10</b>回 OK</a><i>›</i>
+    <a href="#s-11" data-role="g2"><b>11</b>从库回放</a><i>›</i>
+    <a href="#s-12" data-role="bk"><b>12</b>刷脏页</a>
+  </nav>
+  <p class="where"><span>所在：<a href="roadmap.html#j06">Java 地图 J06 · MySQL 与 PostgreSQL</a></span><span>上一站：<a href="pano-j05-request-through-spring.html">一个请求穿过 Spring</a>（第 9 站把 SQL 发出 JVM，就接到这里）</span><span>整条链路在本机真跑过 <span class="tag-real">实测</span></span></p>
+</header>
+
+<!-- ============ 场景 ============ -->
+<section id="scene">
+  <h2>场景：订单 9527 改成已付款</h2>
+  <div class="scene-grid">
+    <div class="card">
+      <dl class="facts">
+        <dt>谁</dt><dd>交易靶场的订单服务。用户 1024 买了 2 件 88 号商品，订单 9527，798.00 元，状态 <code>CREATED</code>。支付回调到了，付款接口要把它改成 <code>PAID</code>（接 <a href="pano-j05-request-through-spring.html">J05 全景</a>第 9 站）。</dd>
+        <dt>SQL</dt><dd><code>UPDATE orders SET status='PAID', paid_at=NOW(6) WHERE id=9527 AND status='CREATED'</code>，在一个事务里，随后 <code>COMMIT</code>。</dd>
+        <dt>部署</dt><dd>MySQL 8.4.13 一主一从（两个容器，GTID 复制），InnoDB，默认配置：16 KB 页、buffer pool 128 MB、可重复读、binlog 为 ROW 格式、<code>innodb_flush_log_at_trx_commit=1</code>、<code>sync_binlog=1</code>。<code>orders</code> 表 100 万行，主键索引约 72 MB，另有二级索引 <code>idx_user(user_id)</code>。应用端 JDK 21 + HikariCP 6.3.3 + Connector/J 9.7.0。</dd>
+        <dt>期望</dt><dd><code>commit()</code> 返回就算数：这之后主库断电、进程被杀，9527 都得是 PAID；从库很快也是 PAID；别的事务在提交前看不到半截状态，也改不了这一行。</dd>
+      </dl>
+      <div class="result">
+        <p><span class="tag-real">实测</span> 主库重启后的第一单：UPDATE 从磁盘读进 <b>3 个页</b>（根页 → 内节点页 → 叶子页，树高 3），服务器执行 2.3～3.9 ms；COMMIT 3.0～3.4 ms，几乎全在等 redo 和 binlog 落盘。应用这边借连接到还连接一共 <b>7.4～9.3 ms</b>。提交后 <b>18～24 ms</b> 从库读到 PAID。<span class="bad">那一页提交 120 秒后仍是脏页</span>，数据文件里还是旧值，靠 redo 兜底。</p>
+        <p class="from">实测环境：本机 2 核 ARM，两个 MySQL 8.4.13 容器在同一台机器上，应用和数据库之间走本机回环。主库重启 3 次、各追踪一次，数字取 3 次的范围。</p>
+      </div>
+    </div>
+    <div class="card code-card">
+      <h3>一条 UPDATE，各站留下的痕迹</h3>
+      <p class="cap">左边的号是这一行在第几站产生。全部来自实测程序旁路查询 MySQL 的输出。</p>
+<pre class="code"><span class="ln hl" data-role="of"><i>2</i>UPDATE orders SET status = 'PAID', …</span><span class="ln" data-role="of"><i></i>  WHERE id = 9527 AND status = 'CREATED'</span><span class="ln" data-role="of"><i></i>  <span class="cm">-- 参数在客户端拼好，整条文本发过去</span></span><span class="ln hl" data-role="pd"><i>4</i>EXPLAIN → key=PRIMARY  type=range  rows=1</span><span class="ln hl" data-role="cg"><i>5</i>buffer_pool_reads +3  页 4 → 134 → 75</span><span class="ln hl" data-role="rn"><i>6</i>data_locks: IX(表)  X,REC_NOT_GAP(9527)</span><span class="ln hl" data-role="rn"><i>7</i>别的连接读 9527 → CREATED（旧版本）</span><span class="ln hl" data-role="bk"><i>8</i>页 75 变脏；redo LSN +228～244 字节</span><span class="ln hl" data-role="bk"><i>9</i>COMMIT：redo fsync，binlog +423 字节</span><span class="ln" data-role="bk"><i></i>  Gtid · BEGIN · Table_map · Update_rows · Xid</span><span class="ln hl" data-role="of"><i>10</i>OK 包；连接还回 HikariCP</span><span class="ln hl" data-role="g2"><i>11</i>从库 applier：提交到回放完 7.7～9.4 ms</span><span class="ln hl" data-role="bk"><i>12</i>120 s 后页 75 仍是脏页，检查点没动</span></pre>
+      <p class="cap">完整代码在 study-labs：<a href="https://github.com/archeu/study-labs/tree/main/java/java/pano-j06-update-to-disk">java/java/pano-j06-update-to-disk →</a>，<code>./run.sh</code> 起一主一从、灌数、重启、追踪，一条命令跑完。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 全景图 ============ -->
+<section id="map">
+  <h2>全景图：十二站</h2>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv pmap" viewBox="0 0 960 660" role="img" aria-label="全景图：最上面一条是订单服务的 JVM，第 1 站 HikariCP 借连接开事务，第 2 站 MyBatis 和 Connector/J 把整条 UPDATE 文本发出去，第 10 站收到 OK 后把连接还回池子。下面左边的大框是 MySQL 主库：第一行是第 3 站连接线程和第 4 站解析器加优化器；第二行是 InnoDB 里的第 5 到第 8 站：沿 B+ 树找页、加行锁、写 undo、改页并写 redo；第三行是第 12 站后台刷脏页和第 9 站两阶段提交；最下面是磁盘上的三个文件：orders.ibd 表空间、redo 日志、binlog。第 5 站冷启动时从表空间读进 3 个页，第 9 站把 redo 和 binlog 写盘，第 12 站稍后把脏页写回表空间。右下角是从库，第 11 站收到 binlog 事件后回放。右侧标注：时间大头是第 5 站冷读 3 页 2.1 到 3.7 毫秒和第 9 站等落盘 2.9 到 3.3 毫秒。">
+  <defs>
+    <marker id="pm-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+
+  <rect class="zone" x="12" y="14" width="936" height="100" rx="14"/>
+  <text class="zl" x="24" y="32">订单服务 JVM（交易靶场）· JDK 21 · HikariCP + Connector/J</text>
+  <rect class="zone" x="12" y="136" width="676" height="512" rx="14"/>
+  <text class="zl" x="24" y="155">MySQL 8.4 主库 · 一个 mysqld 进程</text>
+  <rect class="zone" x="700" y="470" width="248" height="178" rx="14"/>
+  <text class="zl" x="712" y="490">从库 mysqld（另一个容器）</text>
+
+  <g class="box" data-stop="1" data-role="of">
+    <rect x="30" y="44" width="230" height="56" rx="12"/>
+    <text class="bt" x="42" y="68"><tspan class="bn">①</tspan> HikariCP 借连接</text>
+    <text class="bs" x="42" y="88">借出连接，autocommit=0</text>
+  </g>
+  <g class="box" data-stop="2" data-role="of">
+    <rect x="340" y="44" width="270" height="56" rx="12"/>
+    <text class="bt" x="352" y="68"><tspan class="bn">②</tspan> MyBatis → Connector/J</text>
+    <text class="bs" x="352" y="88">拼好参数，整条 SQL 发出</text>
+  </g>
+  <g class="box" data-stop="10" data-role="of">
+    <rect x="690" y="44" width="240" height="56" rx="12"/>
+    <text class="bt" x="702" y="68"><tspan class="bn">⑩</tspan> 回 OK，还连接</text>
+    <text class="bs" x="702" y="88">commit() 返回，连接回池</text>
+  </g>
+
+  <g class="box" data-stop="3" data-role="of">
+    <rect x="30" y="168" width="250" height="56" rx="12"/>
+    <text class="bt" x="42" y="192"><tspan class="bn">③</tspan> 连接线程</text>
+    <text class="bs" x="42" y="212">一个连接一个线程，收包</text>
+  </g>
+  <g class="box" data-stop="4" data-role="pd">
+    <rect x="330" y="168" width="330" height="56" rx="12"/>
+    <text class="bt" x="342" y="192"><tspan class="bn">④</tspan> 解析器 + 优化器</text>
+    <text class="bs" x="342" y="212">语法树 → 选中主键，估 1 行</text>
+  </g>
+
+  <g class="box" data-stop="5" data-role="cg">
+    <rect x="30" y="270" width="148" height="56" rx="12"/>
+    <text class="bt" x="40" y="294"><tspan class="bn">⑤</tspan> B+ 树找页</text>
+    <text class="bs" x="40" y="314">根 → 内节点 → 叶子</text>
+  </g>
+  <g class="box" data-stop="6" data-role="rn">
+    <rect x="194" y="270" width="148" height="56" rx="12"/>
+    <text class="bt" x="204" y="294"><tspan class="bn">⑥</tspan> 加行锁</text>
+    <text class="bs" x="204" y="314">9527 上 X 记录锁</text>
+  </g>
+  <g class="box" data-stop="7" data-role="rn">
+    <rect x="358" y="270" width="148" height="56" rx="12"/>
+    <text class="bt" x="368" y="294"><tspan class="bn">⑦</tspan> 写 undo</text>
+    <text class="bs" x="368" y="314">旧值 CREATED 留底</text>
+  </g>
+  <g class="box" data-stop="8" data-role="bk">
+    <rect x="522" y="270" width="148" height="56" rx="12"/>
+    <text class="bt" x="532" y="294"><tspan class="bn">⑧</tspan> 改页 + redo</text>
+    <text class="bs" x="532" y="314">页变脏，记 redo</text>
+  </g>
+
+  <g class="box" data-stop="12" data-role="bk">
+    <rect x="180" y="388" width="150" height="56" rx="12"/>
+    <text class="bt" x="190" y="412"><tspan class="bn">⑫</tspan> 刷脏页</text>
+    <text class="bs" x="190" y="432">page cleaner 稍后写</text>
+  </g>
+  <g class="box" data-stop="9" data-role="bk">
+    <rect x="350" y="388" width="320" height="56" rx="12"/>
+    <text class="bt" x="362" y="412"><tspan class="bn">⑨</tspan> 两阶段提交</text>
+    <text class="bs" x="362" y="432">redo prepare → 写 binlog → redo commit</text>
+  </g>
+
+  <g class="host">
+    <rect x="40" y="534" width="290" height="56" rx="10"/>
+    <text x="52" y="556" style="font-weight:700">orders.ibd（表空间）</text>
+    <text x="52" y="575">9527 在叶子页 75，旧值还在</text>
+  </g>
+  <g class="host">
+    <rect x="350" y="534" width="150" height="56" rx="10"/>
+    <text x="362" y="556" style="font-weight:700">redo 日志</text>
+    <text x="362" y="575">#innodb_redo/</text>
+  </g>
+  <g class="host">
+    <rect x="520" y="534" width="150" height="56" rx="10"/>
+    <text x="532" y="556" style="font-weight:700">binlog.000003</text>
+    <text x="532" y="575">+5 个事件 423 B</text>
+  </g>
+  <text class="el" x="440" y="524">磁盘 /var/lib/mysql</text>
+
+  <g class="box" data-stop="11" data-role="g2">
+    <rect x="720" y="540" width="210" height="56" rx="12"/>
+    <text class="bt" x="732" y="564"><tspan class="bn">⑪</tspan> 从库回放</text>
+    <text class="bs" x="732" y="584">IO 线程收，applier 改</text>
+  </g>
+
+  <g class="ed" data-edge="2"><line x1="260" y1="72" x2="337" y2="72" marker-end="url(#pm-ar)"/><text class="el" x="298" y="64" text-anchor="middle">事务已开</text></g>
+  <g class="ed" data-edge="3"><path d="M400,100 V124 H155 V165" marker-end="url(#pm-ar)"/><text class="el" x="410" y="129">COM_QUERY：整条 UPDATE 文本</text></g>
+  <g class="ed" data-edge="4"><line x1="280" y1="196" x2="327" y2="196" marker-end="url(#pm-ar)"/><text class="el" x="304" y="188" text-anchor="middle">SQL</text></g>
+  <g class="ed" data-edge="5"><path d="M400,224 V248 H104 V267" marker-end="url(#pm-ar)"/><text class="el" x="120" y="243">执行计划：走 PRIMARY，1 行</text></g>
+  <g class="ed" data-edge="5d"><line x1="110" y1="534" x2="110" y2="329" marker-end="url(#pm-ar)"/><text class="el" x="118" y="368">冷：从磁盘读进 3 页</text></g>
+  <g class="ed" data-edge="6"><line x1="178" y1="298" x2="191" y2="298" marker-end="url(#pm-ar)"/><text class="el" x="186" y="344" text-anchor="middle">找到 9527</text></g>
+  <g class="ed" data-edge="7"><line x1="342" y1="298" x2="355" y2="298" marker-end="url(#pm-ar)"/><text class="el" x="350" y="344" text-anchor="middle">X 锁到手</text></g>
+  <g class="ed" data-edge="8"><line x1="506" y1="298" x2="519" y2="298" marker-end="url(#pm-ar)"/><text class="el" x="514" y="344" text-anchor="middle">旧值已进 undo</text></g>
+  <g class="ed" data-edge="9"><line x1="596" y1="326" x2="596" y2="385" marker-end="url(#pm-ar)"/><text class="el" x="588" y="368" text-anchor="end">应用发来 COMMIT</text></g>
+  <g class="ed" data-edge="9a"><line x1="425" y1="444" x2="425" y2="531" marker-end="url(#pm-ar)"/><text class="el" x="433" y="490">redo fsync</text></g>
+  <g class="ed" data-edge="9b"><line x1="595" y1="444" x2="595" y2="531" marker-end="url(#pm-ar)"/><text class="el" x="603" y="490">写 + fsync</text></g>
+  <g class="ed ret" data-edge="10"><path d="M670,416 H720 V103" marker-end="url(#pm-ar)"/><text class="el" x="728" y="246">OK 包：1 行受影响</text><text class="el" x="728" y="262">UPDATE、COMMIT 各回一次</text></g>
+  <g class="ed" data-edge="11"><path d="M670,562 H717" marker-end="url(#pm-ar)"/><text class="el" x="712" y="520">binlog 事件推过来</text></g>
+  <g class="ed" data-edge="12"><line x1="255" y1="444" x2="255" y2="531" marker-end="url(#pm-ar)"/><text class="el" x="263" y="494">16 KB 页写回</text></g>
+
+  <text class="el" x="728" y="330" style="font-weight:700">时间大头（实测）</text>
+  <text class="el" x="728" y="348">⑤ 冷读 3 页 2.1～3.7 ms</text>
+  <text class="el" x="728" y="366">⑨ 等 redo、binlog 落盘 2.9～3.3 ms</text>
+  <text class="el" x="712" y="626">实测：提交后 18～24 ms 读到 PAID</text>
+</svg>
+    </div>
+    <div class="legend" aria-label="颜色">
+      <span data-role="of">连接与连接池</span>
+      <span data-role="pd">执行计划</span>
+      <span data-role="cg">索引、B+ 树、buffer pool</span>
+      <span data-role="rn">事务、MVCC 与锁</span>
+      <span data-role="bk">redo、binlog、两阶段提交</span>
+      <span data-role="g2">主从复制</span>
+    </div>
+    <figcaption>从上往下读：应用发出 SQL（①②），MySQL 的 server 层收下、想清楚怎么做（③④），InnoDB 找到这一行、锁住、留底、改掉（⑤～⑧），提交时把两本日志写进磁盘（⑨），然后告诉应用“成了”（⑩）。⑪⑫ 在 commit 返回之后才发生：从库在几毫秒后跟上，数据文件里的那一页要等更久才被改过来。实线是往下走的数据，虚线是回程。点任意一站，跳到下面的分步讲解。</figcaption>
+  </figure>
+
+  <h3>时间花在哪：一单付款在应用这边的耗时</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv tim" viewBox="0 0 960 300" role="img" aria-label="耗时分段。第一行，主库重启后的第一单 9527：借连接加开事务 0.34 毫秒，UPDATE 3.20 毫秒（其中冷读 3 个页约 2.1 毫秒），COMMIT 3.43 毫秒（其中等落盘约 2.9 毫秒），还连接 0.41 毫秒，一共 7.38 毫秒。第二行，同一页上的订单 9530：UPDATE 0.99 毫秒，COMMIT 3.26 毫秒。第三、四行，300 次自动提交的单条 UPDATE 的中位数：默认的双 1 配置 4.19 毫秒，改成 innodb_flush_log_at_trx_commit 等于 2、sync_binlog 等于 0 之后 1.20 毫秒。">
+<text class="pt" x="16" y="24">一单付款，客户端计时（第 1 次运行；3 次的范围见下表）</text>
+<line class="grid" x1="170" y1="34" x2="170" y2="256"/><text class="tk" x="170" y="274" text-anchor="middle">0 ms</text>
+<line class="grid" x1="360" y1="34" x2="360" y2="256"/><text class="tk" x="360" y="274" text-anchor="middle">2 ms</text>
+<line class="grid" x1="550" y1="34" x2="550" y2="256"/><text class="tk" x="550" y="274" text-anchor="middle">4 ms</text>
+<line class="grid" x1="740" y1="34" x2="740" y2="256"/><text class="tk" x="740" y="274" text-anchor="middle">6 ms</text>
+<line class="grid" x1="930" y1="34" x2="930" y2="256"/><text class="tk" x="930" y="274" text-anchor="middle">8 ms</text>
+
+<text class="lane" x="16" y="61">冷：重启后第一单</text>
+<rect class="seg" data-role="of" x="170" y="42" width="32.3" height="30" rx="4"/>
+<rect class="seg" data-role="cg" x="202.3" y="42" width="304" height="30" rx="4"/>
+<text class="sl" x="212" y="61">②～⑧ UPDATE 3.20（冷读 3 页 2.1）</text>
+<rect class="seg" data-role="bk" x="506.3" y="42" width="325.9" height="30" rx="4"/>
+<text class="sl" x="516" y="61">⑨ COMMIT 3.43（等落盘 2.9）</text>
+<rect class="seg" data-role="of" x="832.2" y="42" width="39" height="30" rx="4"/>
+<text class="sv2" x="878" y="61">7.38</text>
+<line class="ld" x1="186" y1="72" x2="186" y2="84"/><text class="ps" x="182" y="96">① 借连接 + 开事务 0.34</text>
+<line class="ld" x1="852" y1="72" x2="852" y2="84"/><text class="ps" x="856" y="96" text-anchor="end">⑩ 还连接 0.41</text>
+
+<text class="lane" x="16" y="127">热：同一页的 9530</text>
+<rect class="seg" data-role="cg" x="170" y="108" width="94" height="30" rx="4"/>
+<text class="sl" x="178" y="127">UPDATE 0.99</text>
+<rect class="seg" data-role="bk" x="264" y="108" width="309.7" height="30" rx="4"/>
+<text class="sl" x="274" y="127">⑨ COMMIT 3.26</text>
+<text class="ps" x="582" y="127">页已在内存，读盘 0 次；提交照样要等落盘</text>
+
+<text class="pt" x="16" y="172">改两个落盘参数：300 次自动提交 UPDATE 的中位数</text>
+<text class="lane" x="16" y="203">双 1（默认）</text>
+<rect class="seg" data-role="bk" x="170" y="184" width="398" height="30" rx="4"/>
+<text class="sl" x="180" y="203">p50 4.19 ms · p99 19.96 ms</text>
+<text class="ps" x="578" y="203">每次提交 redo fsync ≈ 2 次，binlog fsync 1 次</text>
+<text class="lane" x="16" y="243">2 / 0</text>
+<rect class="seg" data-role="other" x="170" y="224" width="114" height="30" rx="4"/>
+<text class="sl" x="180" y="243">p50 1.20 ms</text>
+<text class="ps" x="294" y="243">p99 5.65 ms · redo fsync 0 次，交给每秒一次的后台刷盘</text>
+</svg>
+    </div>
+    <figcaption>冷的第一单里，最慢的是两件事：⑤ 把 3 个页从磁盘读进来，⑨ 等 redo 和 binlog 写进磁盘。页一旦在内存里，UPDATE 就降到 1 ms 以内；可提交的 3 ms 省不掉，那是“commit 返回就不丢”的价钱。下面两行把这个价钱单独拿出来：去掉每次提交的 fsync，中位数从 4.2 ms 降到 1.2 ms，代价见第 9 站。“2 / 0”指 <code>innodb_flush_log_at_trx_commit=2</code>、<code>sync_binlog=0</code>。本机磁盘的 fsync 快慢决定了这段的长短，换一台机器数字会变，比例关系不变。</figcaption>
+  </figure>
+
+  <h3>实测：每一站在输出里长什么样</h3>
+  <div class="tbl">
+    <table class="nodes runs">
+      <thead><tr><th>做了什么</th><th>站</th><th>看到的（原样摘自输出，3 次运行的范围）</th></tr></thead>
+      <tbody>
+        <tr><td>借连接、<code>setAutoCommit(false)</code></td><td class="st">1</td><td class="why">借连接 <code>6～9 µs</code>；<code>setAutoCommit(false)</code> <code>299～736 µs</code>，是一次网络往返</td></tr>
+        <tr><td>看服务器收到的语句</td><td class="st">2、3</td><td class="why"><code>UPDATE orders SET status = 'PAID', paid_at = NOW(6) WHERE id = 9527 AND status = 'CREATED'</code>：参数已经拼进去了</td></tr>
+        <tr><td>三种 WHERE 的 EXPLAIN</td><td class="st">4</td><td class="why"><code>id=9527</code> → <code>key=PRIMARY type=range rows=1</code>；<code>user_id=1024</code> → <code>key=idx_user rows=6</code>；<code>sku_id=88</code>（没索引）→ <code>type=index rows=995720</code></td></tr>
+        <tr><td>重启后第一次 UPDATE，看读盘</td><td class="st">5</td><td class="why"><code>Innodb_buffer_pool_reads +3</code>，<code>read_requests +7</code>；缓存里 orders 主键索引的页 0 → 3 个：页 4（6 条记录，根）、134（439 条，内节点）、75（221 条，叶子，<code>脏</code>）</td></tr>
+        <tr><td>这条 UPDATE 的语句阶段</td><td class="st">3～8</td><td class="why"><code>starting 49～62</code> · <code>Opening tables 72～91</code> · <code>System lock 45～59</code> · <code>updating 2081～3675</code> µs，其余都在 70 µs 以内；服务器整条 <code>2.31～3.94 ms</code>，客户端 <code>3.12～4.53 ms</code></td></tr>
+        <tr><td>提交前看锁</td><td class="st">6</td><td class="why"><code>TABLE IX GRANTED</code>；<code>RECORD PRIMARY X,REC_NOT_GAP 9527 GRANTED</code>；另一个事务改 9527：<code>等了 1071～1079 ms，报 1205 Lock wait timeout exceeded</code>（它的等待上限被我们设成 1 秒）</td></tr>
+        <tr><td>提交前另一个连接读 9527</td><td class="st">7</td><td class="why"><code>status=CREATED</code>；<code>INNODB_TRX</code>：<code>trx_rows_modified=1</code>，<code>REPEATABLE READ</code></td></tr>
+        <tr><td>提交前看 redo 和 binlog</td><td class="st">8</td><td class="why">redo LSN <code>+228～244 字节</code>；binlog 位点<code>不动</code>；UPDATE 刚返回时，redo 1 次已经 fsync，2 次还没有</td></tr>
+        <tr><td>COMMIT</td><td class="st">9</td><td class="why">客户端 <code>3.43～3.72 ms</code>，服务器 <code>2.95～3.40 ms</code>，其中 <code>waiting for handler commit 2.87～3.32 ms</code>；redo 再写 <code>396 字节</code>，<code>Innodb_os_log_fsyncs +1～2</code>；binlog <code>+423 字节</code>：Gtid 79、BEGIN 97、Table_map 69、Update_rows 147、Xid 31</td></tr>
+        <tr><td>还连接</td><td class="st">10</td><td class="why"><code>close() 410～758 µs</code>；应用这边一共 <code>7.38～9.30 ms</code></td></tr>
+        <tr><td>去从库等 9527 变 PAID</td><td class="st">11</td><td class="why">applier：原始提交到回放完 <code>7.7～9.4 ms</code>；应用轮询从库 <code>18～24 ms</code> 读到 PAID</td></tr>
+        <tr><td>每 0.1 秒看一次页 75</td><td class="st">12</td><td class="why bad-t">3 次都是：提交后 <code>120 s</code> 页 75 仍是脏页；检查点停在这条 UPDATE 之前的 LSN</td></tr>
+        <tr><td>同一页上的 9530（热）</td><td class="st">5、9</td><td class="why"><code>executeUpdate 814～987 µs</code>，<code>读盘 +0</code>；<code>commit 3260～3323 µs</code></td></tr>
+        <tr><td>300 次自动提交 UPDATE</td><td class="st">9</td><td class="why">双 1：<code>p50 4.19 ms，p99 19.96 ms，redo fsync 638 次</code>；2 / 0：<code>p50 1.20 ms，p99 5.65 ms，redo fsync 0 次</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note-p">两个容器在同一台机器上，主从之间、应用和数据库之间都是本机网络，几乎没有传输时间；真实部署里第 2、10、11 站各要加上一段网络往返。fsync 的快慢取决于磁盘，云盘通常比这台机器慢。</p>
+</section>
+
+<!-- ============ 一步一步走 ============ -->
+<section id="walk">
+  <h2>一步一步走</h2>
+  <div class="walk" tabindex="0" aria-label="分步演示，左右方向键切换">
+    <div class="ctrl">
+      <button class="btn" type="button" id="w-prev">← 上一步</button>
+      <button class="btn primary" type="button" id="w-next">下一步 →</button>
+      <button class="btn" type="button" id="w-auto" aria-pressed="false">自动播放</button>
+      <button class="btn" type="button" id="w-reset">从头来</button>
+      <span class="cnt" id="w-cnt" aria-live="polite"></span>
+    </div>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box walk-fig" id="w-fig"></div>
+    <div class="stops">
+      <div class="stop" id="s-1" data-stop="1" data-role="of">
+        <h3><span class="no">1</span>HikariCP 借连接：事务从一条现成的连接开始</h3>
+        <p><code>@Transactional</code> 的事务拦截器向 HikariCP 借一条连接。这条连接在池子启动时就建好了：TCP 握手、认证都做过。然后调 <code>setAutoCommit(false)</code>，驱动给 MySQL 发一句 <code>SET autocommit=0</code>。从这一刻起，这条连接上的语句都属于同一个事务，直到 commit。</p>
+        <p class="log"><span class="tag-real">实测</span> 借连接 6～9 µs，只是从池子里拿一条现成的；<code>setAutoCommit(false)</code> 0.30～0.74 ms，是一次网络往返。</p>
+        <p class="why"><b>为什么要它</b>新建一条连接要握手、认证，毫秒级，池子把这笔开销挪到了启动时。事务必须绑在一条连接上，因为 MySQL 把事务状态存在这条连接对应的服务端会话里。</p>
+        <p class="down"><b>往下一层</b><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a> · <a href="../database/hikari-concurrentbag.html">HikariCP 借连接为什么快</a> · 事务怎么借到这条连接：<a href="pano-j05-request-through-spring.html#s-7">J05 全景第 7 站</a></p>
+        <p class="risk"><b>常出的事</b>事务里夹了慢操作，比如调第三方支付、发 HTTP，连接就被一直占着。池子默认 10 条，占满以后，后来的请求卡在借连接这一步，默认等 30 秒才报错。</p>
+      </div>
+      <div class="stop" id="s-2" data-stop="2" data-role="of">
+        <h3><span class="no">2</span>MyBatis → Connector/J：参数拼进 SQL，整条文本发出去</h3>
+        <p>Mapper 方法变成一个 <code>PreparedStatement</code>，绑上 <code>'PAID'</code>、<code>9527</code>、<code>'CREATED'</code> 三个参数。Connector/J 默认不用服务端预处理（<code>useServerPrepStmts=false</code>），而是在客户端把参数转义后拼进 SQL，装进一个 COM_QUERY 包发给 MySQL。</p>
+        <p class="log"><span class="tag-real">实测</span> 服务器语句历史里看到的就是拼好的整条：<code>UPDATE orders SET status = 'PAID', paid_at = NOW(6) WHERE id = 9527 AND status = 'CREATED'</code>。</p>
+        <p class="why"><b>为什么要它</b>客户端拼接省掉了“先发模板、再发参数”的一次往返。转义由驱动来做，照样防得住 SQL 注入，前提是别自己拼字符串。</p>
+        <p class="down"><b>往下一层</b><a href="../mybatis/mybatis-flow.html">MyBatis 执行流程</a> · <a href="pano-j05-request-through-spring.html#s-9">J05 全景第 9 站</a></p>
+        <p class="risk"><b>常出的事</b>MyBatis 里写 <code>${}</code> 而不是 <code>#{}</code>，参数原样进了 SQL，这就是注入漏洞。另外，慢查询日志里记的是拼好的文本，同一个模板的语句要靠 performance_schema 的 digest 才能归成一类。</p>
+      </div>
+      <div class="stop" id="s-3" data-stop="3" data-role="of">
+        <h3><span class="no">3</span>连接线程：一个连接，服务端一个线程</h3>
+        <p>MySQL 社区版默认“一个连接一个线程”。这条连接对应的服务端线程一直阻塞在读 socket 上，收到 COM_QUERY 就开始干活：语句的第一个阶段 <code>starting</code> 从这里计时。</p>
+        <p class="log"><span class="tag-real">实测</span> performance_schema 里这条语句的 <code>starting</code> 阶段 49～62 µs；查语句历史用的 THREAD_ID，就是这条连接专属的那个线程。</p>
+        <p class="why"><b>为什么要它</b>每个连接的会话状态，包括事务、会话变量、临时表，都在这个线程手里，处理语句时不用到处去找。代价是连接越多，线程越多。</p>
+        <p class="down"><b>往下一层</b><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a>：池子开多大，和 <code>max_connections</code>、服务端线程数是什么关系</p>
+        <p class="risk"><b>常出的事</b>应用扩到 50 个实例，每个池子 20 条，就是 1000 个服务端线程，超过 <code>max_connections</code>（默认 151）直接报 Too many connections。池子不是越大越好。</p>
+      </div>
+      <div class="stop" id="s-4" data-stop="4" data-role="pd">
+        <h3><span class="no">4</span>解析器 + 优化器：读懂 SQL，决定走哪个索引</h3>
+        <p>解析器把文本变成语法树，检查表和列是否存在、有没有权限，然后打开表（<code>Opening tables</code>）。优化器看 <code>WHERE id = 9527</code>：id 是主键，又是等值，最多 1 行，直接定位，用不着比较其他索引。</p>
+        <p class="log"><span class="tag-real">实测</span> EXPLAIN：<code>key=PRIMARY type=range rows=1</code>。对照：<code>WHERE user_id=1024</code> 走 <code>idx_user</code>，估 6 行；<code>WHERE sku_id=88</code> 没有索引，<code>type=index</code>，要扫整个主键索引，估 995720 行。</p>
+        <p class="why"><b>为什么要它</b>同一条 SQL 有很多种执行方式，差别可能是 1 行和 100 万行。优化器用统计信息估算每种方式的代价，挑最便宜的那种。</p>
+        <p class="down"><b>往下一层</b>执行计划与 SQL 调优 <span class="todo-chip">待做</span> · 索引与 B+ 树 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>WHERE 条件上没有索引，或者索引失效（对列套了函数、隐式类型转换），UPDATE 就要扫 99.6 万行。可重复读下，扫过的行都会被加锁，付款请求互相等成一串。</p>
+      </div>
+      <div class="stop" id="s-5" data-stop="5" data-role="cg">
+        <h3><span class="no">5</span>InnoDB 沿 B+ 树找页：根 → 内节点 → 叶子</h3>
+        <p>主键索引就是表本身，叫聚簇索引：整行数据存在叶子页里。InnoDB 从根页出发，按 9527 往下找：根页 4 指向内节点页 134，内节点页再指向叶子页 75。每个页 16 KB，先在 buffer pool 里找，找不到就从 <code>orders.ibd</code> 读进来。</p>
+        <p class="log"><span class="tag-real">实测</span> 主库刚重启，buffer pool 是空的：<code>Innodb_buffer_pool_reads +3</code>，正好是根、内节点、叶子三页，<code>updating</code> 阶段 2.1～3.7 ms。同一页上再改订单 9530：读盘 +0，executeUpdate 0.81～0.99 ms。</p>
+        <p class="why"><b>为什么要它</b>100 万行只要三层。一个非叶子页能放几百个指向下一层的指针（实测根页 6 条、内节点页 439 条），所以树又矮又胖，读三个页就能定位任何一行。</p>
+        <p class="down"><b>往下一层</b>索引与 B+ 树 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>buffer pool 太小，或者被一次大查询冲掉，热数据只能反复从磁盘读，所有 SQL 一起变慢。主键用 UUID 这类随机值时，插入会让页不停分裂，树变得又大又散。</p>
+      </div>
+      <div class="stop" id="s-6" data-stop="6" data-role="rn">
+        <h3><span class="no">6</span>行锁：先锁住 9527，再动它</h3>
+        <p>动手改之前，InnoDB 给这个事务加两把锁：表上一把意向锁 IX，意思是“我要锁表里的某些行”；主键索引里 9527 这条记录上一把 X 记录锁，<code>REC_NOT_GAP</code> 表示只锁这条记录，不锁它前后的间隙。锁一直持有到事务结束。</p>
+        <p class="log"><span class="tag-real">实测</span> <code>data_locks</code>：<code>TABLE IX GRANTED</code>，<code>RECORD PRIMARY X,REC_NOT_GAP 9527 GRANTED</code>。这时另一个事务想改 9527：等了 1.07 s，报 <code>1205 Lock wait timeout</code>。为了不久等，我们把它的等待上限设成了 1 秒，默认是 50 秒。</p>
+        <p class="why"><b>为什么要它</b>两个事务同时改同一行，后一个必须等前一个提交或回滚，否则会互相覆盖。主键等值只命中一条，所以只锁这一条，不锁间隙。</p>
+        <p class="down"><b>往下一层</b><a href="../database/mysql-mvcc-lock.html">事务、MVCC 与锁</a></p>
+        <p class="risk"><b>常出的事</b>事务开着迟迟不提交，比如在事务里等第三方回调，这一行就一直锁着，后面改它的请求全部等到超时。两个事务按相反的顺序锁两行，就是死锁，InnoDB 会挑一个回滚。</p>
+      </div>
+      <div class="stop" id="s-7" data-stop="7" data-role="rn">
+        <h3><span class="no">7</span>undo：改之前，先把旧值记下来</h3>
+        <p>InnoDB 把 9527 的旧值（<code>status=CREATED</code>、<code>paid_at=NULL</code>）写进 undo 日志。改完的新行里留一个指针指向这份旧版本，并记下是哪个事务改的。</p>
+        <p class="log"><span class="tag-real">实测</span> 事务还没提交，另一个连接用普通 SELECT 读 9527，读到 <code>CREATED</code>：InnoDB 顺着 undo 指针，拼出了它应该看到的旧版本。<code>INNODB_TRX</code>：<code>trx_rows_modified=1</code>，隔离级别 REPEATABLE READ。</p>
+        <p class="why"><b>为什么要它</b>一份旧值管两件事：事务回滚时照着它改回去；别的事务读这一行时不用等锁，直接读旧版本，这就是 MVCC。</p>
+        <p class="down"><b>往下一层</b><a href="../database/mysql-mvcc-lock.html">事务、MVCC 与锁</a> · 日志：redo、undo、binlog 与两阶段提交 <span class="todo-chip">待做</span> · 对照 PostgreSQL：旧版本不放 undo，直接留在表里，所以要 VACUUM <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>有个事务开着很久不结束，比如一个跑了一小时的报表查询，它可能还要读的旧版本都不能清理，undo 越积越多，别的读要沿着版本链走很远。</p>
+      </div>
+      <div class="stop" id="s-8" data-stop="8" data-role="bk">
+        <h3><span class="no">8</span>改 buffer pool 里的页，写 redo</h3>
+        <p>在内存里的叶子页 75 上把 status 改成 PAID，这一页成了“脏页”：内存里是新值，磁盘上还是旧值。同时把“页 75 的哪个位置改成了什么”写成一条 redo 记录，放进 log buffer。binlog 这时还不写，先攒在这个事务自己的 binlog cache 里。</p>
+        <p class="log"><span class="tag-real">实测</span> redo LSN +228～244 字节；页 75 变脏；binlog 位点不动。UPDATE 刚返回时，redo 有 1 次已经被后台线程 fsync，另外 2 次还没有：提交前落没落盘都行，提交时一定要落。</p>
+        <p class="why"><b>为什么要它</b>把 16 KB 的页随机写回磁盘很慢；redo 只有几百字节，而且是顺序追加。先写小的 redo，页以后再慢慢写，崩溃了就靠 redo 重做。这个思路叫 WAL：先写日志，再写数据。</p>
+        <p class="down"><b>往下一层</b>日志：redo、undo、binlog 与两阶段提交 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>redo 容量太小（8.4 的 <code>innodb_redo_log_capacity</code> 默认 100 MB），写入高峰时很快写满一圈，InnoDB 只好急着刷脏页腾地方，所有写入一起卡顿。</p>
+      </div>
+      <div class="stop" id="s-9" data-stop="9" data-role="bk">
+        <h3><span class="no">9</span>两阶段提交：redo 和 binlog 必须说法一致</h3>
+        <p>应用调 <code>commit()</code>。MySQL 有两本账：InnoDB 的 redo 用来崩溃恢复，server 层的 binlog 用来复制和按时间点恢复。两本账必须一致，所以分两步走：InnoDB 先写 redo 的 prepare 记录并 fsync；再把 binlog cache 里的事件写进 binlog 文件并 fsync；最后 InnoDB 标记 commit。</p>
+        <p class="log"><span class="tag-real">实测</span> COMMIT 在服务器上 2.95～3.40 ms，其中 <code>waiting for handler commit</code> 2.87～3.32 ms，几乎全是在等落盘。redo 又写了 396 字节；binlog 多了 5 个事件、423 字节：Gtid、BEGIN、Table_map、Update_rows（147 字节，改前改后两份整行）、Xid。</p>
+        <p class="why"><b>为什么要它</b>假如 binlog 写完就崩溃、redo 却没提交，从库有这条改动，主库没有；反过来也一样糟。有了两阶段，崩溃恢复时 InnoDB 看到 prepare 状态的事务，就去 binlog 里找它的 Xid：找到就提交，找不到就回滚。</p>
+        <p class="down"><b>往下一层</b>日志：redo、undo、binlog 与两阶段提交 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>为了快，把 <code>innodb_flush_log_at_trx_commit</code> 改成 2、<code>sync_binlog</code> 改成 0：实测每次提交从 4.2 ms 降到 1.2 ms，可机器一断电，最近约一秒内提交的事务可能丢掉，主库和从库也可能对不上。</p>
+      </div>
+      <div class="stop" id="s-10" data-stop="10" data-role="of">
+        <h3><span class="no">10</span>回 OK，连接还给池子</h3>
+        <p>MySQL 给 UPDATE 回一个 OK 包（1 行受影响），给 COMMIT 再回一个。<code>commit()</code> 返回后，事务拦截器把连接还给 HikariCP。Hikari 发现 autocommit 被改过，会在收回前把它恢复成默认值。</p>
+        <p class="log"><span class="tag-real">实测</span> <code>close()</code> 0.41～0.76 ms。应用这边借连接、开事务、UPDATE、提交、还连接，一共 7.4～9.3 ms，不算旁边观察用的查询。</p>
+        <p class="why"><b>为什么要它</b><code>commit()</code> 返回，就是对用户的承诺：之后不管主库出什么事，9527 都是 PAID。这个承诺靠的是第 9 站已经落盘的 redo 和 binlog，而不是数据文件。</p>
+        <p class="down"><b>往下一层</b><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a> · <a href="pano-j05-request-through-spring.html#s-10">J05 全景第 10、11 站</a></p>
+        <p class="risk"><b>常出的事</b>OK 包回来之前网络断了：应用收到异常，可事务其实已经提交了。重试付款时，要靠 <code>WHERE status='CREATED'</code> 这样的条件和幂等号挡住重复。</p>
+      </div>
+      <div class="stop" id="s-11" data-stop="11" data-role="g2">
+        <h3><span class="no">11</span>从库回放：binlog 推过去，再改一遍</h3>
+        <p>主库的 binlog dump 线程把这 5 个事件推给从库。从库的 IO 线程收下，写进 relay log；applier 线程按 Update_rows 里的行，把从库的 9527 也改成 PAID。默认是异步复制：主库提交时不等从库。</p>
+        <p class="log"><span class="tag-real">实测</span> 从库 applier 的记录：这个 GTID 从主库提交到在从库回放完，7.7～9.4 ms；应用轮询从库，18～24 ms 后读到 PAID。另外，主库重启时从库会断开，按 <code>SOURCE_CONNECT_RETRY</code> 重连，默认 60 秒。第一次实测就卡在了这里，后来改成了 2 秒。</p>
+        <p class="why"><b>为什么要它</b>读请求可以分给从库，主库挂了从库能顶上。ROW 格式记的是“哪一行改前、改后是什么”，从库照着改就行，不用重新执行 SQL、重新判断条件。</p>
+        <p class="down"><b>往下一层</b>主从复制、读写分离与复制延迟 <span class="todo-chip">待做</span> · 8.4 里的命令变化（<code>SHOW BINARY LOG STATUS</code>、SOURCE / REPLICA 新名字）见“版本：8.0 已停止维护，升级到 8.4 LTS 要注意什么” <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>付完款马上跳转订单页，而订单页读的是从库：哪怕只延迟几十毫秒，用户也可能看到“待付款”，再点一次付款。一个改 100 万行的大事务，能让延迟涨到分钟级。</p>
+      </div>
+      <div class="stop" id="s-12" data-stop="12" data-role="bk">
+        <h3><span class="no">12</span>刷脏页：数据文件里的旧值，迟早会被改过来</h3>
+        <p>页 75 还在 buffer pool 里，是脏页。后台的 page cleaner 线程按脏页比例和 redo 用量，决定什么时候把它写回 <code>orders.ibd</code>。写回以后，检查点才能往前推，检查点之前的 redo 空间才能复用。</p>
+        <p class="log"><span class="tag-real">实测</span> 提交后每 0.1 秒查一次，3 次运行都是：120 秒时页 75 还是脏的，检查点停在这条 UPDATE 之前的 LSN。这段时间里，磁盘上的数据文件写的是 CREATED，PAID 只在内存和 redo 里。</p>
+        <p class="why"><b>为什么要它</b>同一页上的订单会被反复修改（实测里 9530 就在同一页），攒一阵一起写，比每改一次就写一次 16 KB 省得多。崩溃也不怕：重启时从检查点开始重放 redo，把页改回最新。</p>
+        <p class="down"><b>往下一层</b>日志：redo、undo、binlog 与两阶段提交 <span class="todo-chip">待做</span> · buffer pool 和页：索引与 B+ 树 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>崩溃后重启，要把检查点之后的 redo 全部重放一遍，脏页积得越多，恢复越久。写入压力大时脏页刷不过来，redo 快写满，InnoDB 只能同步刷页，所有写入一起卡住。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 知识点地图 ============ -->
+<section id="nodes">
+  <h2>知识点地图</h2>
+  <p class="lead">知识点名照抄学习地图。J06 的 10 个知识点里，事务和锁、连接池两页是 2026-11-09 之前做的第一圈，其余都是新页。下钻顺序先“找到这一行”，再“改它”，再“记账和复制”，最后对照 PostgreSQL。</p>
+  <div class="tbl">
+    <table class="nodes">
+      <thead><tr><th>站</th><th>知识点</th><th>状态</th><th>下钻顺序和理由</th></tr></thead>
+      <tbody>
+        <tr><td class="st">4、5、12</td><td>索引与 B+ 树：聚簇索引、回表、覆盖索引、最左前缀 <span class="dp">懂设计</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>1</b><span class="why">地基：第 4 站优化器选的、第 5 站读的、第 6 站锁的、第 12 站刷的，都是 B+ 树上的页和记录</span></td></tr>
+        <tr><td class="st">4</td><td>执行计划与 SQL 调优：EXPLAIN、慢查询、索引失效 <span class="dp">懂设计</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>2</b><span class="why">学完索引马上学它：同一条 UPDATE，1 行和 99.6 万行的差别就在这一站</span></td></tr>
+        <tr><td class="st">6、7</td><td><a href="../database/mysql-mvcc-lock.html">事务、MVCC 与锁</a> <span class="dp">懂设计</span></td><td>有页（第一圈）</td><td class="ord"><b>3</b><span class="why">下一圈补实测：记录锁、间隙锁、死锁日志，以及“没索引的 UPDATE 锁了多少行”</span></td></tr>
+        <tr><td class="st">7、8、9、12</td><td>日志：redo、undo、binlog 与两阶段提交 <span class="dp">懂设计</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>4</b><span class="why">这张全景最核心的一页：“commit 返回就不丢”和“提交后 2 分钟页还是脏的”，要靠它讲通</span></td></tr>
+        <tr><td class="st">11</td><td>主从复制、读写分离与复制延迟 <span class="dp">懂机制</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>5</b><span class="why">接着 binlog 学：从库拿到的就是第 9 站写下的那 5 个事件</span></td></tr>
+        <tr><td class="st">—</td><td>表结构设计与大表变更（Online DDL） <span class="dp">懂机制</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>6</b><span class="why">要用到前面的锁（元数据锁）和复制（DDL 在从库上重放时的延迟）</span></td></tr>
+        <tr><td class="st">1、3、10</td><td><a href="../database/db-pool-tx-perf.html">连接池与事务性能</a> <span class="dp">懂机制</span></td><td>有页 · 另见<a href="../database/hikari-concurrentbag.html">ConcurrentBag</a></td><td class="ord"><b>7</b><span class="why">复习：事务为什么要短，现在能从第 6 站的锁和第 9 站的 fsync 说出原因</span></td></tr>
+        <tr><td class="st">11</td><td>版本：8.0 已停止维护，升级到 8.4 LTS 要注意什么 <span class="dp">会用</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>8</b><span class="why">这次实测已经踩到两处：<code>SHOW MASTER STATUS</code> 没了，复制命令全改叫 SOURCE / REPLICA</span></td></tr>
+        <tr><td class="st">7</td><td>PostgreSQL 的不同：多版本存在表里、要 VACUUM，索引类型和 JSONB <span class="dp">懂机制</span></td><td>部分有页：<a href="../database/db-pool-tx-perf.html">连接池页</a>里提到过</td><td class="ord"><b>9</b><span class="why">学完 MySQL 的 undo 再看 PG：同一个问题，旧版本放在了另一个地方</span></td></tr>
+        <tr><td class="st">—</td><td>怎么选 MySQL 还是 PostgreSQL，pgvector 为什么让 PG 在 AI 项目里更常见 <span class="dp">懂设计</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>10</b><span class="why">放最后：两边都懂了才谈得上选；和 AI 地图站 06 共用</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="aside-box">
+    <h3>这张全景没走到的</h3>
+    <ul>
+      <li><b>表结构设计与 Online DDL</b>：这条 UPDATE 不改表结构。它回答的是另一个场景：1000 万行的 orders 要加一列，怎么做才不锁表、不让从库延迟。到下钻第 6 步学。</li>
+      <li><b>版本升级的大部分</b>：只在第 11 站碰到了 8.4 的新命令名。默认值的变化、认证插件、升级路径，是升级那一天的事，不在一条 UPDATE 里。</li>
+      <li><b>怎么选 MySQL 还是 PostgreSQL</b>：一条 UPDATE 回答不了选型问题。全景只在第 7 站埋了一个钩子：PG 的旧版本留在表里，这是两者最大的设计分歧。</li>
+      <li><b>回表和覆盖索引</b>：这条 UPDATE 走的是主键，一次就到叶子，不用回表。换成按 <code>user_id</code> 查，就会先走 <code>idx_user</code> 再回主键，到下钻第 1 步学。</li>
+    </ul>
+  </div>
+  <div class="aside-box">
+    <h3>补给站</h3>
+    <ul>
+      <li>SQL 是怎么从 Spring 走到驱动的：<a href="pano-j05-request-through-spring.html">J05 全景</a>第 7～10 站；连接池：<a href="../database/db-pool-tx-perf.html">连接池与事务性能</a>。</li>
+      <li>fsync、page cache 为什么慢、为什么要顺序写：<a href="../kafka/kafka-storage-zerocopy.html">Kafka 存储与零拷贝</a>里讲过同一个道理（顺序追加 + 交给操作系统）。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 回到全景 ============ -->
+<section id="back">
+  <h2>回到全景</h2>
+  <div class="two">
+    <div class="card">
+      <h3>复述练习</h3>
+      <ol class="retell">
+        <li>合上页面，画出 12 站，标出哪几站在应用里、哪几站在 server 层、哪几站在 InnoDB、哪两站在 commit 返回之后。</li>
+        <li>每站用一句话讲它做了什么；再说清楚 9527 的新值在每一站之后存在哪里：内存的页、redo、binlog、从库、数据文件。</li>
+        <li>挑 3 站往下讲两层。比如第 8、9、12 站：为什么先写 redo 而不是直接把页写回磁盘？只有 redo 不行吗，为什么还要 binlog？两本账怎么保证一致？</li>
+      </ol>
+      <p>也可以直接讲给我听，说“回到全景”，我对照这张图帮你查漏。</p>
+    </div>
+    <div class="card">
+      <h3>动手：交易靶场这一站</h3>
+      <p>地图上 J06 给靶场的任务：订单表灌 1000 万行，制造 3 条慢 SQL 和 1 次死锁，逐个用执行计划和锁日志解决；再把同一张表导进 PostgreSQL，跑同样的 SQL，对比执行计划。</p>
+      <ol class="mines">
+        <li>把 <code>./run.sh</code> 里的 100 万行改成 1000 万，重跑：树高变不变？冷启动读几个页？（第 5 站）</li>
+        <li>埋三条慢 SQL：按 <code>sku_id</code> 改状态（没索引）、<code>WHERE DATE(created_at) = …</code>（索引失效）、<code>LIMIT 900000, 20</code>（深分页）。用慢查询日志找出来，用 EXPLAIN 解释，再修好（第 4、5 站）。</li>
+        <li>埋一次死锁：两个事务按相反顺序改 9527 和 9530，用 <code>SHOW ENGINE INNODB STATUS</code> 里的 LATEST DETECTED DEADLOCK 读懂它（第 6 站）。</li>
+        <li>提交一个改 50 万行的大事务，提交途中 <code>docker kill</code> 主库；重启后对比主库、从库和 binlog，说清这个事务在不在、为什么（第 9、11 站）。</li>
+        <li>同一张表导进 PostgreSQL，跑同样的三条 SQL，对比执行计划（接下钻第 9 步）。</li>
+      </ol>
+    </div>
+  </div>
+
+  <h3>预测题</h3>
+  <div class="preds">
+    <details>
+      <summary>1. 第 9 站写 binlog 的时候 mysqld 被 <code>kill -9</code>，重启以后 9527 是 PAID 还是 CREATED？</summary>
+      <p>看崩溃时 binlog 写到了哪儿。redo 的 prepare 已经落盘，可这个事务的 binlog 事件没写完整：重启后 InnoDB 发现一个 prepare 状态的事务，去 binlog 里找不到它的 Xid，就回滚，9527 还是 CREATED，从库也没收到，两边一致。binlog 已经完整写入并 fsync、只差 InnoDB 标记 commit：恢复时在 binlog 里找到了 Xid，就把它提交，9527 是 PAID，从库稍后也会收到。不管哪种，应用都没收到 OK，所以要按“结果未知”处理，去查一次再决定要不要重试。</p>
+      <p class="from">从第 9、10 站推出：两阶段提交的意义，就是让“在不在”只由 binlog 里有没有这个事务说了算。</p>
+    </details>
+    <details>
+      <summary>2. 提交后两分钟，页 75 还没写回数据文件，这时整台机器断电。重启后 9527 是什么？</summary>
+      <p>PAID。数据文件里的页 75 确实还是旧的，但第 9 站提交前，这次修改的 redo 已经 fsync 过了。重启时 InnoDB 从检查点（实测停在这条 UPDATE 之前）开始重放 redo，把页 75 改回 PAID。代价是恢复时间：检查点之后的 redo 越多，重放越久。</p>
+      <p class="from">从第 8、9、12 站推出：commit 的承诺落在 redo 上，不在数据文件上。</p>
+    </details>
+    <details>
+      <summary>3. 有人把付款 SQL 写成 <code>WHERE sku_id = 88 AND user_id = 1024 AND status = 'CREATED'</code>，结果别的用户付款也开始变慢。为什么？</summary>
+      <p>先看第 4 站：<code>user_id</code> 有索引，优化器多半会走 <code>idx_user</code>，问题不大。可如果条件只剩 <code>sku_id</code>（实测 EXPLAIN 是 <code>type=index</code>，估 995720 行），UPDATE 就要扫整个主键索引。可重复读下，InnoDB 给扫过的每一条记录加 next-key 锁，而且不满足条件的行也不会提前放锁，相当于把整张表锁住；别的用户改自己的订单，在第 6 站排队等这把锁。</p>
+      <p class="from">从第 4、6 站推出。“扫到就锁、不提前放”是按文档的说法，这次没有实测锁的数量，留给靶场任务 2。</p>
+    </details>
+    <details>
+      <summary>4. 从库因为一个大事务落后了 5 秒。用户付完款刷新订单页（读从库），会看到什么？哪里的监控先报警？</summary>
+      <p>看到“待付款”，5 秒后自己变成“已付款”。有些用户会再点一次付款：这次请求走主库，<code>WHERE status='CREATED'</code> 不成立，影响 0 行，接口要能把这种情况当成“已经付过”处理，而不是报错。先报警的是从库的复制延迟监控（applier 的提交时间戳和当前时间之差）；主库和应用看起来一切正常。</p>
+      <p class="from">从第 10、11 站推出：异步复制下，主库提交不等从库，读从库就要接受“读到旧值”。</p>
+    </details>
+  </div>
+
+  <h3>下一圈</h3>
+  <div class="next">
+    <div class="card">
+      <h4>同一行被两个事务同时 UPDATE</h4>
+      <p>用户连点两次付款，退款和付款同时到。第 6 站变成主角：谁先拿到锁、后到的那个等多久、等到以后它的 WHERE 还成立吗。再加一行就会碰上死锁。这是下钻第 3 步的下一圈。</p>
+    </div>
+    <div class="card">
+      <h4>主库宕机，从库顶上时，刚才那条 UPDATE 还在不在</h4>
+      <p>异步复制下，commit 已经返回、binlog 还没推到从库时主库挂了，这一单就丢在旧主库上。难在怎么发现、怎么补：半同步复制、GTID 对账，以及切换以后旧主库怎么回来。</p>
+    </div>
+    <div class="card">
+      <h4>1000 万行上的一条慢 UPDATE</h4>
+      <p>交易靶场这一站的任务。树变高一层，buffer pool 装不下热数据，第 5 站从读 3 页变成反复读盘；没索引的条件让第 6 站锁住一大片。难在要用慢查询日志、EXPLAIN 和锁视图三样东西，把“慢”拆到具体的站。</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>JDK 版本约定：交易靶场和 Java 地图的全景页用 JDK 21；单个知识点页的实验用 JDK 17。</p>
+  <p>档位：标准（全景页），做了一次真实链路实测：本机 2 核 ARM，Docker 里两个 MySQL 8.4.13 容器（GTID 异步复制，除下面两项外都是默认配置），应用端 JDK 21.0.13 + HikariCP 6.3.3 + Connector/J 9.7.0。为了让重启后的 buffer pool 真的是空的，主库关掉了 <code>innodb_buffer_pool_load_at_startup</code> 和 <code>innodb_buffer_pool_dump_at_shutdown</code>（8.4 默认都开，重启会自动把热页读回来）；从库的 <code>SOURCE_CONNECT_RETRY</code> 改成了 2 秒。程序 <code>UpdateToDisk</code> 用 JDBC 模拟 MyBatis 发出的同一条 UPDATE，另开一条连接旁路查询 <code>performance_schema</code>（打开了 stage 计时）、<code>information_schema.INNODB_BUFFER_PAGE</code>、<code>data_locks</code>、<code>INNODB_TRX</code>、<code>SHOW ENGINE INNODB STATUS</code> 的 LOG 段和 <code>SHOW BINLOG EVENTS</code>。主库重启 3 次、各追踪一次，表里的数字是 3 次的范围；耗时分段图用第 1 次；300 次自动提交的对比跑了 1 次。旁路观察本身会多占一点时间，所以“应用一共”只加了应用自己的 5 段计时。注意：<code>Innodb_redo_log_current_lsn</code> 这个状态变量在实测里没有跟着变，LSN 一律取自 INNODB STATUS。</p>
+  <p>按文档：两阶段提交和崩溃恢复时按 Xid 查 binlog 的做法；<code>innodb_flush_log_at_trx_commit=2</code> 时，mysqld 崩溃不丢、操作系统崩溃或断电可能丢最近约一秒的事务；可重复读下 UPDATE 对扫过的行加 next-key 锁；Connector/J 默认 <code>useServerPrepStmts=false</code>；<code>max_connections</code> 默认 151、<code>innodb_lock_wait_timeout</code> 默认 50 秒；HikariCP 默认池大小 10、借连接等 30 秒；8.4 删除了 <code>SHOW MASTER STATUS</code>，改用 <code>SHOW BINARY LOG STATUS</code>。代码：<a href="https://github.com/archeu/study-labs/tree/main/java/java/pano-j06-update-to-disk">study-labs/java/java/pano-j06-update-to-disk</a>。</p>
+  <p>回到 <a href="roadmap.html#j06">Java 地图 J06</a> · 上一站全景 <a href="pano-j05-request-through-spring.html">一个请求穿过 Spring</a> · <a href="../">返回目录</a></p>
+</footer>
+
+</main>
+<script>
+/*SIM-START*/
+const STOPS = 12;
+function clampStep(i) { return Math.min(STOPS, Math.max(1, i | 0)); }
+// 第 i 步时，每一站是 on（当前）、past（走过）还是 next（还没到）
+// 每一步点亮哪些箭头：进这一站的那条；第 5 站多点亮从磁盘读页，第 9 站点亮 redo 和 binlog 两次落盘，第 10 站点亮回程
+const EDGES = { 1: [], 2: ["2"], 3: ["3"], 4: ["4"], 5: ["5", "5d"], 6: ["6"], 7: ["7"], 8: ["8"], 9: ["9", "9a", "9b"], 10: ["10"], 11: ["11"], 12: ["12"] };
+function stepState(i) {
+  i = clampStep(i);
+  const stops = {};
+  for (let k = 1; k <= STOPS; k++) stops[k] = k === i ? "on" : (k < i ? "past" : "next");
+  return { step: i, stops, edges: EDGES[i] };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const walk = $(".walk");
+  const src = $("#map svg.pmap");
+  const fig = $("#w-fig");
+  const clone = src.cloneNode(true);
+  clone.querySelectorAll("[id]").forEach(el => { el.id = el.id.replace(/^pm-/, "pw-"); });
+  clone.querySelectorAll("[marker-end]").forEach(el => {
+    el.setAttribute("marker-end", el.getAttribute("marker-end").replace("#pm-", "#pw-"));
+  });
+  clone.setAttribute("aria-label", "分步演示用的全景图，当前一站高亮");
+  fig.append(clone);
+  walk.classList.add("js");
+
+  const panels = $$(".stop", walk);
+  const cnt = $("#w-cnt");
+  let cur = 1, timer = null;
+
+  function apply(i) {
+    const st = stepState(i);
+    cur = st.step;
+    $$(".box", clone).forEach(g => {
+      const k = +g.dataset.stop;
+      g.classList.remove("on", "past", "next");
+      g.classList.add(st.stops[k]);
+    });
+    $$(".ed", clone).forEach(e => e.classList.toggle("hot", st.edges.includes(e.dataset.edge)));
+    panels.forEach(p => p.classList.toggle("cur", +p.dataset.stop === cur));
+    const t = panels.find(p => +p.dataset.stop === cur).querySelector("h3").textContent.replace(/^\d+/, "");
+    cnt.textContent = `第 ${cur} / ${STOPS} 站 · ${t}`;
+    $("#w-prev").disabled = cur === 1;
+    $("#w-next").disabled = cur === STOPS;
+  }
+  function stopAuto() {
+    if (timer) { clearInterval(timer); timer = null; }
+    $("#w-auto").setAttribute("aria-pressed", "false");
+    $("#w-auto").textContent = "自动播放";
+  }
+  function show(i, scroll) {
+    apply(i);
+    if (scroll) walk.scrollIntoView({ block: "start" });
+  }
+
+  $("#w-prev").addEventListener("click", () => { stopAuto(); apply(cur - 1); });
+  $("#w-next").addEventListener("click", () => { stopAuto(); apply(cur + 1); });
+  $("#w-reset").addEventListener("click", () => { stopAuto(); apply(1); });
+  $("#w-auto").addEventListener("click", () => {
+    if (timer) { stopAuto(); return; }
+    if (cur === STOPS) apply(1);
+    $("#w-auto").setAttribute("aria-pressed", "true");
+    $("#w-auto").textContent = "暂停";
+    timer = setInterval(() => { if (cur >= STOPS) stopAuto(); else apply(cur + 1); }, 3600);
+  });
+  walk.addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") { stopAuto(); apply(cur + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { stopAuto(); apply(cur - 1); e.preventDefault(); }
+  });
+  clone.addEventListener("click", e => {
+    const g = e.target.closest(".box");
+    if (g) { stopAuto(); apply(+g.dataset.stop); }
+  });
+  $$(".box", src).forEach(g => {
+    g.setAttribute("tabindex", "0");
+    g.setAttribute("role", "link");
+    g.setAttribute("aria-label", "跳到第 " + g.dataset.stop + " 站的讲解");
+    const go = () => { stopAuto(); show(+g.dataset.stop, true); };
+    g.addEventListener("click", go);
+    g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
+  $$('.strip a[href^="#s-"]').forEach(a => a.addEventListener("click", e => {
+    e.preventDefault();
+    stopAuto();
+    show(+a.getAttribute("href").slice(3), true);
+  }));
+
+  const m = /^#s-(\d+)$/.exec(location.hash);
+  apply(m ? +m[1] : 1);
+  if (m) walk.scrollIntoView({ block: "start" });
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

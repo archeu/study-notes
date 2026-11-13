@@ -32,6 +32,7 @@
 | 03 | [全景：一个对象从 new 到被回收](https://archeu.github.io/study-notes/java/pano-j03-object-new-to-gc.html) | J03 JVM 与调优的场景全景：类加载、JIT 与逃逸分析、TLAB 分配、大对象、Young GC、晋升、并发标记与 Mixed GC、泄漏到 Full GC、OOM 排查、容器内存十站，附实测 GC 日志，分步演示 |
 | 04 | [全景：订单服务调库存服务的一次 RPC](https://archeu.github.io/study-notes/java/pano-j04-order-calls-inventory.html) | J04 场景全景：Stub、服务发现与负载均衡、长连接、protobuf、HTTP/2 帧、Netty EventLoop、TCP、服务端 Reactor、业务线程池、deadline 十站，gRPC 对 HTTP/1.1 的延迟和连接数实测，分步演示 |
 | 05 | [全景：一个请求穿过 Spring](https://archeu.github.io/study-notes/java/pano-j05-request-through-spring.html) | J05 场景全景：启动装配、Tomcat、Security 过滤器链、DispatcherServlet、参数解析、AOP 代理、事务拦截器、Mapper 代理、Executor 与插件、提交后事件、回程十一站，SQL 发出时 131 层调用栈和分段耗时实测（BCrypt 占 82 ms、自调用不回滚），分步演示 |
+| 06 | [全景：一条 UPDATE 从应用到磁盘](https://archeu.github.io/study-notes/java/pano-j06-update-to-disk.html) | J06 场景全景：借连接、发 SQL、连接线程、解析优化、B+ 树找页、行锁、undo、改页写 redo、两阶段提交、回 OK、从库回放、刷脏页十二站，MySQL 8.4 一主一从实测（冷读 3 页、提交等落盘 3 ms、提交 120 秒后页仍是脏的），分步演示 |
 
 ## Spring
 
