@@ -111,6 +111,7 @@
 | 10 | [Redis Lua 脚本与事务](https://archeu.github.io/study-notes/redis/redis-lua-tx.html) | MULTI/EXEC/WATCH、出错为什么不回滚、Lua 的写法和 EVALSHA、Redis 7 Functions，最后一件库存两人抢 |
 | 11 | [布隆过滤器与 HyperLogLog](https://archeu.github.io/study-notes/redis/redis-bloom-hll.html) | 位数组和 k 个哈希、误判率实验室、容量怎么算、抛硬币估人数、16384 个桶，UV 统计和选型 |
 | 12 | [改完价，详情页还卖 399：先改库还是先删缓存、延迟双删、订阅 binlog](https://archeu.github.io/study-notes/redis/cache-consistency.html) | 先删后改为什么必卡、删不改、先改后删剩下的慢读竞态、延迟双删、订阅 binlog 删缓存、墓碑加版本号回填、交易靶场 6 种写法实测，竞态推演台 |
+| 13 | [4 台机器各存一份 88 号：Caffeine 加 Redis 两级缓存](https://archeu.github.io/study-notes/redis/cache-multilevel.html) | 两级缓存读写路径、为什么广播删除再配短过期、先删 Redis 再广播、get(key, loader) 和桶锁、订阅断线丢消息与断线即清、CLIENT TRACKING / Redisson / JetCache 对比、refreshAfterWrite 版本差异，两级缓存推演台 |
 
 ## Kafka
 
