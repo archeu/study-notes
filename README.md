@@ -115,6 +115,7 @@
 | 14 | [88 号过期那一刻：缓存穿透、击穿、雪崩与大 key、热 key](https://archeu.github.io/study-notes/redis/cache-five-holes.html) | J07 第 3 个下钻知识点（第二圈）：交易靶场里实测穿透、击穿、雪崩三组对比，挡在前面、排队、打散、允许旧四类防法的取舍，重建锁对逻辑过期，大 key 堵住共享连接，HOTKEYS 找热 key，DEL 对 UNLINK，击穿实验台 |
 | 15 | [锁过期时 A 还在查库：看门狗、fencing token 与 Lua 条件写](https://archeu.github.io/study-notes/redis/redis-lock-expire-fencing.html) | 锁是租约所以会过期、A 自己判断为什么不行、锁守卫与版本守卫（fencing token）、DEL 换墓碑、Redisson 看门狗挡不住进程停住、Lua 脚本 BUSY 与 NOSCRIPT、Redlock 之争，三条时间线 × 五种回填写法实验台 |
 | 16 | [279 µs 里只有 2 µs 在 Redis：一条连接、一个线程上的排队](https://archeu.github.io/study-notes/redis/redis-event-loop-queueing.html) | J07 全景第 2、3 站下钻（第二圈）：一次 GET 拆成 8 段、主线程和共享连接两处排队、KEYS / BLPOP / 大 value 谁拖住谁、SLOWLOG 为什么看不见排队、IO 线程 7.2 到 8.x、Lettuce 超时与 FIFO 队列，谁会卡住实验台 |
+| 17 | [648 字节的详情占 805 字节：Redis 8 的 kvobj、embstr 新门槛与存 String 还是 Hash](https://archeu.github.io/study-notes/redis/redis-encoding-memory.html) | J07 全景第 7 站第二圈：805 字节逐块拆解、Redis 7.2 和 8.2+ 一个 key 的两种拼法、embstr 门槛变成 key + 值 ≤ 41、String / Hash / JSON 四种存法实测、四个内存坑，字符串 key 内存计算器 |
 
 ## Kafka
 

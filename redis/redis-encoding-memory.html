@@ -1,0 +1,1103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>648 字节的详情占 805 字节：Redis 8 的 kvobj、embstr 新门槛与存 String 还是 Hash</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J07 knowledge point 6 "Redis data structures and encodings" (second round), station 7 (and 3, 4) of the J07 panorama. Roles: cg = robj object header, pd = key, of = value SDS, rn = TTL / expire, g2 = dict entry and buckets (per-key overhead outside the object); bad / done / other keep their repo-wide meaning. Interaction: one calculator (Redis 7.2 vs 8.10, key length, value length, TTL) that shows encoding, MEMORY USAGE and the memory blocks, with a guess-first step. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Redis</span><span aria-hidden="true">/</span><span class="tb-here">648 字节的详情占 805 字节</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g2"/></marker>
+    <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-cg"/></marker>
+    <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-of"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">redisObject · SDS · jemalloc 档位 · int / embstr / raw · kvobj · 主字典 no_value · listpack → hashtable · MEMORY USAGE · RedisJSON · Redis 7.2 → 8.10</p>
+  <h1>648 字节的详情占 805 字节：Redis 8 的 kvobj、embstr 新门槛与存 String 还是 Hash</h1>
+  <p class="lead">一个 key 占的内存 = <b>对象头 + key + 值 + 分配器取整</b>，再加上对象外面字典的那一份。Redis 8.2 把 key 和 TTL 搬进了对象里，每个 key 少了一次分配，embstr 的门槛也从“值 ≤ 44 字节”变成了“key + 值 ≤ 41 字节”。选 String 还是 Hash，看的不是哪种结构省，而是数据会落进哪种编码。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j07-product-detail-cache.html#s-7">一次商品详情查询 · 第 7 站</a>（也涉及第 3、4 站）</span><span>地图：<a href="../java/roadmap.html#j07">J07 · 数据结构与编码</a></span><span>第一圈：<a href="redis-data-encoding.html">Redis 数据结构与编码</a></span></p>
+  <p class="scene"><b>下一圈</b><span>第一圈按 Redis 7.2 讲了 redisObject、int / embstr / raw、listpack、渐进式 rehash、跳表，这些这里只用一两句带过。这一圈只盯全景第 7 站回填的那一条 88 号：它在内存里长什么样，805 字节一个一个算出来；Redis 8 改了什么；详情存成 String、Hash 还是 JSON，各占多少。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：648 字节的详情，Redis 记的是 805</h2>
+    <p class="lead">在全景第 7 站，这一步要解决的是：拿到重建锁的线程查完库，把 88 号的 648 字节 JSON 用 <code>SET product:88 … EX 1843</code> 回填进 Redis。全景实测 <code>OBJECT ENCODING</code> 是 <code>raw</code>，<code>MEMORY USAGE</code> 是 805。靶场有 1 万个商品，大促前要按 100 万个估 Redis 内存：每个按 648 算，还是按 805 算？都不对的话，差在哪？</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 190" role="img" aria-label="同一个 88 号商品：JSON 本身 648 字节，MEMORY USAGE 报 805 字节，批量写 5 万个商品后平均每个实际占 838 字节。">
+  <text x="20" y="28" class="t-h">同一个 88 号，三个数</text>
+  <text x="20" y="66" class="t-s">JSON 本身</text>
+  <rect x="150" y="50" width="556" height="26" rx="6" class="b-of"/><text x="164" y="68" class="t-mono">648 字节（STRLEN）</text>
+  <text x="20" y="106" class="t-s">MEMORY USAGE</text>
+  <rect x="150" y="90" width="556" height="26" rx="6" class="b-of"/><rect x="706" y="90" width="135" height="26" rx="6" class="b-cg"/>
+  <text x="164" y="108" class="t-mono">805 字节</text><text x="716" y="108" class="t-cg">+157 去哪了？</text>
+  <text x="20" y="146" class="t-s">实际每个商品</text>
+  <rect x="150" y="130" width="556" height="26" rx="6" class="b-of"/><rect x="706" y="130" width="135" height="26" rx="6" class="b-cg"/><rect x="841" y="130" width="28" height="26" rx="6" class="b-g2"/>
+  <text x="164" y="148" class="t-mono">838 字节（5 万个一起写，used_memory 增量 ÷ 5 万）</text><text x="878" y="148" class="t-g2">+33</text>
+  <text x="20" y="180" class="t-xs">Redis 8.10.3，本机实测。为了画得下，横轴不是严格按比例。</text>
+</svg>
+  </div>
+  <figcaption>多出来的有三块：对象头和 key、分配器按档取整、对象外面的字典。这一页把它们一个一个找出来。第 3 站 GET 怎么从 key 找到值（字典），第 4 站的布隆过滤器是个什么类型，也顺带讲到。</figcaption>
+  </figure>
+</section>
+
+<!-- ② -->
+<section id="s2">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：按“值多长 × 多少个”估内存</h2>
+    <p class="lead">不知道对象在内存里的样子，估内存只能拿值的字节数乘个数。值越小，估得越离谱；还有人“为了省内存”把 JSON 拆进 Hash，结果更费。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="三个例子：88 号详情按 648 字节估，实际 838 字节，多 29%；库存 1200 只有 4 字节，Redis 里占 27 字节，是 7 倍；拆进 Hash 的详情每个 1004 字节，比 String 多 20%。">
+  <text x="20" y="28" class="t-h">按值的长度估 vs 实际（Redis 8.10.3）</text>
+  <text x="20" y="70" class="t-b">88 号详情 JSON</text>
+  <rect x="210" y="54" width="389" height="22" rx="5" class="b-neu"/><text x="220" y="70" class="t-mono">估：648</text>
+  <rect x="210" y="80" width="503" height="22" rx="5" class="b-of"/><text x="220" y="96" class="t-mono">实际：838</text><text x="724" y="96" class="t-bad">+29%</text>
+  <text x="20" y="140" class="t-b">库存 SET stock:88 1200</text>
+  <rect x="210" y="124" width="12" height="22" rx="3" class="b-neu"/><text x="230" y="140" class="t-mono">估：4</text>
+  <rect x="210" y="150" width="81" height="22" rx="5" class="b-of"/><text x="300" y="166" class="t-mono">MEMORY USAGE：27</text><text x="440" y="166" class="t-bad">×7</text>
+  <text x="20" y="210" class="t-b">详情拆进 Hash（5 个字段）</text>
+  <rect x="210" y="194" width="503" height="22" rx="5" class="b-neu"/><text x="220" y="210" class="t-mono">String：838</text>
+  <rect x="210" y="220" width="602" height="22" rx="5" class="b-bad"/><text x="220" y="236" class="t-mono">Hash：1004</text><text x="822" y="236" class="t-bad">+20%，“省内存”反而更费</text>
+</svg>
+  </div>
+  <figcaption>按 648 估，100 万个商品是 618 MiB；实际是 799 MiB，<code>maxmemory</code> 照前者配，大促时第 12 站就会写不进去（<code>noeviction</code> 下回填报 OOM，每次都回源查库）。</figcaption>
+  </figure>
+</section>
+
+<!-- ③ -->
+<section id="s3">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：88 号详情的四种存法</h2>
+    <p class="lead">同一份 88 号，在 Redis 8 里能存成四种样子。先只看它们会落进哪种编码，各占多少放到⑤实测。</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>存法</th><th>命令</th><th>编码</th><th>适合</th></tr></thead>
+      <tbody>
+        <tr data-role="of"><td><b>String，整块 JSON</b>（全景就是这样）</td><td><code>SET product:88 '{…}' EX 1843</code></td><td><code>raw</code>（> 44 字节）</td><td>整块读、整块写：详情页一次全要，改价时整条删掉</td></tr>
+        <tr><td><b>Hash，5 个字段</b></td><td><code>HSET product:h:88 id … detail …</code></td><td><code>listpack</code>；有一个值 > 64 字节就变 <code>hashtable</code></td><td>字段常单独读写，而且每个值都短</td></tr>
+        <tr><td><b>Hash 放短字段 + 详情单独一个 String</b></td><td><code>HSET product:h:88 …</code> + <code>SET detail:88 …</code></td><td><code>listpack</code> + <code>raw</code></td><td>价格、库存常单独改，详情很少变</td></tr>
+        <tr><td><b>JSON</b>（Redis 8 自带的 RedisJSON）</td><td><code>JSON.SET product:88 $ '{…}'</code></td><td>模块类型（<code>OBJECT ENCODING</code> 显示 <code>raw</code>）</td><td>要在服务端按路径读改：<code>JSON.SET product:88 $.price 359</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="verdict" data-role="of"><b>选择规则：</b>先看怎么读写，再看会落进哪种编码。整块读写用 String；字段要单独改、每个值都不超过 64 字节，用 Hash；要服务端按路径改，用 JSON。要算清它们各占多少，得知道一个 key 在内存里长什么样，这就是④要讲的。</div>
+</section>
+
+<!-- ④ -->
+<section id="s4">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：一个 key 在内存里长什么样</h2>
+    <p class="lead">一个 key 由几块内存拼起来：字典里的一格，指向一个对象头，对象头再指向值。Redis 7.2 和 8.2 之后拼法不一样，805 就是 8.10 的拼法算出来的。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>redisObject（robj）</b>：每个值外面套的 16 字节对象头，记着类型（string、hash…）、编码（int、embstr、raw、listpack…）、LRU 时间、引用计数和一个指向数据的指针 <code>ptr</code>。第一圈讲过：<a href="redis-data-encoding.html">Redis 数据结构与编码</a>。</li>
+      <li><b>SDS</b>：Redis 自己的字符串，前面一个头记长度（短于 32 字节 1 字节，≤ 252 字节 3 字节，再长 5 字节），后面补一个 <code>\0</code>。</li>
+      <li><b>jemalloc 按档分配</b>：要 654 字节，给的是 768 那一档。64 字节以内每 8 字节一档，再往上每翻一倍分 4 档：… 512、640、768、896、1024 …。多给的那部分也算占用。</li>
+    </ul>
+  </div>
+
+  <h3 id="layout">同一个 product:88，两种拼法</h3>
+  <div class="design">
+    <div class="way" data-role="other">
+      <h4>Redis 7.2<small>key、对象头、值、过期时间各自分配</small></h4>
+<svg viewBox="0 0 460 280" role="img" aria-label="Redis 7.2：主字典的桶指向一个 24 字节的 dictEntry，dictEntry 再分别指向 key 字符串和 16 字节的 robj，robj 指向 768 字节的值。过期时间放在另一个 expires 字典里，又是一个 24 字节的 dictEntry。">
+  <text x="10" y="20" class="t-b">主字典</text>
+  <rect x="10" y="30" width="36" height="24" rx="4" class="b-g2"/><text x="28" y="47" text-anchor="middle" class="t-xs">桶</text>
+  <path d="M46,42 L72,42" class="e-mut" marker-end="url(#ah-ink)"/>
+  <rect x="76" y="26" width="110" height="34" rx="6" class="b-g2"/><text x="131" y="42" text-anchor="middle" class="t-s">dictEntry 24</text><text x="131" y="55" text-anchor="middle" class="t-xs">key* · val* · next*</text>
+  <path d="M186,36 L228,24" class="e-mut" marker-end="url(#ah-ink)"/>
+  <rect x="232" y="10" width="120" height="26" rx="6" class="b-pd"/><text x="292" y="28" text-anchor="middle" class="t-s">key "product:88" 16</text>
+  <path d="M186,52 L228,74" class="e-mut" marker-end="url(#ah-ink)"/>
+  <rect x="232" y="62" width="80" height="26" rx="6" class="b-cg"/><text x="272" y="80" text-anchor="middle" class="t-s">robj 16</text>
+  <path d="M312,75 L340,104" class="e-mut" marker-end="url(#ah-ink)"/>
+  <rect x="232" y="108" width="210" height="26" rx="6" class="b-of"/><text x="337" y="126" text-anchor="middle" class="t-s">值 SDS 768（648 + 头 + 取整）</text>
+  <text x="10" y="170" class="t-b">expires 字典</text>
+  <rect x="10" y="180" width="36" height="24" rx="4" class="b-g2"/><text x="28" y="197" text-anchor="middle" class="t-xs">桶</text>
+  <path d="M46,192 L72,192" class="e-mut" marker-end="url(#ah-ink)"/>
+  <rect x="76" y="176" width="110" height="34" rx="6" class="b-rn"/><text x="131" y="192" text-anchor="middle" class="t-s">dictEntry 24</text><text x="131" y="205" text-anchor="middle" class="t-xs">同一个 key* · 到期时间</text>
+  <path d="M186,186 L262,40" class="e-mut" stroke-dasharray="4 3"/>
+  <text x="10" y="240" class="t-s">5 次分配。GET 跟指针：桶 → dictEntry → key（比较）→ robj → 值，4 跳</text>
+  <text x="10" y="262" class="t-xs">MEMORY USAGE = 24 + 16 + 16 + 768 = 824，expires 那 24 字节不算</text>
+</svg>
+    </div>
+    <div class="way" data-role="cg">
+      <h4>Redis 8.2 起：kvobj<small>key 和 TTL 塞进对象头两边</small></h4>
+<svg viewBox="0 0 460 280" role="img" aria-label="Redis 8.2 起：主字典的桶直接指向 kvobj，kvobj 是一块内存，依次是 8 字节 TTL、16 字节 robj、1 字节、12 字节的 key，robj 的指针指向 768 字节的值。没有 dictEntry，也没有 expires 字典里的那一条。">
+  <text x="10" y="20" class="t-b">主字典（no_value）</text>
+  <rect x="10" y="30" width="36" height="24" rx="4" class="b-g2"/><text x="28" y="47" text-anchor="middle" class="t-xs">桶</text>
+  <path d="M46,42 L84,42" class="e-mut" marker-end="url(#ah-ink)"/>
+  <text x="90" y="22" class="t-xs">kvobj：一次分配，37 字节</text>
+  <rect x="88" y="30" width="44" height="26" rx="5" class="b-rn"/><text x="110" y="47" text-anchor="middle" class="t-s">TTL 8</text>
+  <rect x="134" y="30" width="80" height="26" rx="5" class="b-cg"/><text x="174" y="47" text-anchor="middle" class="t-s">robj 16</text>
+  <rect x="216" y="30" width="18" height="26" rx="4" class="b-neu"/><text x="225" y="47" text-anchor="middle" class="t-xs">1</text>
+  <rect x="236" y="30" width="110" height="26" rx="5" class="b-pd"/><text x="291" y="47" text-anchor="middle" class="t-s">key 12</text>
+  <path d="M174,56 L196,96" class="e-mut" marker-end="url(#ah-ink)"/>
+  <rect x="134" y="100" width="210" height="26" rx="6" class="b-of"/><text x="239" y="118" text-anchor="middle" class="t-s">值 SDS 768</text>
+  <text x="10" y="160" class="t-s">桶的低 3 位做标记：这一格放的是 kvobj 本身，</text>
+  <text x="10" y="178" class="t-s">还是冲突时才分配的 dictEntry。</text>
+  <text x="10" y="210" class="t-s">没有单独的 expires 条目，TTL 在对象前面 8 字节。</text>
+  <text x="10" y="240" class="t-s">2 次分配。GET：桶 → kvobj（key 就在旁边）→ 值，2 跳</text>
+  <text x="10" y="262" class="t-xs">MEMORY USAGE = 8 + 16 + 1 + 12 + 768 = 805</text>
+</svg>
+    </div>
+  </div>
+  <div class="verdict" data-role="cg"><b>为什么要这样改：</b>缓存里放的是几百万、几千万个小 key，每个 key 的固定开销和查找时跟几次指针，乘起来就是几百 MB 内存和每次 GET 的缓存未命中。7.2 的字典是通用的（Hash、Set 也用它），key 和值各放一边，写起来简单，代价是每个 key 多两三次分配、多两跳。8.2 让主字典只存一个指针（<code>no_value=1</code>），key 跟着对象走。实测同样 5 万个 88 号这样的商品，每个从 868 字节降到 838；<code>stock:88 = 1200</code> 这种小 key，<code>MEMORY USAGE</code> 从 56 降到 27。</div>
+  <p class="tip">出处：Redis 提交 <code>e1789e4</code>（PR #13806 “keyspace - Unify key and value &amp; use dict no_value=1”，2025-05-12），8.0.0 的 <code>object.c</code> 里还没有 <code>kvobjCreate</code>，8.2.0 里有。“跳”数是按结构数的，没有单独测延迟。</p>
+
+  <h3 id="b805">805 一块一块算</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="805 字节的拆解：TTL 8、robj 16、1 字节记 key 头长度、key 12 字节，值 768 字节，其中 SDS 头 5 字节、JSON 648 字节、结尾 1 字节，jemalloc 取整多给了 114 字节。下面是 embstr 的 64 字节：7.2 是 robj 16 加头 3 加值最多 44 加结尾 1；8.10 是 robj 16、1、key、头 3、值、结尾 1，所以 key 加值不能超过 41。">
+  <text x="20" y="26" class="t-h">product:88 = 805 字节（Redis 8.10.3，带 TTL）</text>
+  <rect x="20" y="40" width="30" height="34" rx="4" class="b-rn"/><text x="35" y="62" text-anchor="middle" class="t-xs">8</text>
+  <rect x="52" y="40" width="50" height="34" rx="4" class="b-cg"/><text x="77" y="62" text-anchor="middle" class="t-s">16</text>
+  <rect x="104" y="40" width="14" height="34" rx="3" class="b-neu"/><text x="111" y="62" text-anchor="middle" class="t-xs">1</text>
+  <rect x="120" y="40" width="40" height="34" rx="4" class="b-pd"/><text x="140" y="62" text-anchor="middle" class="t-s">12</text>
+  <rect x="162" y="40" width="20" height="34" rx="3" class="b-of"/><text x="172" y="62" text-anchor="middle" class="t-xs">5</text>
+  <rect x="184" y="40" width="600" height="34" rx="4" class="b-of"/><text x="484" y="62" text-anchor="middle" class="t-s">JSON 648</text>
+  <rect x="786" y="40" width="10" height="34" rx="2" class="b-of"/>
+  <rect x="798" y="40" width="140" height="34" rx="4" class="b-dash"/><text x="868" y="62" text-anchor="middle" class="t-bad">空着 114</text>
+  <text x="35" y="92" text-anchor="middle" class="t-xs">TTL</text><text x="77" y="92" text-anchor="middle" class="t-xs">robj</text><text x="140" y="92" text-anchor="middle" class="t-xs">key</text><text x="172" y="92" text-anchor="middle" class="t-xs">头</text><text x="791" y="92" text-anchor="middle" class="t-xs">\0</text>
+  <path d="M20,104 L160,104" class="e-cg"/><text x="20" y="122" class="t-cg">kvobj 37：一次分配</text>
+  <path d="M162,104 L938,104" class="e-of"/><text x="400" y="122" class="t-of">值的 SDS：要 5 + 648 + 1 = 654，jemalloc 给 768 档</text>
+
+  <text x="20" y="170" class="t-h">embstr：对象头和值挤进一块 64 字节（CPU 一条缓存行）</text>
+  <text x="20" y="206" class="t-b">7.2</text>
+  <rect x="80" y="188" width="128" height="28" rx="4" class="b-cg"/><text x="144" y="207" text-anchor="middle" class="t-s">robj 16</text>
+  <rect x="210" y="188" width="24" height="28" rx="3" class="b-of"/><text x="222" y="207" text-anchor="middle" class="t-xs">3</text>
+  <rect x="236" y="188" width="352" height="28" rx="4" class="b-of"/><text x="412" y="207" text-anchor="middle" class="t-s">值 ≤ 44</text>
+  <rect x="590" y="188" width="10" height="28" rx="2" class="b-of"/>
+  <text x="612" y="207" class="t-mono">16 + 3 + 44 + 1 = 64，跟 key 多长无关</text>
+  <text x="20" y="256" class="t-b">8.10</text>
+  <rect x="80" y="238" width="128" height="28" rx="4" class="b-cg"/><text x="144" y="257" text-anchor="middle" class="t-s">robj 16</text>
+  <rect x="210" y="238" width="10" height="28" rx="2" class="b-neu"/>
+  <rect x="222" y="238" width="150" height="28" rx="4" class="b-pd"/><text x="297" y="257" text-anchor="middle" class="t-s">key + 2</text>
+  <rect x="374" y="238" width="24" height="28" rx="3" class="b-of"/><text x="386" y="257" text-anchor="middle" class="t-xs">3</text>
+  <rect x="400" y="238" width="188" height="28" rx="4" class="b-of"/><text x="494" y="257" text-anchor="middle" class="t-s">值</text>
+  <rect x="590" y="238" width="10" height="28" rx="2" class="b-of"/>
+  <text x="612" y="257" class="t-mono">16 + 1 + (k+2) + 3 + v + 1 ≤ 64</text>
+  <text x="612" y="279" class="t-bad">→ key + 值 ≤ 41 字节</text>
+  <path d="M80,292 L600,292" class="e-axis"/><text x="340" y="314" text-anchor="middle" class="t-xs">64 字节</text>
+</svg>
+  </div>
+  <figcaption>8.10 的 <code>kvobjSet</code> 判断时不算 TTL 那 8 字节（它放在对象前面，源码注释写“不必精确”）；8.2.0 还算，所以 8.2 带 TTL 时门槛是 key + 值 ≤ 33。实测 8.10：key 3 字节，值最长 38；key 24 字节，值最长 17；key 40 字节，只剩 1 字节。7.2 不管 key 多长都是 44。</figcaption>
+  </figure>
+
+  <div class="codebox">
+    <div class="code-bar"><span class="n">最少的语法</span><span>阈值配置、版本差异放到第 ⑥ 步</span></div>
+<pre><code>OBJECT ENCODING product:88          <span class="cm"># raw：值放在单独一块里</span>
+MEMORY USAGE product:88             <span class="cm"># 805：对象头 + key + 值，不含字典的桶</span>
+CONFIG GET hash-max-listpack-*      <span class="cm"># Hash 什么时候从 listpack 变 hashtable</span>
+INFO memory                         <span class="cm"># used_memory：容量规划看它的增量</span>
+<span class="cm"># DEBUG OBJECT 能看更多，但 7.0 起默认关着（enable-debug-command no）</span></code></pre>
+  </div>
+
+  <h3 id="calc">算一算：一个字符串 key 占多少</h3>
+  <div class="lab" id="lab" data-role="cg">
+    <div class="presets" role="group" aria-label="挑一个 key">
+      <button type="button" data-p="p88"><b>88 号详情</b><span>key 10 · 值 648 · 带 TTL</span></button>
+      <button type="button" data-p="stock"><b>库存</b><span>stock:88 = 1200</span></button>
+      <button type="button" data-p="price"><b>价格</b><span>price:88 = 399.00</span></button>
+      <button type="button" data-p="longkey"><b>长 key 的价格</b><span>36 字节的 key = 399.00</span></button>
+    </div>
+    <div class="guess" id="guess" hidden>
+      <p><b>先猜：</b><span id="g-q"></span>在 <b id="g-v"></b> 里是什么编码？</p>
+      <div class="opts">
+        <button type="button" data-g="int">int</button>
+        <button type="button" data-g="embstr">embstr</button>
+        <button type="button" data-g="raw">raw</button>
+        <button type="button" data-g="skip" class="skip">不猜了，直接看</button>
+      </div>
+      <p class="res" id="guess-res" hidden></p>
+    </div>
+    <div class="ctl-grid">
+      <div class="ctl"><span class="lbl">Redis 版本</span><span class="seg" role="group" aria-label="Redis 版本"><button type="button" data-v="7.2">7.2</button><button type="button" data-v="8.10" aria-pressed="true">8.10</button></span></div>
+      <label class="ctl"><span class="lbl">key 长度<output id="o-kl">10</output></span><input type="range" id="kl" min="1" max="140" value="10"></label>
+      <label class="ctl"><span class="lbl">值长度（字节）<output id="o-vl">648</output></span><input type="range" id="vl" min="1" max="2000" value="648"></label>
+      <label class="ctl"><span class="lbl">值是整数（≤ 20 位）</span><input type="checkbox" id="isint"></label>
+      <label class="ctl"><span class="lbl">带过期时间（TTL）</span><input type="checkbox" id="ttl" checked></label>
+    </div>
+    <div id="out-wrap">
+      <div class="calc-out">
+        <div class="tile" data-role="cg"><small>编码</small><b id="o-enc">raw</b><span id="o-why"></span></div>
+        <div class="tile" data-role="of"><small>MEMORY USAGE</small><b id="o-mu">805</b><span id="o-mu2"></span></div>
+        <div class="tile" data-role="g2"><small>还没算进去的</small><b id="o-real"></b><span id="o-real2"></span></div>
+      </div>
+      <div class="mem" id="mem" aria-live="polite"></div>
+      <div class="lab-res" data-role="of" id="o-note"></div>
+    </div>
+  </div>
+  <p class="tip">计算器的公式按 8.10.3 和 7.2 源码（<code>object.c</code> 的 <code>kvobjAllocSize</code>、<code>objectComputeSize</code>，<code>sds.h</code>）写，和本机 24 组实测（两个版本，int / embstr / raw，长短 key，带不带 TTL）逐个对过，全部一致。只算字符串；Hash 等类型看⑤。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：在交易靶场里把 88 号存四遍</h2>
+    <p class="lead">程序分三段：<code>one</code> 回填一条 88 号，看编码和 805；<code>embstr</code> 换不同长度的 key，找值最长多少还是 embstr；<code>shapes</code> 把同一份详情按③的四种存法各存 5 万个商品，用 <code>used_memory</code> 的增量除以 5 万，得到每个商品实际占多少。<code>run.sh</code> 同时起 Redis 7.2 和 8.10 两个容器，各跑一遍。</p>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">跑起来</span><span>Redis 8.10.3 和 7.2.17 容器 + Lettuce 6.8.2，代码按 JDK 8 写；<a href="https://github.com/archeu/study-labs/tree/main/java/redis/redis-encoding-memory">完整代码 →</a></span></div>
+<pre><code><span class="cm"># study-labs/java/redis/redis-encoding-memory</span>
+./run.sh            <span class="cm"># 起两个容器（63798 是 8.10，63772 是 7.2），三段各跑一遍</span>
+./run.sh clean      <span class="cm"># 删容器</span></code></pre>
+<pre><code><span class="cm">// shapes 段的核心：同一份详情，四种写法（详情每个商品各不相同，576 字节）</span>
+<span class="kw">case</span> "string":     a.set("product:" + id, json, SetArgs.Builder.ex(1800));
+<span class="kw">case</span> "hash":       m.put("detail", detail); a.hset("product:h:" + id, m); a.expire(…, 1800);
+<span class="kw">case</span> "hash-split": a.hset("product:h:" + id, fields(id)); a.set("detail:" + id, detail, ex(1800));
+<span class="kw">case</span> "json":       a.dispatch(JSON_SET, …, args.addKey("product:" + id).add("$").add(json));
+<span class="cm">// 写完 5 万个，(used_memory 之后 − 之前) / 50000 = 每个商品实际占多少</span></code></pre>
+<pre class="out"><code>== Redis 8.10.3，jemalloc-5.3.0 ==
+[one] 88 号 JSON 648 字节（detail 576 字节）
+  SET 不带 TTL     : raw    MEMORY USAGE 797
+  SET ... EX 1843 : raw    MEMORY USAGE 805   STRLEN 648
+  SET stock:88 1200: int    MEMORY USAGE 27
+  SET price:88 399.00: embstr MEMORY USAGE 40
+[embstr] key 长度 → 值最长多少字节仍是 embstr
+  key  3 字节 → 值 ≤ 38 字节
+  key 10 字节 → 值 ≤ 31 字节
+  key 24 字节 → 值 ≤ 17 字节
+  key 40 字节 → 值 ≤  1 字节
+[shapes] 每种存 50000 个商品，TTL 1800 s，详情各不相同
+  hash-max-listpack-value = [64]
+  string     编码 raw       MEMORY USAGE(88 号)   805   每个商品实际   838 字节
+  hash       编码 hashtable MEMORY USAGE(88 号)   992   每个商品实际  1004 字节
+  hash-split 编码 listpack  MEMORY USAGE(88 号)   773   每个商品实际   853 字节
+  json       编码 raw       MEMORY USAGE(88 号)   792   每个商品实际   944 字节
+
+== Redis 7.2.17 ==   <span class="cm">（只列不同的）</span>
+  SET ... EX 1843 : raw    MEMORY USAGE 824      stock:88 → 56      price:88 → 72
+  embstr：key 3、10、24、40 字节 → 值都是 ≤ 44 字节
+  string 868 字节    hash 1105 字节    hash-split 912 字节    （7.2 没有 JSON.SET）</code></pre>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 230" role="img" aria-label="每个商品实际占多少字节，Redis 8.10：String 838，Hash 1004，短字段 Hash 加详情 String 853，JSON 944。Redis 7.2：String 868，Hash 1105，拆开 912。">
+  <text x="20" y="26" class="t-h">每个商品实际占多少（used_memory 增量 ÷ 5 万）</text>
+  <text x="20" y="44" class="t-xs">深色条 8.10.3，浅灰条 7.2.17</text>
+  <text x="20" y="76" class="t-b">String 整块 JSON</text>
+  <rect x="220" y="62" width="503" height="18" rx="4" class="b-of"/><text x="732" y="76" class="t-mono">838</text>
+  <rect x="220" y="82" width="521" height="10" rx="3" class="b-neu"/><text x="750" y="92" class="t-monos">868</text>
+  <text x="20" y="120" class="t-b">Hash 5 个字段</text>
+  <rect x="220" y="106" width="602" height="18" rx="4" class="b-bad"/><text x="831" y="120" class="t-mono">1004 · hashtable</text>
+  <rect x="220" y="126" width="663" height="10" rx="3" class="b-neu"/><text x="892" y="136" class="t-monos">1105</text>
+  <text x="20" y="164" class="t-b">Hash 短字段 + 详情 String</text>
+  <rect x="220" y="150" width="512" height="18" rx="4" class="b-good"/><text x="741" y="164" class="t-mono">853</text>
+  <rect x="220" y="170" width="547" height="10" rx="3" class="b-neu"/><text x="776" y="180" class="t-monos">912</text>
+  <text x="20" y="208" class="t-b">JSON（RedisJSON）</text>
+  <rect x="220" y="194" width="566" height="18" rx="4" class="b-pd"/><text x="795" y="208" class="t-mono">944</text>
+</svg>
+  </div>
+  </figure>
+  <div class="facts">
+    <div class="fact" data-role="bad"><h4>Hash 反而最费</h4><p>detail 576 字节，超过 <code>hash-max-listpack-value</code> 的 64，整个 Hash 变成 hashtable：5 个字段各有自己的 key、值和字典条目。比 String 多 20%。</p></div>
+    <div class="fact" data-role="done"><h4>拆开才接近 String</h4><p>4 个短字段留在 listpack 里（一块连续内存），长详情单独一个 String。853 比 838 多一点，多的是第二个 key 的开销；换来的是价格、库存能单独改。</p></div>
+    <div class="fact" data-role="pd"><h4>JSON 不省</h4><p>RedisJSON 把文档解析成树存，每个商品 944 字节，多 13%。它的 <code>MEMORY USAGE</code> 报 792，比实际少，原因在⑥。</p></div>
+    <div class="fact" data-role="cg"><h4>8.10 每个 key 省 30 字节</h4><p>同样的 String，8.10 比 7.2 少 30 字节：少了 dictEntry 和 expires 里那一条。key 越小，省的比例越大。</p></div>
+  </div>
+  <div class="verdict" data-role="done"><b>到这里已经能交差了：</b>全景的写法（String 整块 JSON）就是四种里最省的，不用改。容量按每个商品 838 字节估：1 万个 8 MB，100 万个约 800 MiB，再给 <code>maxmemory</code> 留出碎片和复制缓冲的余量。<b>已知还没处理的细节：</b>Hash 里混进一个长字段（<a href="#p1">⑥-1</a>），<code>MEMORY USAGE</code> 乘个数会估小（<a href="#p2">⑥-2</a>），压测数据太整齐会让 JSON 显得很省（<a href="#p3">⑥-3</a>），调大 listpack 阈值的代价（<a href="#p4">⑥-4</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p1"><b><em>1</em>“拆进 Hash 省内存”，结果多 20%<a class="root" href="#s3">← ③ 编码按最长的那个值切换</a></b>
+      <dl><dt>现象</dt><dd>听说小 Hash 用 listpack 很省，就把 88 号的 5 个字段 <code>HSET</code> 进去。<span class="seen">实测 8.10：每个商品 1004 字节，String 是 838；OBJECT ENCODING = hashtable</span></dd>
+      <dt>根源</dt><dd>listpack 有两个门槛：字段数 ≤ <code>hash-max-listpack-entries</code>（默认 512），每个值 ≤ <code>hash-max-listpack-value</code>（默认 64 字节）。只要有一个值超了，整个 Hash 转成 hashtable，每个字段都变成独立的 SDS 加字典条目。</dd>
+      <dt>做法</dt><dd class="fix">整块读写的详情直接存 String；字段要单独改的，把长字段拆出去，Hash 里只留短字段（⑤ 的 hash-split，853 字节）。</dd></dl></div>
+    <div class="pit" id="p2"><b><em>2</em>拿 MEMORY USAGE 乘 key 数，内存估小<a class="root" href="#layout">← ④ 两种拼法</a></b>
+      <dl><dt>现象</dt><dd>按 805 × 100 万估，上线后 <code>used_memory</code> 比估的多 4%；7.2 上多 5%；JSON 多 19%。<span class="seen">实测：8.10 String 805 → 838，7.2 824 → 868，JSON 792 → 944</span></dd>
+      <dt>根源</dt><dd><code>MEMORY USAGE</code> 只算对象本身：字典的桶不算；7.2 的 expires 那条 24 字节不算；模块类型（JSON、Bloom）由模块自己报，报得粗。</dd>
+      <dt>做法</dt><dd class="fix">容量规划用⑤的办法：批量写 N 个真实形状的数据，看 <code>used_memory</code> 增量 ÷ N。<code>MEMORY USAGE</code> 只用来比较两种存法谁大谁小。</dd></dl></div>
+    <div class="pit" id="p3"><b><em>3</em>压测数据都一样，JSON 看着省了 3 倍<a class="root" href="#s5">实测现象</a></b>
+      <dl><dt>现象</dt><dd>造压测数据时 5 万个商品用了同一段详情，JSON 每个商品只占 278 字节，看着比 String 省很多。<span class="seen">实测 8.10：-DsameDetail=true 时 JSON 278 字节，详情各不相同时 944</span></dd>
+      <dt>根源</dt><dd>看起来是 RedisJSON 对相同的字符串只存了一份（它内部会共享字符串），String 不会。这页没有去翻 RedisJSON 的源码，只记下这个现象。</dd>
+      <dt>做法</dt><dd class="fix">估内存的数据要像真的：详情、名称各不相同。最好从线上导一批真实数据回放。</dd></dl></div>
+    <div class="pit" id="p4"><b><em>4</em>把 hash-max-listpack-value 调到 1024 迁就详情<a class="root" href="#s4">← ④ listpack 是一整块</a></b>
+      <dl><dt>现象</dt><dd>Hash 是 listpack 了，内存也省了，可每次改价都要动整块，字段多的 Hash 读一个字段也要从头找。</dd>
+      <dt>根源</dt><dd>listpack 是一块连续内存，按顺序一个个存。<code>HGET</code> 要从头往后找（O(n)）；<code>HSET</code> 改一个字段，可能要整块重新分配、把后面的挪一遍。门槛设成 64 字节、512 个，就是为了让 n 和整块都小到无所谓。按结构推的，这页没有压测。</dd>
+      <dt>做法</dt><dd class="fix">不为了一个长字段调全局阈值，它影响实例上所有 Hash。长字段拆出去。</dd></dl></div>
+  </div>
+  <p class="tip">第一圈页把 Hash 的个数门槛写成了 128。按 7.2 和 8.10 的源码（<code>config.c</code>）和 <code>redis.conf</code>，以及这次 <code>CONFIG GET</code> 实测，<code>hash-max-listpack-entries</code> 默认是 512；128 的是 <code>zset-max-listpack-entries</code> 和 <code>set-max-listpack-entries</code>。</p>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范：团队里怎么存、怎么估</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>整块读写的对象存 String</b><p>详情页一次要全量、改了整条删，就存一个 JSON String。</p><p class="guard">⑥-1：拆进 Hash 反而更费。</p></div>
+    <div class="rl"><b>Hash 只放短字段</b><p>每个值 ≤ 64 字节，字段 ≤ 512 个；长的单独一个 key。上线前对样例数据跑一次 <code>OBJECT ENCODING</code>，确认是 listpack。</p><p class="guard">⑥-1、⑥-4：转成 hashtable，或者调大阈值。</p></div>
+    <div class="rl"><b>容量按批量实测估</b><p>写 1 万～10 万个真实形状的数据，看 <code>used_memory</code> 增量；再给碎片、复制缓冲、AOF 重写留 30% 以上余量。</p><p class="guard">⑥-2、⑥-3：<code>MEMORY USAGE</code> 少算，压测数据太整齐。</p></div>
+    <div class="rl"><b>key 短而有结构</b><p><code>product:88</code>，别写成 <code>trade:product:detail:prices:cache:88</code>。</p><p class="guard">每个 key 都要多付这些字节；在 8.2 以后还挤掉 embstr 的位置（↺ 预测题 4）。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：838 − 805、档位、第 3 站和第 4 站</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>838 − 805 = 33 字节去哪了</b><p><code>MEMORY USAGE</code> 不算对象外面的东西：主字典的桶（5 万个 key 扩到 65536 个桶，每个 8 字节，平均每个 key 约 10.5 字节），桶里冲突时才分配的 dictEntry，kvobj 本身 37 字节被取整到 40。7.2 那边 868 − 824 = 44，大致是 expires 那条 24 字节，加上两个字典各自的桶。这是按结构估的，没有逐项拆开量。</p></div>
+    <div class="rl"><b>jemalloc 档位：几个字节决定多付 128</b><p>88 号的值要 654 字节，落在 640～768 那一档，空着 114 字节。JSON 要是 634 字节，正好卡进 640 档，<code>MEMORY USAGE</code> 是 677（实测），每个省 128。一般不值得为这个改数据格式，但能解释“值只长了几个字节，内存跳了一截”。用④的计算器拖一拖值长度就能看到台阶。</p></div>
+    <div class="rl"><b>第 3 站：查字典</b><p>8.10 的主字典设了 <code>no_value=1</code>：桶里直接放 kvobj 指针，指针低 3 位标记这一格是对象本身还是冲突链上的 dictEntry。查 <code>product:88</code> 时，算哈希找到桶，直接和 kvobj 里嵌着的 key 比较，比完就拿到对象头。7.2 要先经过 dictEntry，再分别去找 key 和 robj。</p></div>
+    <div class="rl"><b>第 4 站：bf:product 是模块类型</b><p>Redis 8 的发行版自带 Bloom、JSON、时间序列、搜索几个模块（⑤ 的 8.10.3 容器里 <code>MODULE LIST</code> 能看到 <code>bf</code>、<code>ReJSON</code>）。<code>bf:product</code> 的类型是模块注册的，不走 String 那套编码，内存靠模块自己报。布隆过滤器本身怎么回事：<a href="redis-bloom-hll.html">布隆过滤器与 HyperLogLog</a>。</p></div>
+  </div>
+  <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>版本</th><th>和这一页有关的变化</th></tr></thead>
+      <tbody>
+        <tr><td>6.x</td><td>小 Hash、ZSet 用 ziplist</td></tr>
+        <tr><td>7.0</td><td>listpack 全面替换 ziplist，配置改名 <code>*-listpack-*</code>（旧名还认）</td></tr>
+        <tr><td>7.2</td><td>embstr：值 ≤ 44 字节；key、robj、dictEntry、expires 条目各自分配（第一圈页按这个版本写）</td></tr>
+        <tr><td>7.4</td><td>Hash 字段可以单独过期（<code>HEXPIRE</code>），带过期字段的小 Hash 编码叫 <code>listpackex</code>（8.10 实测）</td></tr>
+        <tr><td>8.0</td><td>JSON、Bloom 等模块随发行版自带</td></tr>
+        <tr data-role="cg"><td>8.2</td><td>kvobj：key、TTL 放进对象，主字典 <code>no_value=1</code>；embstr 门槛变成 key + 值（带 TTL 再加 8）凑进 64 字节（PR #13806）</td></tr>
+        <tr data-role="cg"><td>8.10.3</td><td>embstr 判断不再算 TTL：key + 值 ≤ 41（源码 + 实测）；<code>MEMORY USAGE</code> 由 <code>kvobjAllocSize</code> 算，含 key 和 TTL</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">7.4、8.0 两行来自发行说明和这次 8.10 容器的观察，没有装这两个版本逐一验证。</p>
+
+  <div class="round"><span class="rb">下一圈</span><h3>这一层没有尽头</h3></div>
+  <ul class="next">
+    <li>Hash 字段过期（<code>HEXPIRE</code>）和 <code>listpackex</code>：库存、价格各设各的过期时间，内存和过期删除怎么做</li>
+    <li>详情压缩后再存（客户端 gzip、Snappy、LZ4）：省多少内存，多花多少 CPU，第 7 站和第 1 站的耗时怎么变</li>
+    <li>RedisJSON 的内部结构：文档树、字符串共享，<code>JSON.GET $.price</code> 的代价</li>
+    <li>8.10 源码里出现的 Hash 模板编码（<code>TMPL_LP</code>、<code>TMPL_ARRAY</code>），这一页没有展开</li>
+    <li>内存碎片：<code>mem_fragmentation_ratio</code>、<code>activedefrag</code>，大量改价后的碎片（<a href="redis-eviction-expire.html">过期删除与内存淘汰</a>）</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到第⑤步：改一改交易靶场</h2>
+    <p class="lead">先猜结果，再运行。代码和预期输出在 <a href="https://github.com/archeu/study-labs/tree/main/java/redis/redis-encoding-memory">study-labs</a>。</p>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="of"><h4>1 · 详情少 14 字节</h4><p>把 <code>DETAIL</code> 末尾去掉 5 个汉字（15 字节），88 号 JSON 变成 633 字节。先用④的计算器算 8.10 和 7.2 的 <code>MEMORY USAGE</code>，再跑 <code>./run.sh one</code> 对答案。<code>shapes</code> 段每个商品又省多少？</p><p class="uses">用到：⑥ 第三圈“jemalloc 档位”</p></div>
+    <div class="exc" data-role="done"><h4>2 · 把全景的回填改成拆开存</h4><p>在全景的 <code>ProductDetail</code> 里，第 7 站改成 <code>HSET product:h:88</code> 短字段 + <code>SET detail:88</code>，第 10 站改价时两个都删。回填多了一条命令，第 7 站慢了多少？要不要用 Pipeline 一起发？</p><p class="uses">用到：⑥ 第一圈 1、第二圈“Hash 只放短字段”</p></div>
+    <div class="exc" data-role="pd"><h4>3 · 一样的详情</h4><p>加上 <code>-DsameDetail=true</code> 跑 <code>shapes</code>。String、Hash 的数字变不变？JSON 的呢？换成只有前 100 个商品详情相同，又会怎样？</p><p class="uses">用到：⑥ 第一圈 3</p></div>
+  </div>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>一个 key 的内存 = 对象头 + key + 值 + 分配器取整，再加对象外面字典的那份；Redis 8.2 把 key 和 TTL 塞进对象，每个 key 少一两次分配，embstr 门槛变成 key + 值 ≤ 41。选 String 还是 Hash，看数据会落进哪种编码。</p></details>
+    <details><summary>2. 按“值多长 × 多少个”估内存，差在哪？</summary><p>漏了每个 key 的固定开销（对象头 16、key、SDS 头、字典的桶，7.2 还有两个 dictEntry）和 jemalloc 的取整。值越小，固定开销占比越大：<code>stock:88 = 1200</code> 值 4 字节，实际 27（7.2 是 56）。648 字节的详情按 648 估，少了 29%。</p></details>
+    <details><summary>3. 详情拆进 Hash，为什么比 String 还多 20%？</summary><p>④ 和③：Hash 只要有一个值超过 <code>hash-max-listpack-value</code>（64 字节），整个就从 listpack 转成 hashtable。detail 576 字节，于是 5 个字段各自变成独立的 SDS 加字典条目，每个都有头、指针和取整的开销；String 只有一个对象头和一块值。</p></details>
+    <details><summary>4. 预测：8.10 上 <code>SET trade:product:detail:prices:cache:88 399.00</code> 是什么编码？7.2 呢？</summary><p>key 36 字节 + 值 6 字节 = 42 > 41，8.10 上是 <code>raw</code>（实测，<code>MEMORY USAGE</code> 65）；7.2 只看值 ≤ 44，是 <code>embstr</code>。从④的 64 字节图推：8.10 里 key 和值要一起挤进一条缓存行。</p></details>
+    <details><summary>5. 预测：给 1 万个已有的 String key 都加上 TTL，7.2 和 8.10 上 <code>MEMORY USAGE</code> 和 <code>used_memory</code> 各怎么变？</summary><p>7.2：每个 key 的 <code>MEMORY USAGE</code> 不变（expires 里的条目不算进去），<code>used_memory</code> 每个多 24 字节的 dictEntry 加 expires 字典的桶。8.10：TTL 要放进对象前面那 8 字节，原来的 kvobj 放不下，<code>kvobjSetExpire</code> 会重新分配一个（值那块不动），<code>MEMORY USAGE</code> 每个 +8，<code>used_memory</code> 大约也是 +8 再加取整。从④的“两种拼法”推。</p></details>
+    <details><summary>6. 放回全景：第 7 站前后各发生了什么？这一页讲的东西估错了，整条链路会怎样？</summary><p>第 6 站拿到重建锁的线程查库，拼出 648 字节 JSON；第 7 站 <code>SET product:88 … EX 1843</code> 回填（raw，805 字节），再用 Lua 解锁；第 8 站写进本地 Caffeine。要是按 648 估内存、<code>maxmemory</code> 配小了，到第 12 站：默认 <code>noeviction</code> 下回填报 OOM，每次请求都穿到 MySQL，击穿的压力一直在；配了淘汰策略的，热门商品被挤出去，第 3 站命中率下降。要是改成 Hash 存详情，同样的内存少装 17% 的商品。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。Redis 8.10.3 和 7.2.17（本机 Docker 容器，jemalloc 5.3.0，除端口外全默认），Lettuce 6.8.2，代码按 JDK 8 写、在 JDK 17 上跑，本机 2 核 ARM。</p>
+  <p>标“实测”的都在本机跑过：<code>one</code>、<code>embstr</code> 两段数字是确定的；<code>shapes</code> 段 8.10 和 7.2 各跑了 3 遍（第一遍 88 号的数据和全景差 5 字节，修正后重跑；最后一遍用 <code>run.sh</code> 新起的容器）。String、拆开、JSON 每遍只差 0～5 字节；8.10 的 Hash 两遍 1004、一遍 1021，页面用 1004。计算器另外对了 24 组 <code>redis-cli</code> 实测。源码核对：Redis 8.10.3、8.2.0、8.0.0、7.4.0 和 7.2.4 的 <code>object.c</code>，8.10.3 的 <code>sds.h</code>、<code>sds.c</code>、<code>dict.h</code>、<code>server.c</code>、<code>config.c</code>，7.2.4 的 <code>config.c</code>、<code>dict.c</code>、<code>redis.conf</code>；提交 <code>e1789e4</code>（PR #13806）。7.4、8.0 的版本行为来自发行说明。</p>
+  <p>相关：<a href="../java/pano-j07-product-detail-cache.html">全景：一次商品详情查询</a> · <a href="redis-data-encoding.html">Redis 数据结构与编码（第一圈）</a> · <a href="redis-bloom-hll.html">布隆过滤器与 HyperLogLog</a> · <a href="cache-five-holes.html">88 号过期那一刻</a> · <a href="redis-event-loop-queueing.html">279 µs 里只有 2 µs 在 Redis</a> · <a href="redis-eviction-expire.html">过期删除与内存淘汰</a> · <a href="../java/roadmap.html#j07">Java 地图 J07</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// jemalloc 档位（Redis 编译时 lg-quantum=3）：≤64 按 8 取整，之后每翻一倍分 4 档
+function jeClass(s){
+  if(s<=8) return 8;
+  if(s<=64) return Math.ceil(s/8)*8;
+  var lg=Math.floor(Math.log2(s-1)), d=Math.pow(2,lg-2);
+  return Math.ceil(s/d)*d;
+}
+// SDS 头：<32 字节 type5（1 字节），≤252 type8（3），≤65529 type16（5），再往上 type32（9）
+function sdsHdr(len){ return len<32?1:(len<=252?3:(len<=65529?5:9)); }
+// 计算一个字符串 key 的编码、MEMORY USAGE 和内存块
+// v: '7.2' | '8.10'；kl key 字节数；vl 值字节数；isInt 值是不是整数；ttl 有没有过期时间
+function keyMem(v,kl,vl,isInt,ttl){
+  var enc, blocks=[], mu, why, real;
+  if(isInt && vl<=20) enc='int';
+  else if(v==='7.2') enc = vl<=44 ? 'embstr' : 'raw';
+  else enc = (vl<=44 && kl+vl<=41) ? 'embstr' : 'raw';
+  var kh=sdsHdr(kl), keyReq=kh+kl+1;
+  if(v==='7.2'){
+    var keyAlloc=jeClass(keyReq);
+    blocks.push({n:'dictEntry',b:24,r:'g2'});
+    blocks.push({n:'key '+kl+' B',b:keyAlloc,r:'pd',need:keyReq});
+    if(enc==='int'){ blocks.push({n:'robj（值放在 ptr 里）',b:16,r:'cg'}); }
+    else if(enc==='embstr'){ var need=16+3+vl+1; blocks.push({n:'robj + 值',b:jeClass(need),r:'cg',need:need}); }
+    else { blocks.push({n:'robj',b:16,r:'cg'}); var vh=sdsHdr(vl), need2=vh+vl+1; blocks.push({n:'值 '+vl+' B',b:jeClass(need2),r:'of',need:need2}); }
+    mu=0; blocks.forEach(function(x){mu+=x.b;});
+    real = mu + (ttl?24:0);
+    if(ttl) blocks.push({n:'expires 里的 dictEntry（不计入）',b:24,r:'other',hidden:true});
+  } else {
+    var meta=(ttl||kl>=128)?8:0;
+    var keyIn = kl<32 ? (1+kl+1) : (kh+kl+1);   // 嵌入的 key 按实际字节算，不取整
+    if(enc==='embstr'){
+      var need3=meta+16+1+keyIn+3+vl+1, cls=jeClass(need3);
+      if(meta) blocks.push({n:'TTL',b:8,r:'rn'});
+      blocks.push({n:'robj',b:16,r:'cg'});
+      blocks.push({n:'1 + key '+kl+' B',b:1+keyIn,r:'pd'});
+      blocks.push({n:'值 '+vl+' B',b:cls-meta-16-1-keyIn,r:'of',need:3+vl+1});
+      mu=cls;
+    } else {
+      if(meta) blocks.push({n:'TTL',b:8,r:'rn'});
+      blocks.push({n:'robj',b:16,r:'cg'});
+      blocks.push({n:'1 + key '+kl+' B',b:1+keyIn,r:'pd'});
+      if(enc==='raw'){ var vh2=sdsHdr(vl), need4=vh2+vl+1, va = vl<32 ? need4 : jeClass(need4); blocks.push({n:'值 '+vl+' B',b:va,r:'of',need:need4}); }
+      mu=0; blocks.forEach(function(x){mu+=x.b;});
+    }
+    real = mu;
+  }
+  if(enc==='int') why='值是整数，直接放进 robj 的 ptr 字段，不另外分配';
+  else if(v==='7.2') why = enc==='embstr' ? '值 ≤ 44 字节：robj 和值一次分配，凑满 64 字节' : '值 > 44 字节：robj 和值分两次分配';
+  else if(enc==='embstr') why='key + 值 = '+(kl+vl)+' ≤ 41：robj、key、值一起放进一块 64 字节';
+  else if(vl>44) why='值 > 44 字节，本来就是 raw';
+  else why='key + 值 = '+(kl+vl)+' > 41，放不进 64 字节，值单独分配';
+  return {enc:enc, mu:mu, real:real, blocks:blocks, why:why};
+}
+/*SIM-END*/
+(function(){
+  var $=function(id){return document.getElementById(id);};
+  var st={v:'8.10',kl:10,vl:648,isInt:false,ttl:true};
+  var PRESETS={
+    p88:{kl:10,vl:648,isInt:false,ttl:true,q:'88 号详情（key product:88，值 648 字节，带 TTL）'},
+    stock:{kl:8,vl:4,isInt:true,ttl:false,q:'stock:88 = 1200'},
+    price:{kl:8,vl:6,isInt:false,ttl:false,q:'price:88 = 399.00'},
+    longkey:{kl:36,vl:6,isInt:false,ttl:false,q:'trade:product:detail:prices:cache:88 = 399.00'}
+  };
+  var pending=null;
+  function syncCtl(){
+    $('kl').value=st.kl; $('vl').value=st.vl; $('isint').checked=st.isInt; $('ttl').checked=st.ttl;
+    $('o-kl').textContent=st.kl; $('o-vl').textContent=st.vl;
+    document.querySelectorAll('.seg button').forEach(function(b){b.setAttribute('aria-pressed', b.dataset.v===st.v?'true':'false');});
+  }
+  function render(){
+    var r=keyMem(st.v,st.kl,st.vl,st.isInt,st.ttl);
+    $('o-enc').textContent=r.enc; $('o-why').textContent=r.why;
+    $('o-mu').textContent=r.mu+' B'; $('o-mu2').textContent='Redis '+st.v+' 的 MEMORY USAGE 会报的数';
+    if(st.v==='7.2'){
+      $('o-real').textContent=st.ttl?'+24 B':'0';
+      $('o-real2').textContent=st.ttl?'expires 字典里那条 dictEntry；另有两个字典的桶':'只差字典的桶，平均每个 key 约 8～16 B';
+    } else {
+      $('o-real').textContent='桶';
+      $('o-real2').textContent='主字典的桶，平均每个 key 约 8～16 B；TTL 已算在里面';
+    }
+    var mem=$('mem'); mem.innerHTML='';
+    r.blocks.forEach(function(b){
+      var d=document.createElement('div'); d.className='blk'+(b.hidden?' hid':''); d.setAttribute('data-role',b.r);
+      d.style.setProperty('--w', Math.max(1, Math.round(Math.sqrt(b.b))));
+      var t=document.createElement('b'); t.textContent=b.b;
+      var s=document.createElement('span'); s.textContent=b.n;
+      d.appendChild(t); d.appendChild(s); mem.appendChild(d);
+    });
+    var waste=r.blocks.filter(function(b){return b.need && b.b>b.need;});
+    var note=[];
+    waste.forEach(function(b){note.push('「'+b.n+'」那块要 '+b.need+' 字节，jemalloc 给 '+b.b+' 字节的档，空着 '+(b.b-b.need)+'。');});
+    if(r.enc==='embstr' && st.v==='8.10') note.push('一块内存：对象头、key、值连在一起，最后取到 '+r.mu+' 字节那一档。');
+    if(r.enc==='raw' && st.v==='8.10' && st.vl<=44) note.push('同样的值在 7.2 是 embstr：8.10 里 key 也要挤进那 64 字节。');
+    if(st.v==='8.10' && st.kl>=128) note.push('key ≥ 128 字节时，即使不设 TTL 也预留 8 字节给它。');
+    if(!note.length) note.push('没有分配器取整的浪费。');
+    $('o-note').textContent=note.join(' ');
+  }
+  function showOut(on){ $('out-wrap').style.visibility=on?'visible':'hidden'; }
+  document.querySelectorAll('.presets button').forEach(function(b){
+    b.addEventListener('click',function(){
+      var p=PRESETS[b.dataset.p];
+      document.querySelectorAll('.presets button').forEach(function(x){x.setAttribute('aria-pressed', x===b?'true':'false');});
+      st.kl=p.kl; st.vl=p.vl; st.isInt=p.isInt; st.ttl=p.ttl; syncCtl(); render();
+      pending=keyMem(st.v,st.kl,st.vl,st.isInt,st.ttl).enc;
+      $('g-q').textContent=p.q+' '; $('g-v').textContent='Redis '+st.v;
+      $('guess').hidden=false; $('guess-res').hidden=true;
+      document.querySelectorAll('#guess .opts button').forEach(function(x){x.classList.remove('right','wrong'); x.setAttribute('aria-pressed','false');});
+      showOut(false);
+    });
+  });
+  document.querySelectorAll('#guess .opts button').forEach(function(b){
+    b.addEventListener('click',function(){
+      if(pending===null) return;
+      var g=b.dataset.g, res=$('guess-res');
+      var r=keyMem(st.v,st.kl,st.vl,st.isInt,st.ttl);
+      if(g!=='skip'){
+        b.setAttribute('aria-pressed','true');
+        b.classList.add(g===pending?'right':'wrong');
+        res.setAttribute('data-role', g===pending?'done':'bad');
+        res.textContent=(g===pending?'猜对了。':'是 '+pending+'。')+r.why+'。';
+        res.hidden=false;
+      }
+      pending=null; showOut(true);
+    });
+  });
+  document.querySelectorAll('.seg button').forEach(function(b){
+    b.addEventListener('click',function(){ st.v=b.dataset.v; syncCtl(); render(); showOut(true); });
+  });
+  $('kl').addEventListener('input',function(){ st.kl=+this.value; syncCtl(); render(); showOut(true); });
+  $('vl').addEventListener('input',function(){ st.vl=+this.value; syncCtl(); render(); showOut(true); });
+  $('isint').addEventListener('change',function(){ st.isInt=this.checked; if(st.isInt && st.vl>20){ st.vl=4; } syncCtl(); render(); showOut(true); });
+  $('ttl').addEventListener('change',function(){ st.ttl=this.checked; render(); showOut(true); });
+  syncCtl(); render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
