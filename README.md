@@ -55,6 +55,7 @@
 | 16 | [一个 400 进了两次 DispatcherServlet](https://archeu.github.io/study-notes/spring/spring-mvc-dispatch.html) | Spring MVC 请求处理下一圈：分派类型与 /error 再分派、过滤器按分派登记的两层开关、拦截器调两次、Boot 3 公开接口出错变 401、过滤器重复注册、冷热请求时间账，八个场景的分派演示 |
 | 17 | [付款一次算一遍密码：Spring Security 认证与授权下一圈](https://archeu.github.io/study-notes/spring/spring-security-token.html) | BCrypt 为什么故意慢和 cost 实测、登录一次换会话或 JWT、JWT 怎么验（签名、60 秒偏差、SCOPE_ 前缀）、@PreAuthorize 按数据授权、显式保存、会话固定、登出撤销六个坑，凭证实验台 |
 | 18 | [改个版本号，付款就 400 了：Spring Boot 3 到 4、Jakarta 与 Jackson 3 升级](https://archeu.github.io/study-notes/spring/spring-boot4-upgrade.html) | 编译器看得见的改名和看不见的默认值、Jackson 3 怎么换掉第 5 站、MyBatis 旧 starter 为何找不到 Mapper、六个坑和五个练习，四种构建 × 六个付款请求的先猜再跑实验台 |
+| 19 | [测试全绿，付款照样没回滚：JUnit 5、Mockito 与 Testcontainers](https://archeu.github.io/study-notes/spring/spring-testing.html) | JUnit 5 平台和扩展、Mockito 的答案表和录像带、Web / MyBatis 切片和上下文缓存、Testcontainers 起真 MySQL、三颗事务雷只有真库整链测试抓得到、测试类加 @Transactional 全部失真、Boot 4 测试依赖变化，测试层 × 写法实验台 |
 
 ## MyBatis
 
