@@ -81,6 +81,7 @@
 | 06 | [两次付款同时到，第二次改了 0 行：事务、MVCC 与锁（下一圈）](https://archeu.github.io/study-notes/database/mysql-lock-wait-deadlock.html) | 快照读与当前读、等锁醒来后重新判断 WHERE、三种 WHERE 在 RR / RC 下锁了多少行、1205 只回滚一条语句、死锁日志怎么读，连点两次付款实验台 |
 | 07 | [commit 返回了，数据页还是旧的：redo、undo、binlog 与两阶段提交](https://archeu.github.io/study-notes/database/mysql-redo-undo-binlog.html) | WAL 与检查点、undo 版本链与 purge、binlog 与 redo 的分工、两阶段提交和崩溃恢复规则、提交途中 kill -9 三次实测、redo 容量与长事务实测，崩溃点实验台 |
 | 08 | [付完款跳回订单页，还是待付款：主从复制、读写分离与复制延迟](https://archeu.github.io/study-notes/database/mysql-replication-lag.html) | 三个线程两份日志、GTID、延迟拆成传排队回放、大事务与心跳曲线、从库被写停在 1032、读写分离三种写后读，路由实验台 |
+| 09 | [orders 加一列，支付接口全卡住了：表结构设计与大表变更（Online DDL）](https://archeu.github.io/study-notes/database/mysql-online-ddl.html) | 建表时每个类型的改表代价、INSTANT / INPLACE / COPY 三种算法、元数据锁排队、DDL 到从库再做一遍、gh-ost 影子表对照，一边付款一边改表的实测，改表计划台 |
 
 ## 性能
 
