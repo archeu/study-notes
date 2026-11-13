@@ -77,6 +77,7 @@
 | 02 | [MySQL MVCC 与锁](https://archeu.github.io/study-notes/database/mysql-mvcc-lock.html) | 隐藏列和版本链、Read View 怎么判断看得见、快照读和当前读、四种行锁和死锁，MVCC 实验台和锁地图 |
 | 03 | [HikariCP ConcurrentBag 源码](https://archeu.github.io/study-notes/database/hikari-concurrentbag.html) | 口袋、货架、递交窗口和 state CAS、为什么借连接不加锁却不保证先来先得、先改 state 再看 waiters、逐行读 borrow / requite、各版本差异，线程调度实验台 |
 | 04 | [100 万行里找 9527，只读了 3 页：索引与 B+ 树](https://archeu.github.io/study-notes/database/mysql-index-bplustree.html) | 页和 B+ 树为什么只有 3 层、页目录二分、聚簇索引和二级索引、回表与覆盖索引、联合索引最左前缀、为什么二级索引存主键，读 .ibd 数树形和拿页次数实测，查询走法演示 |
+| 05 | [明明有索引，它偏不走：执行计划与 SQL 调优](https://archeu.github.io/study-notes/database/mysql-explain-tuning.html) | 慢查询日志与按指纹汇总、EXPLAIN 各列、EXPLAIN ANALYZE 对估算、代价模型与回表分界点实测、索引失效六种写法、深分页与游标分页，16 种写法先猜再看实验台 |
 
 ## 性能
 
