@@ -1,0 +1,1139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>第 617 个商品写不进去：Redis 写满以后的 OOM、淘汰与过期</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J07 knowledge point 7 "expire & eviction" (second round), stations 3 and 12 of the J07 panorama, touching 5 and 7. Roles: cg = commands at the Redis entry (processCommand, stations 2-3), rn = rebuild lock key (station 5), of = product cache keys (station 7 backfill), g2 = background expire / eviction (station 12), bk = database (station 6); bad / good / neutral fixed. Interaction: one chain lab (policy x memory state x fallback -> what each station sees, guess first). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Redis</span><span aria-hidden="true">/</span><span class="tb-here">第 617 个商品写不进去</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g2"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">maxmemory · noeviction · DENYOOM · performEvictions · allkeys-lru / allkeys-lfu / volatile-lru · 惰性删除 · activeExpireCycle · 脚本与 OOM · Redis 8.10.3</p>
+  <h1>第 617 个商品写不进去：Redis 写满以后的 OOM、淘汰与过期</h1>
+  <p class="lead">Redis 写满以后不会“变慢”，而是把命令分成两类：读和删照常执行，带 <code>DENYOOM</code> 标志的写（<code>SET</code>、<code>SET NX</code>、<code>INCR</code>、<code>BF.ADD</code>）一律拒绝。<code>noeviction</code> 下，全景第 5 站的锁和第 7 站的回填一起失败。换成会淘汰的策略，写是进得去了，可淘汰只看“多久没用、用得多不多、还剩多久过期”，不管这个 key 是不是一把正被人拿着的锁。还有，key 过期了不等于腾出了地方，要等后台扫到才真删。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j07-product-detail-cache.html#s-3">一次商品详情查询 · 第 3、12 站</a>（牵连第 5、7 站）</span><span>地图：<a href="../java/roadmap.html#j07">J07 · 过期删除与内存淘汰</a></span><span>第一圈：<a href="redis-eviction-expire.html">Redis 过期删除与内存淘汰</a></span></p>
+  <p class="scene"><b>下一圈</b><span>第一圈讲了过期时间存在哪、定时 / 惰性 / 定期三种删法、八种淘汰策略、近似 LRU 的抽样和候选池、LFU 的对数计数，这里都只一两句带过。这一圈只盯一个时刻：交易靶场的 Redis 写满了。这时全景第 2～7 站每一站各看到什么，哪些命令照常、哪些被拒，淘汰会赶走谁，过期的 key 又是什么时候才真正腾出地方。数字都来自 Redis 8.10.3 上的实测。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="g2">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：内存有上限，缓存却只进不出</h2>
+    <p class="lead">全景里有两处在管内存。第 3 站主线程查字典，碰到一个已经过期的 key，要当场删掉、当它不存在；第 12 站在后台，每秒 10 轮检查带过期时间的 key，内存一到 <code>maxmemory</code> 就按策略淘汰。这两站要解决的是：缓存每次没命中都要往里回填，可机器内存是有限的。过期的 key 要真删掉，满了要有人让位。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 230" role="img" aria-label="maxmemory 设成 2 MB（2048 KB）。空的 Redis 就占了 1386 KB，剩下的空间回填了 616 个商品，used_memory 到 2072 KB，超过了 2048 KB 那条线，第 617 个商品回填失败。">
+  <text x="20" y="28" class="t-h">maxmemory 2mb，空库先占了三分之二</text>
+  <rect x="80" y="62" width="541" height="40" rx="6" class="b-neu"/>
+  <text x="350" y="87" text-anchor="middle" class="t-s">空库：Redis 自己 1386 KB</text>
+  <rect x="621" y="62" width="268" height="40" rx="6" class="b-of"/>
+  <text x="755" y="80" text-anchor="middle" class="t-s">616 个商品</text>
+  <text x="755" y="96" text-anchor="middle" class="t-xs">每个约 1.1 KB</text>
+  <path d="M880,46 L880,118" class="e-bad"/>
+  <text x="880" y="40" text-anchor="middle" class="t-bad">maxmemory 2048 KB</text>
+  <text x="900" y="134" text-anchor="start" class="t-xs">2072 KB</text>
+  <path d="M889,104 L889,124" class="e-ink"/>
+  <text x="80" y="134" class="t-xs">0</text>
+  <text x="80" y="170" class="t-s">第 617 个商品：第 5 站的锁抢到了（压线前最后一条写），第 7 站回填的 SET 被拒：</text>
+  <text x="80" y="194" class="t-mono t-bad">OOM command not allowed when used memory &gt; 'maxmemory'.</text>
+  <text x="80" y="218" class="t-xs">实测：Redis 8.10.3 容器，除 maxmemory 外全默认；“每个约 1.1 KB”是 686 KB ÷ 616，比第一圈页算的 838 字节多出的是锁、连接缓冲这些零碎</text>
+</svg>
+  </div>
+  <figcaption>⑤ 的实验故意把 <code>maxmemory</code> 设得很小，好在几秒内写满。生产上是 GB 级，道理一样：<code>maxmemory</code> 管的是 <code>used_memory</code> 的总数，不是“能存多少数据”。</figcaption>
+  </figure>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：不设上限，或者设了不让位</h2>
+    <p class="lead">“它”指的是上限加让位规则。两样各缺一样，靶场里就是下面两种结局。全景第 12 站提醒过的那个坑，就是右边这种：<code>maxmemory</code> 配了，策略还是默认的 <code>noeviction</code>。</p>
+  </div>
+  <div class="two">
+    <div class="card" data-role="other">
+      <h3>不设 maxmemory（默认 0）</h3>
+      <p>64 位系统上就是不设上限。缓存只进不出（只靠过期删），大促前预热一批商品，内存一路涨到机器的物理内存，结局是 Linux 的 OOM killer 把 Redis 进程杀掉，或者开始用交换分区，每条命令都慢上百倍。</p>
+      <p class="result">第 3 站以后的所有站都跟着停。第一圈页的“常踩的坑”第一条。</p>
+    </div>
+    <div class="card" data-role="bad">
+      <h3>设了 2mb，策略还是 noeviction <span class="tag-real">实测</span></h3>
+      <p>回填 1 万个商品：前 616 个进去了，第 617 个起全部失败，9383 次 OOM，<code>evicted_keys</code> 是 0。之后 20 个请求同时查一个没缓存的商品：</p>
+      <ul>
+        <li>代码不降级：20 个请求全部报错，用户看到 500。</li>
+        <li>代码降级（Redis 报错就直接查库）：20 个请求都拿到了详情，数据库被查了 <b>20 次</b>。没满的时候只查 1 次。</li>
+      </ul>
+      <p class="result">读照样命中，已经缓存的 616 个商品不受影响。出事的是没缓存的那些：要么报错，要么全落到库上。</p>
+    </div>
+  </div>
+  <p class="misj"><b>不懂这一点时的典型误用</b>以为“Redis 满了就是变慢，大不了缓存不进去，读库就是了”，于是只配了 <code>maxmemory</code>。实际情况是重建锁先抢不到（第 5 站的 <code>SET NX</code> 也是写），挡击穿的那道防线跟着失效：每个没命中的请求都会去查库。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：写满时让谁走</h2>
+    <p class="lead">第一圈列过八种淘汰策略。放到靶场里试：先把 88 号读热（读 200 次），手里拿着一把锁 <code>lock:product:20001</code>（PX 10 分钟，模拟另一个请求正在重建），然后回填 1～10000 号，每回填 10 个读一次 88 号。</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>策略</th><th>OOM 次数</th><th>淘汰</th><th>最后剩</th><th>88 号</th><th>拿着的锁</th><th>1～1000 号剩</th><th>9001～10000 号剩</th></tr></thead>
+      <tbody>
+        <tr><td><code>noeviction</code>（默认）</td><td>9353</td><td>0</td><td>648</td><td>在</td><td>在</td><td>646</td><td>0</td></tr>
+        <tr><td><code>allkeys-lru</code></td><td>0</td><td>9360</td><td>641</td><td>在</td><td class="bad">没了</td><td>0</td><td>633</td></tr>
+        <tr><td><code>allkeys-lfu</code></td><td>0</td><td>9359</td><td>642</td><td>在</td><td class="bad">没了</td><td>0</td><td>445</td></tr>
+        <tr><td><code>volatile-lru</code></td><td>0</td><td>9360</td><td>641</td><td>在</td><td class="bad">没了</td><td>0</td><td>628</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap"><span class="tag-real">实测</span> Redis 8.10.3，<code>maxmemory 2mb</code>，每种策略各回填一遍约 29 秒。<code>volatile-lru</code> 只在带过期时间的 key 里挑，这里商品和锁都带 TTL，所以和 <code>allkeys-lru</code> 差不多。</p>
+  <div class="two">
+    <div class="card" data-role="cg">
+      <h3>怎么读这张表</h3>
+      <ul>
+        <li><b>noeviction</b> 留下的是最早的 646 个，后面的一个也进不去。</li>
+        <li><b>LRU</b> 留下的几乎都是最近写的，最早的全被赶走。</li>
+        <li><b>LFU</b> 最近写的只剩 445 个，另外两百来个散在中间。新 key 的计数都从 5 起，大家一样“不常用”，挑谁差不多是随机的。</li>
+        <li>88 号一直有人读，三种策略都留下了它。</li>
+        <li><b>锁</b>：三种会淘汰的策略都把它赶走了。</li>
+      </ul>
+    </div>
+    <div class="card" data-role="done">
+      <h3>选择规则</h3>
+      <ul>
+        <li>这个实例只放缓存（丢了能从库里重建）：<code>allkeys-lfu</code>，热点不明显就用 <code>allkeys-lru</code>。</li>
+        <li>实例里还有丢不得的 key（锁、计数、限流令牌、会话）：不要和缓存混放。这些 key 放进单独的 <code>noeviction</code> 实例；实在要混放，也别指望 <code>volatile-*</code> 护住它们，锁本身就带 TTL。</li>
+        <li>应用侧：Redis 写失败要能区分 OOM 和超时，降级查库要有限流（⑥ 第一圈第 2 条）。</li>
+      </ul>
+      <p class="result">本页往下讲：Redis 是怎么判断“满了”、怎么决定拒谁、淘汰谁，以及过期的 key 什么时候真走。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：每条命令进门前，先看一眼内存</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>used_memory</b>：Redis 通过分配器（jemalloc）记下的已分配字节数，<code>INFO memory</code> 里能看到。<code>maxmemory</code> 拿来比的就是它（扣掉少数几项，见 ⑥ 第三圈）。空库也有一千多 KB：字典、共享对象、各种缓冲。</li>
+      <li><b>命令标志</b>：每个命令在 <code>src/commands/*.json</code> 里登记了几个标志。<code>SET</code> 是 <code>WRITE, DENYOOM</code>；<code>GET</code> 是 <code>READONLY, FAST</code>；<code>DEL</code> 只有 <code>WRITE</code>；<code>EXPIRE</code> 是 <code>WRITE, FAST</code>。<code>DENYOOM</code> 的意思是“这条命令可能让内存变多，满了就别执行”。</li>
+      <li><b>三种删法、八种策略、近似 LRU、LFU 计数</b>：第一圈讲过，见 <a href="redis-eviction-expire.html">Redis 过期删除与内存淘汰</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="gate">一条命令进门：先淘汰，再决定拒不拒</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 360" role="img" aria-label="processCommand 里，设了 maxmemory 时，每条命令执行前都调用 performEvictions。内存没超就直接执行。超了且策略允许淘汰，就抽样淘汰，最多 500 微秒，每淘汰 16 个 key 看一次表，降到线下就执行；超时就交给后台定时任务接着淘汰，这条命令照样执行。策略是 noeviction 或者实在淘汰不动，返回失败：命令带 DENYOOM 就回 OOM 错误，不带就照样执行。">
+  <text x="20" y="28" class="t-h">processCommand：设了 maxmemory，每条命令都先走这一段</text>
+  <rect x="20" y="50" width="170" height="52" rx="10" class="b-cg"/>
+  <text x="105" y="73" text-anchor="middle" class="t-b">命令到了</text>
+  <text x="105" y="92" text-anchor="middle" class="t-xs">GET / SET NX / EVAL …</text>
+  <path d="M190,76 L240,76" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="244" y="50" width="200" height="52" rx="10" class="b-g2"/>
+  <text x="344" y="73" text-anchor="middle" class="t-b">performEvictions()</text>
+  <text x="344" y="92" text-anchor="middle" class="t-xs">used_memory 超没超 maxmemory</text>
+  <path d="M444,76 L520,76" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="482" y="68" text-anchor="middle" class="t-xs">没超</text>
+  <rect x="524" y="50" width="160" height="52" rx="10" class="b-good"/>
+  <text x="604" y="81" text-anchor="middle" class="t-b">执行</text>
+
+  <path d="M344,102 L344,150" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text x="352" y="130" class="t-xs">超了</text>
+  <rect x="214" y="154" width="260" height="62" rx="10" class="b-g2"/>
+  <text x="344" y="176" text-anchor="middle" class="t-b">按策略抽样，淘汰一个，再看</text>
+  <text x="344" y="194" text-anchor="middle" class="t-xs">每淘汰 16 个看一次表：最多 500 µs</text>
+  <text x="344" y="208" text-anchor="middle" class="t-xs">（tenacity 10 × 50 µs）</text>
+  <path d="M474,172 L520,172 L520,102" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="530" y="140" class="t-xs">降到线下</text>
+  <path d="M474,200 L700,200" class="e-g2" marker-end="url(#ah-g2)"/>
+  <text x="586" y="192" text-anchor="middle" class="t-xs">500 µs 到了还没够</text>
+  <rect x="704" y="166" width="236" height="68" rx="10" class="b-g2"/>
+  <text x="822" y="188" text-anchor="middle" class="t-b">后台定时任务接着淘汰</text>
+  <text x="822" y="206" text-anchor="middle" class="t-xs">evictionTimeProc</text>
+  <text x="822" y="222" text-anchor="middle" class="t-xs">这条命令照样执行（EVICT_RUNNING）</text>
+  <path d="M822,166 L822,110 L684,90" class="e-good" marker-end="url(#ah-good)"/>
+
+  <path d="M344,216 L344,262" class="e-bad" marker-end="url(#ah-bad)"/>
+  <text x="352" y="246" class="t-xs t-bad">noeviction，或者淘汰不动（volatile-* 没有带 TTL 的 key）</text>
+  <rect x="214" y="266" width="260" height="44" rx="10" class="b-bad"/>
+  <text x="344" y="293" text-anchor="middle" class="t-b">EVICT_FAIL</text>
+  <path d="M214,288 L170,288 L170,320" class="e-bad" marker-end="url(#ah-bad)"/>
+  <path d="M474,288 L560,288 L560,320" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="20" y="340" class="t-bad t-b">带 DENYOOM → 回 OOM 错误</text>
+  <text x="440" y="340" class="t-good t-b">不带 DENYOOM → 照样执行</text>
+</svg>
+  </div>
+  <figcaption>依据 Redis 8.10.3 源码：<code>server.c</code> 的 processCommand、<code>evict.c</code> 的 performEvictions 和 evictionTimeLimitUs。7.2 这一段相同。</figcaption>
+  </figure>
+
+  <div class="two">
+    <div class="card" data-role="bad">
+      <h3>带 DENYOOM：满了就拒</h3>
+      <div class="cmdchips"><code>SET</code><code>SET NX PX</code><code>SETEX</code><code>INCR</code><code>HSET</code><code>LPUSH</code><code>BF.ADD</code><code>BF.MADD</code></div>
+      <p>全景里第 5 站抢锁、第 7 站回填、上架时往布隆过滤器加 id，都在这一边。</p>
+    </div>
+    <div class="card" data-role="good">
+      <h3>不带：满了照样执行</h3>
+      <div class="cmdchips"><code>GET</code><code>EXISTS</code><code>DEL</code><code>UNLINK</code><code>EXPIRE</code><code>CONFIG SET</code><code>EVAL</code>（本身）</div>
+      <p>读不会让内存变多；<code>DEL</code>、<code>EXPIRE</code> 只会让内存变少或不变；<code>CONFIG SET</code> 留着让你改策略、调大上限来救场。</p>
+    </div>
+  </div>
+
+  <h3 id="script">Lua 脚本：看的是里面那一条</h3>
+  <p><code>EVAL</code> 本身不带 <code>DENYOOM</code>。没写 shebang 的老式脚本（第 7 站解锁那段就是）会放进门，执行到 <code>redis.call</code> 的那一条命令时再检查：这条带 <code>DENYOOM</code>、执行前内存已经超了、脚本还没写过东西，三条都满足才报 OOM。解锁脚本里只有 <code>GET</code> 和 <code>DEL</code>，所以满了也能解锁（⑤ 实测）。写了 <code>#!lua</code> shebang 的脚本，没声明 <code>no-writes</code> 也没声明 <code>allow-oom</code>，满了在入口就被拒。</p>
+
+  <h3 id="design">为什么这样设计</h3>
+  <div class="design">
+    <div class="way" data-role="cg">
+      <h4>Redis：每条命令进门前就地淘汰，按命令拒<small>选中的设计</small></h4>
+<svg viewBox="0 0 460 210" role="img" aria-label="Redis 的做法：内存超了，在执行命令的同一个线程里先淘汰，最多 500 微秒，不够再交给后台。只拒会让内存变多的命令，读和删照常。">
+  <rect x="20" y="20" width="420" height="34" rx="8" class="b-cg"/>
+  <text x="230" y="42" text-anchor="middle" class="t-s">主线程：命令到 → 超线就先淘汰 → 执行</text>
+  <rect x="20" y="70" width="200" height="54" rx="8" class="b-good"/>
+  <text x="120" y="93" text-anchor="middle" class="t-s">读、删、改配置</text>
+  <text x="120" y="112" text-anchor="middle" class="t-xs">照常：还能自救</text>
+  <rect x="240" y="70" width="200" height="54" rx="8" class="b-bad"/>
+  <text x="340" y="93" text-anchor="middle" class="t-s">SET、INCR …</text>
+  <text x="340" y="112" text-anchor="middle" class="t-xs">淘汰不动才拒</text>
+  <text x="20" y="152" class="t-s">内存最多超出一点：压线那一条，</text>
+  <text x="20" y="172" class="t-s">加上 500 µs 没淘汰完的部分。</text>
+  <text x="20" y="196" class="t-xs">⑤ 实测：2072 KB 对 2048 KB 的上限</text>
+</svg>
+    </div>
+    <div class="way" data-role="other">
+      <h4>放弃的做法：后台慢慢清，写照常进<small>或者满了整个实例只读</small></h4>
+<svg viewBox="0 0 460 210" role="img" aria-label="被放弃的做法一：写一律放行，后台线程慢慢清，写入速度超过清理速度时内存没有上界，最后被系统杀掉。做法二：满了整个实例只读，连 DEL 都不让执行，就没办法腾出空间。">
+  <rect x="20" y="20" width="420" height="34" rx="8" class="b-neu"/>
+  <text x="230" y="42" text-anchor="middle" class="t-s">写一律放行，后台另起线程清理</text>
+  <text x="20" y="80" class="t-s">写得比清得快，内存就没有上界，</text>
+  <text x="20" y="100" class="t-s">又回到②左边：被 OOM killer 杀掉。</text>
+  <rect x="20" y="120" width="420" height="34" rx="8" class="b-neu"/>
+  <text x="230" y="142" text-anchor="middle" class="t-s">满了整个实例只读</text>
+  <text x="20" y="178" class="t-s">连 DEL 都不让执行，就没办法腾地方；</text>
+  <text x="20" y="198" class="t-s">读本来不占内存，也没理由拒。</text>
+</svg>
+    </div>
+  </div>
+  <p class="verdict" data-role="cg">决定胜负的约束有三条。第一，<code>maxmemory</code> 是硬上限，超出只能是一点点，所以淘汰必须发生在写之前、在同一个线程里。第二，主线程不能被淘汰卡住太久，所以限时 500 µs，剩下的交给后台。第三，Redis 不知道每个 key 是干什么的，只知道命令会不会让内存变多。所以它按命令拒，淘汰时也只能看空闲时间、访问频率和 TTL，不认得哪个 key 是锁。</p>
+
+  <h3 id="expire">过期的 key 什么时候真走</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="两条路删过期 key。第 3 站惰性删除：GET 查字典，找到 key 先看过期时间，到期了就当场删掉，向 AOF 和从库发一条 DEL，然后回 nil；从库上不删，只回 nil。第 12 站主动过期：每秒 10 次，按游标顺序扫 expires 里的桶，每轮看 20 个 key，过期比例超过 10% 就再来一轮，最多用 25% 的 CPU 时间。">
+  <text x="20" y="28" class="t-h">两条路：有人来读时顺手删，后台按周期扫</text>
+  <rect x="20" y="46" width="440" height="230" rx="12" class="b-cg"/>
+  <text x="40" y="74" class="t-b">第 3 站 · 惰性删除</text>
+  <text x="40" y="102" class="t-s">GET product:88</text>
+  <text x="40" y="126" class="t-s">→ lookupKey 在字典里找到它</text>
+  <text x="40" y="150" class="t-s">→ expireIfNeeded：到期了吗？</text>
+  <text x="40" y="174" class="t-s">→ 到期：当场删，往 AOF 和从库发 DEL</text>
+  <text x="40" y="198" class="t-s">→ 回 nil，像它从没存在过</text>
+  <text x="40" y="232" class="t-xs">从库上不删，只回 nil，等主库传 DEL 过来</text>
+  <text x="40" y="254" class="t-xs">只删被读到的这一个；没人读的过期 key 一直占着</text>
+
+  <rect x="500" y="46" width="440" height="230" rx="12" class="b-g2"/>
+  <text x="520" y="74" class="t-b">第 12 站 · 主动过期（activeExpireCycle）</text>
+  <text x="520" y="102" class="t-s">hz 10：每秒 10 次</text>
+  <text x="520" y="126" class="t-s">按游标顺序扫 expires 的桶（不是随机抽）</text>
+  <text x="520" y="150" class="t-s">每轮看 20 个，过期的删掉</text>
+  <text x="520" y="174" class="t-s">过期比例 &gt; 10%：再来一轮</text>
+  <text x="520" y="198" class="t-s">上限：25% 的 CPU（每次约 25 ms）</text>
+  <text x="520" y="232" class="t-xs">括号里的数是 active-expire-effort = 1（默认）时的值</text>
+  <text x="520" y="254" class="t-xs">另有“快周期”：每次进事件循环前跑，最多 1 ms</text>
+</svg>
+  </div>
+  <figcaption>依据 Redis 8.10.3 的 <code>db.c</code>（lookupKey、expireIfNeeded、propagateDeletion）和 <code>expire.c</code>（activeExpireCycle）。8.x 里 expires 换成了 kvstore，扫法没变。</figcaption>
+  </figure>
+  <p>两条路合起来，会有一段时间差：key 到点了，可还没人读它，后台也还没扫到它。这段时间里它照样占着内存。<code>performEvictions</code> 也不会先挑已过期的 key 来删，它们只是和别的 key 一起被抽样。所以在 <code>noeviction</code> 下，内存被一堆已过期的 key 占满时，写入照样报 OOM，直到后台把它们扫掉（⑤ 第三段实测）。</p>
+
+  <h3 id="syntax">最少的命令</h3>
+  <div class="codebox">
+<pre><code>CONFIG SET maxmemory 2mb                    <span class="cm"># 0 = 不设上限（64 位默认）</span>
+CONFIG SET maxmemory-policy allkeys-lfu     <span class="cm"># 默认 noeviction</span>
+INFO memory      <span class="cm"># used_memory、maxmemory、mem_not_counted_for_evict</span>
+INFO stats       <span class="cm"># evicted_keys、expired_keys、expired_stale_perc、expired_time_cap_reached_count</span>
+INFO errorstats  <span class="cm"># errorstat_OOM:count=…  被拒了多少次</span>
+OBJECT FREQ product:88       <span class="cm"># LFU 计数（LFU 策略下才能用）</span>
+OBJECT IDLETIME product:88   <span class="cm"># 空闲秒数（LRU 策略下）</span></code></pre>
+  </div>
+  <p class="cap">tenacity、effort、lazyfree 这些参数放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：在交易靶场里把 Redis 写满</h2>
+    <p class="lead">用的是全景第 2～7 站那段读详情的代码（<code>ProductCache</code>）：GET → <code>SET NX PX</code> 抢锁 → 查库 → <code>SET PX</code> 回填 → Lua 解锁。查库是假的，每次 2 ms。三段实验，一个容器，约 3 分钟。</p>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">跑起来</span><span>Redis 8.10.3 容器 + Lettuce 6.8.2，代码按 JDK 8 写；<a href="https://github.com/archeu/study-labs/tree/main/java/redis/redis-oom-eviction">完整代码 →</a></span></div>
+<pre><code><span class="cm"># study-labs/java/redis/redis-oom-eviction</span>
+./run.sh            <span class="cm"># 起 redis:8.10.3-alpine（63798），oom → policy → expire 三段</span>
+./run.sh expire     <span class="cm"># 容器留着，只跑一段</span>
+./run.sh clean      <span class="cm"># 删容器</span></code></pre>
+<pre><code><span class="cm">// ProductCache.get 的骨架（fallback=true 就是“Redis 写报错就直接查库”）</span>
+String v = redis.get(key);                                      <span class="cm">// 第 2、3 站：GET 不带 DENYOOM</span>
+<span class="kw">if</span> (v != <span class="kw">null</span>) <span class="kw">return</span> v;
+<span class="kw">try</span> { ok = redis.set(lockKey, token, nx().px(3000)); }          <span class="cm">// 第 5 站：SET 带 DENYOOM</span>
+<span class="kw">catch</span> (RedisCommandExecutionException e) { <span class="kw">if</span> (!fallback) <span class="kw">throw</span> e; <span class="kw">return</span> db.apply(id); }
+…
+v = db.apply(id);                                               <span class="cm">// 第 6 站</span>
+redis.set(key, v, px(ttl));                                     <span class="cm">// 第 7 站：回填，同样带 DENYOOM</span>
+…
+redis.eval(UNLOCK_LUA, INTEGER, <span class="kw">new</span> String[]{lockKey}, token);  <span class="cm">// 第 7 站：脚本里只有 GET、DEL</span></code></pre>
+  </div>
+
+  <h3>第一段 oom：noeviction，回填 1 万个</h3>
+<pre class="console"><code>[oom] 空库 used_memory 1390.2 KB（还没存任何商品）
+  第一次失败：商品 617 ← ProductCache.java:56      <span class="cm"># 第 7 站回填；这个商品的锁是压线前最后一条写</span>
+  回填 10000 个：成功 617，失败 9383               <span class="cm"># 617 = 前 616 个 + 后来 5116 号趁内存回落塞进去 1 个</span>
+  此时 dbsize 617，used_memory 2072.3 KB，evicted_keys 0
+  内存满时逐条试：
+    GET product:1         → 命中
+    SET lock NX PX 3000   → OOM command not allowed when used memory > 'maxmemory'.
+    SET product:9999      → OOM command not allowed when used memory > 'maxmemory'.
+    EXPIRE product:1 60   → true
+    EVAL 解锁（GET+DEL）  → 0                       <span class="cm"># 脚本照样跑，锁不存在所以回 0</span>
+    DEL product:1         → 1
+    删一个以后 SET 能进吗 → OOM …                   <span class="cm"># 删 1 个（约 1 KB）不够把 2072 KB 压到线下</span>
+  20 个请求同时查没缓存的商品 9999：
+    内存没满（maxmemory 0）      拿到详情 20，报错  0，查库  1 次
+    内存满了，不降级（抛异常）   拿到详情  0，报错 20，查库  0 次
+    内存满了，降级（报错就查库） 拿到详情 20，报错  0，查库 20 次</code></pre>
+  <p class="cap"><span class="tag-real">实测</span> 另外在 <code>redis-cli</code> 里单独试过：先拿到锁再把内存压满，解锁脚本 <code>GET</code> 对上以后 <code>DEL</code> 成功，回 1；脚本里写 <code>redis.call('set', …)</code> 则报 <code>OOM … script: …, on @user_script:1.</code></p>
+
+  <h3>第二段 policy：四种策略各回填一遍</h3>
+  <p>结果就是 ③ 那张表。看两列：三种会淘汰的策略都没有 OOM，也都把拿着的锁 <code>lock:product:20001</code> 赶走了。</p>
+
+  <h3>第三段 expire：全带 2 秒 TTL 写满，到点以后多久能再写</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="736 个商品在 0 到 478 毫秒之间写入，都带 2000 毫秒 TTL，所以在 2000 到 2478 毫秒之间陆续到期。虚线是按写入时间算出的“还没到期”的个数，从 2000 毫秒的 736 线性降到 2478 毫秒的 0。实线是 dbsize：到 2225 毫秒还有 733 个，2329 毫秒 562 个，2433 毫秒 242 个，2537 毫秒 40 个，2641 毫秒 0 个。2277 毫秒之前新写入一直 OOM。">
+  <text x="20" y="24" class="t-h">到点了，不等于删了</text>
+  <rect x="80" y="40" width="424" height="160" class="b-bad" opacity=".55"/>
+  <text x="90" y="58" class="t-xs t-bad">写新商品：OOM</text>
+  <text x="520" y="58" class="t-xs t-good">写新商品：OK</text>
+  <path d="M80,200 L880,200" class="e-ink"/>
+  <path d="M80,40 L80,200" class="e-ink"/>
+  <text x="72" y="44" text-anchor="end" class="t-xs">736</text>
+  <text x="72" y="204" text-anchor="end" class="t-xs">0</text>
+  <text x="80" y="222" text-anchor="middle" class="t-xs">1800</text>
+  <text x="258" y="222" text-anchor="middle" class="t-xs">2000</text>
+  <text x="458" y="222" text-anchor="middle" class="t-xs">2225</text>
+  <text x="683" y="222" text-anchor="middle" class="t-xs">2478</text>
+  <text x="880" y="222" text-anchor="middle" class="t-xs">2700 ms</text>
+  <path d="M80,40 L257.8,40 L682.7,200 L880,200" class="e-dash" fill="none"/>
+  <polyline points="80.9,40 175.1,40 268.4,40 365.3,40.2 457.8,40.7 550.2,77.8 642.7,147.4 735.1,191.3 827.6,200 880,200" class="e-of" fill="none" stroke-width="3"/>
+  <g class="f-of"><circle cx="365.3" cy="40.2" r="4"/><circle cx="457.8" cy="40.7" r="4"/><circle cx="550.2" cy="77.8" r="4"/><circle cx="642.7" cy="147.4" r="4"/><circle cx="735.1" cy="191.3" r="4"/><circle cx="827.6" cy="200" r="4"/></g>
+  <text x="300" y="112" class="t-xs">虚线：按写入时间，还没到期的个数</text>
+  <text x="560" y="100" class="t-xs t-of">实线：dbsize（还没被删的）</text>
+  <text x="372" y="34" class="t-xs">2225 ms：已到期约 350 个，只删了 3 个</text>
+  <text x="80" y="250" class="t-s">736 个商品在 0～478 ms 写入，带 PX 2000，于是在 2000～2478 ms 陆续到期。</text>
+  <text x="80" y="272" class="t-s">两条线之间的那块，就是“到点了还占着内存”的 key。到 2329 ms 后台才删掉一大批，新商品才写得进。</text>
+</svg>
+  </div>
+  <figcaption><span class="tag-real">实测</span> 每 100 ms 采一次：2121 ms 735、2225 ms 733、2329 ms 562、2433 ms 242、2537 ms 40、2641 ms 0；2225 ms 及以前 OOM，2329 ms 起 OK。灰框画到两次采样中间（约 2277 ms）。</figcaption>
+  </figure>
+  <p class="done-box"><b>到这里已经能交差了</b>能说清 Redis 写满时哪些命令被拒，能给缓存实例配上 <code>maxmemory</code> 和 <code>allkeys-lfu</code>，知道锁不能和缓存混放在会淘汰的实例里。<br><b>还没处理的细节</b>降级查库怎么限流（<a href="#p2">⑥-2</a>）；<code>maxmemory</code> 到底算哪些内存（<a href="#p5">⑥-5</a>）；淘汰时主线程会不会卡（<a href="#deep">⑥ 第三圈</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="g2">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+
+  <h3 id="lab-h">实验台：内存满了，一个请求在全景里走一遍</h3>
+  <p>挑一个淘汰策略、一种内存状态、代码降不降级，看 20 个请求同时查一个没缓存的商品（9999 号）时，第 2～7 站各发生什么。先猜：数据库会被查几次？</p>
+  <div class="lab" id="lab" data-role="g2">
+    <div class="ctl-grid">
+      <div class="ctl"><span class="lbl">淘汰策略</span>
+        <select id="c-pol"><option value="noeviction">noeviction（默认）</option><option value="allkeys-lru">allkeys-lru</option><option value="allkeys-lfu">allkeys-lfu</option><option value="volatile-lru">volatile-lru</option></select></div>
+      <div class="ctl"><span class="lbl">内存</span>
+        <select id="c-mem"><option value="ok">没满</option><option value="full" selected>满了</option><option value="stale">满了，但大半是刚到期还没删的</option></select></div>
+      <div class="ctl"><span class="lbl">Redis 写报错时</span>
+        <select id="c-fb"><option value="0">不降级：抛异常</option><option value="1">降级：直接查库</option></select></div>
+    </div>
+    <div class="guess" id="guess">
+      <p><b>先猜：</b>20 个请求，数据库被查几次？</p>
+      <div class="opts">
+        <button type="button" data-g="0">0 次</button>
+        <button type="button" data-g="1">1 次</button>
+        <button type="button" data-g="20">20 次</button>
+        <button type="button" data-g="skip" class="skip">不猜了，直接看</button>
+      </div>
+      <p class="res" id="g-res" hidden></p>
+    </div>
+    <div id="out" hidden>
+      <ol class="steps-out" id="steps"></ol>
+      <div class="res-grid" id="tiles" style="margin-top:12px">
+        <div class="tile" data-role="done"><small>拿到详情</small><b id="t-ok"></b></div>
+        <div class="tile" data-role="bad"><small>报错</small><b id="t-err"></b></div>
+        <div class="tile" data-role="bk"><small>查库</small><b id="t-db"></b></div>
+        <div class="tile" data-role="rn"><small>锁</small><b id="t-lock"></b></div>
+      </div>
+      <p class="lab-res" id="verdict" style="margin-top:12px"></p>
+    </div>
+  </div>
+  <p class="cap">“没满”“满了”在 noeviction 下的三组数字是 ⑤ 实测；会淘汰的策略下 20 个请求的结果按 ④ 推出，锁被淘汰这件事来自 ⑤ 第二段实测。</p>
+
+  <h3>第一圈 · 注意事项：不知道就会出事故</h3>
+  <div class="pits">
+    <div class="pit" id="p1"><b><em>1</em>配了 maxmemory，没改策略，全站写入 OOM<a class="root" href="#gate">← ④ 按命令拒</a></b>
+      <dl><dt>现象</dt><dd>读都正常，凡是没缓存的商品详情全部 500；日志里是 <code>RedisCommandExecutionException: OOM command not allowed …</code>。<span class="seen">实测：第 617 个起 9383 次 OOM，evicted_keys 0</span></dd>
+      <dt>根源</dt><dd><code>maxmemory-policy</code> 默认 <code>noeviction</code>，淘汰直接返回失败，带 <code>DENYOOM</code> 的 <code>SET NX</code>（第 5 站）、<code>SET</code>（第 7 站）都被拒。</dd>
+      <dt>做法</dt><dd class="fix">纯缓存实例改成 <code>allkeys-lfu</code> 或 <code>allkeys-lru</code>，写进配置文件；监控 <code>errorstat_OOM</code>，有一次就报警。</dd></dl></div>
+    <div class="pit" id="p2"><b><em>2</em>降级写法把 OOM 变成打库<a class="root" href="#s5">← ⑤ 实测</a></b>
+      <dl><dt>现象</dt><dd>代码里“Redis 写报错就直接查库”，页面不报错了，数据库 QPS 翻了几十倍。<span class="seen">实测：20 个并发请求，查库 20 次；正常是 1 次</span></dd>
+      <dt>根源</dt><dd>抢锁本身就是一条写，满了锁也抢不到，挡击穿的那道防线失效（<a href="cache-five-holes.html">88 号过期那一刻</a>）。</dd>
+      <dt>做法</dt><dd class="fix">降级时在本机合并同一个 key 的加载：第 1 站的 Caffeine 用 <code>cache.get(key, loader)</code>，同一个 key 一台机器只查一次；再给降级路径加限流。区分 OOM 和超时：OOM 是配置问题，要报警，不该只是悄悄降级。</dd></dl></div>
+    <div class="pit" id="p3"><b><em>3</em>锁被淘汰，两个线程一起重建<a class="root" href="#design">← ④ 淘汰不认得锁</a></b>
+      <dl><dt>现象</dt><dd>缓存实例开了 <code>allkeys-lfu</code>，偶尔看到同一个商品在同一秒被查库两次，日志里两个线程都“抢到了锁”。<span class="seen">实测：三种淘汰策略都把拿着的 lock:product:20001 赶走了</span></dd>
+      <dt>根源</dt><dd>淘汰只看空闲时间、访问频率、TTL。LFU 下新写的 key 计数从 5 起，刚写进去的锁和一个冷门商品一样“不常用”；锁带着 TTL，<code>volatile-*</code> 也会挑它。</dd>
+      <dt>做法</dt><dd class="fix">锁放进单独的 <code>noeviction</code> 实例；重建结果用版本号或 fencing token 写回（<a href="redis-lock-expire-fencing.html">锁过期时 A 还在查库</a>），锁丢了也不会写错。</dd></dl></div>
+    <div class="pit" id="p4"><b><em>4</em>key 都过期了，还是写不进去<a class="root" href="#expire">← ④ 两条删除路的时间差</a></b>
+      <dl><dt>现象</dt><dd>一批活动商品 TTL 一样，整点一起到期，到期之后那几百毫秒照样 OOM。<span class="seen">实测：第一批到期 225 ms 后只删了 3 个，约 0.3 s 后才恢复写入</span></dd>
+      <dt>根源</dt><dd>没人读的过期 key 要等主动过期扫到；淘汰也不会先挑过期的。<code>noeviction</code> 下这段时间差就是 OOM 窗口。</dd>
+      <dt>做法</dt><dd class="fix">缓存实例不用 <code>noeviction</code>；TTL 加随机数（第 7 站已经做了）；别让内存贴着上限跑，常态留 20% 以上余量。</dd></dl></div>
+    <div class="pit" id="p5"><b><em>5</em>maxmemory 设成“数据量”，实例一开就满<a class="root" href="#s1">← ① 空库 1386 KB</a></b>
+      <dl><dt>现象</dt><dd>按“100 万个商品 × 838 字节 ≈ 800 MB”配了 <code>maxmemory 800mb</code>，上线没多久开始淘汰。</dd>
+      <dt>根源</dt><dd><code>maxmemory</code> 比的是整个 <code>used_memory</code>：Redis 自身、普通客户端的输入输出缓冲、复制 backlog 都算在里面。只扣两三项：从库输出缓冲超出 backlog 的部分、AOF 缓冲（<code>mem_not_counted_for_evict</code>）。</dd>
+      <dt>做法</dt><dd class="fix">先按数据量估（<a href="redis-encoding-memory.html">648 字节的详情占 805 字节</a>），再加 20%～30%；客户端多、有大查询的，用 <code>maxmemory-clients</code>（默认 0，不限）给连接缓冲单独设上限。<code>maxmemory</code> 本身别超过机器内存的 60%～75%，fork 做持久化时还要写时复制。</dd></dl></div>
+    <div class="pit" id="p6"><b><em>6</em>开了 LFU，刚回填的 key 先被赶走<a class="root" href="#s3">← ③ 表里 LFU 那一行</a></b>
+      <dl><dt>现象</dt><dd>满载时，刚重建好的商品没过几秒又没了，再走一次第 5～7 站。<span class="seen">实测：最近 1000 个 LRU 留 633 个，LFU 只留 445 个</span></dd>
+      <dt>根源</dt><dd>新 key 计数从 5 起，淘汰池按 255 − 计数排；老的热 key 计数高，新 key 和冷 key 一样排在前面。这是 LFU 的本意：热 key 不被一次性的新数据冲掉。</dd>
+      <dt>做法</dt><dd class="fix">长尾商品多、热点明显就接受它；如果新回填的 key 很快会被反复读（比如刚上架的活动商品），用 <code>allkeys-lru</code> 或预热时多读几次。</dd></dl></div>
+  </div>
+
+  <h3>第二圈 · 使用规范：团队里怎么配、怎么写</h3>
+  <div class="rules-list">
+    <div class="rl"><b>一个实例一种用途</b><p>缓存实例：<code>maxmemory</code> + <code>allkeys-lfu</code>；锁、计数、限流、会话：单独的 <code>noeviction</code> 实例。防的是 ⑥-1 和 ⑥-3。</p></div>
+    <div class="rl"><b>配置写进文件，启动后核对</b><p><code>CONFIG GET maxmemory*</code> 写进上线检查单。防的是“测试环境改过、生产没改”。</p></div>
+    <div class="rl"><b>四个指标进监控</b><p><code>used_memory / maxmemory</code>、<code>evicted_keys</code> 的速率、<code>errorstat_OOM</code>、<code>expired_stale_perc</code>（过期但没删的估计比例）。防的是 ⑥-1、⑥-4 发生了没人知道。</p></div>
+    <div class="rl"><b>Redis 写失败要分类</b><p>OOM 报警加限流降级，超时走重试或熔断。防的是 ⑥-2。</p></div>
+    <div class="rl"><b>写缓存一律带 TTL，加随机数</b><p>改值时用 <code>SET … KEEPTTL</code> 或重新带上 TTL。防的是 key 永不过期越积越多（第一圈页的坑）和整点集中到期（⑥-4）。</p></div>
+    <div class="rl"><b>新脚本写 shebang 并标 flags</b><p>只读脚本写 <code>#!lua flags=no-writes</code>，满了也能跑；会写的脚本不加 <code>allow-oom</code>。防的是脚本在内存满时写了一半。</p></div>
+  </div>
+
+  <h3 id="deep">第三圈 · 深处：淘汰卡不卡主线程、过期扫得够不够快</h3>
+  <div class="rules-list">
+    <div class="rl"><b>淘汰的时间预算：500 µs，然后交给后台</b><p><code>maxmemory-eviction-tenacity</code> 默认 10，时间上限是 50 µs × 10 = 500 µs；11～99 按 500 × 1.15<sup>(t−10)</sup> µs 增长，100 不限时。每淘汰 16 个 key 才看一次表。超时后返回 <code>EVICT_RUNNING</code>：这条写照样执行，同时注册一个定时任务在事件循环里接着淘汰。所以 <code>used_memory</code> 会短暂超过上限，写入速度一直快过淘汰速度时，超出的部分会越来越多，这时可以调大 tenacity，代价是写命令的延迟变高。</p></div>
+    <div class="rl"><b>主线程释放大 key 的代价</b><p>淘汰、过期删掉一个 200 KB 的大 key，默认在主线程里一个个释放元素。<code>lazyfree-lazy-eviction</code>、<code>lazyfree-lazy-expire</code> 打开后交给后台线程释放。8.10.3 和 7.2 的默认值都是 <code>no</code>（实测 <code>CONFIG GET lazyfree*</code>，源码对照两个版本的 config.c）。打开 <code>lazyfree-lazy-expire</code> 后，传给 AOF 和从库的也从 <code>DEL</code> 变成 <code>UNLINK</code>。</p></div>
+    <div class="rl"><b>主动过期：扫，不是抽</b><p>7.x 起 activeExpireCycle 用游标顺序扫 expires 的桶（7.2 是 dictScan，8.x 是 kvstoreScan），每轮看 20 个，过期比例超过 10% 再来一轮，慢周期最多 25% CPU。<code>active-expire-effort</code> 调到 N，这三个数变成 20 + 5(N−1)、10 − (N−1)%、25 + 2(N−1)%。<code>expired_time_cap_reached_count</code> 一直涨，说明慢周期每次都用满了时间还没扫完。</p></div>
+    <div class="rl"><b>快周期的一个 bug，8.10.1 修了</b><p>每次进事件循环前的“快周期”（最多 1 ms）本该在过期比例偏高时触发。7.2 里拿 0～1 的小数和整数 10 比，条件永远成立不了，快周期实际只在上一轮慢周期超时时才跑。8.10.1 的发行说明：<code>#15412 Unit mismatch disables the FAST expire cycle stale trigger</code>。⑤ 第三段用的 8.10.3 已经修过。</p></div>
+  </div>
+  <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>版本</th><th>和这一页有关的变化</th></tr></thead>
+      <tbody>
+        <tr><td>6.0</td><td>主动过期改写，加 <code>active-expire-effort</code>；<code>SET … KEEPTTL</code></td></tr>
+        <tr><td>7.0</td><td>脚本 shebang 和 flags（<code>no-writes</code>、<code>allow-oom</code>）；<code>maxmemory-clients</code></td></tr>
+        <tr><td>7.2</td><td>第一圈页按这个版本写；本页的淘汰流程、OOM 规则、tenacity 公式、LFU 初值和 8.10 相同</td></tr>
+        <tr><td>7.4</td><td>Hash 字段可以单独过期（<code>HEXPIRE</code>）；8.x 的主动过期里多了一段处理字段过期</td></tr>
+        <tr><td>8.x</td><td>db 换成 kvstore，过期扫描、淘汰抽样按 dict 分开做，算法没变</td></tr>
+        <tr><td>8.6</td><td>新策略 <code>volatile-lrm</code>、<code>allkeys-lrm</code>：按最近一次<b>修改</b>的时间淘汰，只读不算（发行说明原文 “least recently modified”）</td></tr>
+        <tr><td>8.10.1</td><td>修快周期的触发条件（#15412）；不计入 maxmemory 的内存多了槽迁移连接的输出缓冲</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <h3>这一层没有尽头</h3>
+  <ul class="next">
+    <li><code>allkeys-lrm</code>（8.6）放到商品缓存上：读多写少的详情，按“最近修改”淘汰会不会比 LRU 更合适</li>
+    <li>从库上的过期和淘汰：<code>replica-ignore-maxmemory</code> 默认开，从库内存比主库大时怎么办；读从库时第 3 站看到的是什么</li>
+    <li>内存碎片：大量淘汰和改价以后 <code>mem_fragmentation_ratio</code> 升高，<code>activedefrag</code> 的代价</li>
+    <li>集群里每个分片各算各的 <code>maxmemory</code>：热 key 所在分片先满（<a href="redis-ha-cluster.html">主从、哨兵与集群</a>）</li>
+    <li>Caffeine 的 W-TinyLFU 和 Redis 的 LFU 比一比：第 1 站和第 3 站各用一套淘汰，热点判断会不会打架</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到第⑤步：改一改交易靶场</h2>
+  </div>
+  <ol class="ex">
+    <li><b>锁搬家（⑥-3）</b>：<code>ProductCache</code> 的锁改用第二个 Redis 实例（<code>noeviction</code>），缓存实例用 <code>allkeys-lfu</code>。重跑 <code>policy</code>，锁还会丢吗？OOM 又会出现在哪个实例上？</li>
+    <li><b>降级加单飞（⑥-2）</b>：在降级分支前加一层 <code>ConcurrentHashMap&lt;Long, CompletableFuture&lt;String&gt;&gt;</code>，同一个 id 只让一个线程查库。重跑 <code>oom</code>，“内存满了，降级”那一行查库变成几次？</li>
+    <li><b>过期窗口（⑥-4）</b>：<code>expire</code> 段加一行 <code>CONFIG SET active-expire-effort 10</code>，先猜 OOM 窗口变长还是变短，再跑，顺便看 <code>expired_time_cap_reached_count</code>。</li>
+  </ol>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>Redis 写满后按命令拒：读、删、改配置照常，带 DENYOOM 的写被拒；会淘汰的策略能让写继续，但淘汰不认得锁；过期了的 key 要等后台扫到才腾出地方。</p></details>
+    <details><summary>2. 只配 maxmemory 不改策略，为什么挡击穿的锁也失效了？</summary><p>④：抢锁用的 <code>SET NX PX</code> 也是 <code>SET</code>，带 <code>DENYOOM</code>。<code>noeviction</code> 下淘汰直接失败，这条写被拒，锁抢不到。代码不降级就报错，降级就每个请求各查一次库。</p></details>
+    <details><summary>3. 内存满时，第 7 站的 Lua 解锁会不会也被拒？</summary><p>不会。<code>EVAL</code> 本身不带 <code>DENYOOM</code>，没写 shebang 的脚本执行到每条 <code>redis.call</code> 时才检查；里面只有 <code>GET</code> 和 <code>DEL</code>，都不带 <code>DENYOOM</code>（⑤ 实测解锁成功）。如果脚本里有 <code>SET</code>，那一条会报 OOM。</p></details>
+    <details><summary>4. 预测：把策略改成 volatile-lru，但缓存都没设 TTL，只有锁带 TTL。写满以后会怎样？</summary><p>④：<code>volatile-*</code> 只从带 TTL 的 key 里挑。能挑的只有锁，锁被一把把赶走；锁也没了以后淘汰不动，返回 <code>EVICT_FAIL</code>，带 <code>DENYOOM</code> 的写开始 OOM，和 <code>noeviction</code> 一样，还多赔了锁。</p></details>
+    <details><summary>5. 预测：写入速度一直比淘汰快（比如批量导入），used_memory 会停在 maxmemory 吗？</summary><p>不会，会持续超出。每条命令前最多淘汰 500 µs，超时就返回 <code>EVICT_RUNNING</code>，命令照样执行，剩下的交给后台定时任务。写得比淘得快，超出部分就越积越多；只有淘汰彻底失败（没东西可淘）才开始拒写。调大 <code>maxmemory-eviction-tenacity</code> 能多淘一点，代价是每条写更慢。</p></details>
+    <details><summary>6. 放回全景：第 3、12 站前后各发生了什么？这一页讲的东西出问题，整条链路会怎样？</summary><p>第 2 站 Lettuce 把 <code>GET product:88</code> 发过来，第 3 站主线程查字典，到期就当场删（惰性），没有就回 nil，接着第 4 站问布隆过滤器、第 5 站抢锁、第 6 站查库、第 7 站回填；第 12 站一直在后台扫过期、到上限就淘汰。这一页出问题有三种结局：<code>noeviction</code> 写满，第 5、7 站一起 OOM，请求要么报错要么全打到第 6 站的库；淘汰赶走了锁，第 5 站的防线漏了，同一个商品被重建两次；过期 key 没扫完，刚到期那一阵照样 OOM。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。Redis 8.10.3（本机 Docker 容器 <code>redis:8.10.3-alpine</code>，jemalloc 5.3.0，除 maxmemory 和策略外全默认），Lettuce 6.8.2，代码按 JDK 8 写、在 JDK 17 上跑，本机 2 核 ARM。</p>
+  <p>标“实测”的都在本机跑过：<code>oom</code>、<code>policy</code>、<code>expire</code> 三段各跑了两遍以上，具体数字每遍差几个（第一遍 <code>policy</code> 的锁 key 落在回填范围里，被自己卡住，改到 20001 后重跑；第二遍边数边淘汰，改成先停住淘汰再数）。<code>redis-cli</code> 单独验证了脚本内 SET 报 OOM、拿着锁时解锁成功。淘汰流程、DENYOOM 标志、脚本 OOM 规则、tenacity 公式、主动过期参数、lazyfree 默认值、LFU 初值、不计入 maxmemory 的几项，对照的是 redis 8.10.3 和 7.2.5 的源码（server.c、evict.c、expire.c、db.c、script.c、eval.c、config.c、commands/*.json）；BF 命令的标志来自 RedisBloom v8.10.1 的 rebloom.c；版本变化取自 8.6.0、8.10.1 的发行说明。</p>
+  <p>相关：<a href="../java/pano-j07-product-detail-cache.html">全景：一次商品详情查询</a> · <a href="redis-eviction-expire.html">Redis 过期删除与内存淘汰（第一圈）</a> · <a href="cache-five-holes.html">88 号过期那一刻</a> · <a href="redis-lock-expire-fencing.html">锁过期时 A 还在查库</a> · <a href="redis-encoding-memory.html">648 字节的详情占 805 字节</a> · <a href="../java/roadmap.html#j07">Java 地图 J07</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+function chainSim(pol, mem, fb){
+  var full = mem !== 'ok', noev = pol === 'noeviction', N = 20;
+  var steps = [], r = {ok:0, err:0, db:0, lock:'', notes:[]};
+  var lockOom = full && noev;
+  steps.push({st:'第 2、3 站', role:'cg', cmd:'GET product:9999',
+    res: mem === 'stale' ? '回 nil。GET 不带 DENYOOM，满了照样执行；要是正好读到一个到期的 key，会当场删掉它，但只删这一个' : '回 nil。GET 不带 DENYOOM，满了照样执行'});
+  if (!full) {
+    steps.push({st:'第 5 站', role:'rn', cmd:'SET lock:product:9999 … NX PX 3000', res:'1 个请求抢到 OK，另外 19 个回 nil，每 10 ms 回头看缓存'});
+  } else if (noev) {
+    steps.push({st:'第 5 站', role:'bad', cmd:'SET lock:product:9999 … NX PX 3000',
+      res:'OOM：noeviction 淘汰直接失败，SET 带 DENYOOM，被拒' + (mem === 'stale' ? '（大半 key 已到期，可后台还没扫到，照样算占用）' : '')});
+  } else {
+    steps.push({st:'第 5 站', role:'g2', cmd:'SET lock:product:9999 … NX PX 3000', res:'先按 ' + pol + ' 抽样淘汰 1～2 个 key，降到线下再执行：1 个请求抢到 OK'});
+  }
+  if (!lockOom) {
+    steps.push({st:'第 6 站', role:'bk', cmd:'SELECT … WHERE id=9999', res:'只有抢到锁的那 1 个请求查库'});
+    steps.push({st:'第 7 站', role: full ? 'g2' : 'of', cmd:'SET product:9999 … PX', res: full ? '又淘汰 1 个左右，回填 OK；另外 19 个请求下一次 GET 就命中' : '回填 OK；另外 19 个请求下一次 GET 就命中'});
+    steps.push({st:'第 7 站', role:'of', cmd:'EVAL 解锁（GET + DEL）', res:'OK：脚本里没有带 DENYOOM 的命令'});
+    r.ok = N; r.db = 1;
+    if (full) {
+      r.lock = '可能被赶';
+      r.notes.push(pol === 'allkeys-lfu'
+        ? '锁是刚写的 key，LFU 计数从 5 起，和冷门商品一样排在淘汰池前面。重建期间锁被赶走，第二个请求也会抢到锁、也去查库（⑤ 实测锁被淘汰）。'
+        : (pol === 'volatile-lru' ? '锁带着 TTL，volatile-lru 照样会挑它；锁刚写进来、空闲时间短，被挑中的机会比老 key 小，但不是零（⑤ 实测：拿了 30 秒没动的锁被赶走了）。'
+                                  : '锁刚写进来、空闲时间短，LRU 下被挑中的机会比老 key 小，但不是零（⑤ 实测：拿了 30 秒没动的锁被赶走了）。'));
+    } else r.lock = '正常';
+  } else if (fb) {
+    steps.push({st:'第 6 站', role:'bad', cmd:'SELECT … WHERE id=9999', res:'降级：20 个请求各查一次库'});
+    steps.push({st:'第 7 站', role:'bad', cmd:'SET product:9999 … PX', res:'没走到（降级分支直接返回）；就算走到也会 OOM，下一个请求还是没命中'});
+    r.ok = N; r.db = N; r.lock = '抢不到';
+    r.notes.push('页面不报错，压力全转到数据库，挡击穿的锁形同虚设。');
+  } else {
+    steps.push({st:'第 6 站', role:'other', cmd:'SELECT …', res:'没走到：第 5 站的异常直接抛给调用方'});
+    r.err = N; r.lock = '抢不到';
+    r.notes.push('20 个请求全部报错，用户看到 500；已经缓存的商品不受影响。');
+  }
+  if (mem === 'stale' && noev) r.notes.push('等后台主动过期把到期的 key 扫掉（⑤ 实测约 0.3 s），写入才恢复。');
+  if (mem === 'stale' && !noev) r.notes.push('淘汰不会先挑已到期的 key，它们和别的 key 一起被抽样；到期 key 多，抽中它们的机会也大。');
+  return {steps:steps, r:r};
+}
+/*SIM-END*/
+(function(){
+  function $(id){ return document.getElementById(id); }
+  var guessed = null;
+  function cur(){ return chainSim($('c-pol').value, $('c-mem').value, $('c-fb').value === '1'); }
+  function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+  function render(){
+    var o = cur(), ol = $('steps');
+    ol.innerHTML = o.steps.map(function(s){
+      return '<li data-role="' + s.role + '"><b>' + s.st + '</b><span><code>' + esc(s.cmd) + '</code> → ' + esc(s.res) + '</span></li>';
+    }).join('');
+    $('t-ok').textContent = o.r.ok; $('t-err').textContent = o.r.err; $('t-db').textContent = o.r.db + ' 次'; $('t-lock').textContent = o.r.lock;
+    $('verdict').textContent = o.r.notes.join(' ');
+    $('verdict').setAttribute('data-role', o.r.err ? 'bad' : (o.r.db > 1 ? 'bad' : (o.r.lock === '可能被赶' ? 'warn' : 'done')));
+    if (guessed !== null) showGuess();
+  }
+  function showGuess(){
+    var db = cur().r.db, btns = document.querySelectorAll('#guess .opts button');
+    btns.forEach(function(b){ b.classList.remove('right','wrong'); var g = b.getAttribute('data-g'); if (g === 'skip') return; if (+g === db) b.classList.add('right'); else if (g === guessed) b.classList.add('wrong'); });
+    var res = $('g-res'); res.hidden = false;
+    if (guessed === 'skip') res.textContent = '数据库查了 ' + db + ' 次。';
+    else res.textContent = (+guessed === db ? '猜对了：' : '猜错了：') + '数据库查了 ' + db + ' 次。' +
+      (db === 1 ? '锁抢得到（没满，或者满了但能淘汰），只有拿锁的那个查库。' : db === 20 ? '锁的 SET NX 被 OOM 拒了，降级分支让每个请求各查一次。' : '锁抢不到，又没有降级，请求在第 5 站就报错了，根本没走到查库。');
+    $('out').hidden = false;
+  }
+  document.querySelectorAll('#guess .opts button').forEach(function(b){
+    b.addEventListener('click', function(){ guessed = b.getAttribute('data-g'); render(); });
+  });
+  ['c-pol','c-mem','c-fb'].forEach(function(id){
+    $(id).addEventListener('change', function(){
+      guessed = null; $('out').hidden = true; $('g-res').hidden = true;
+      document.querySelectorAll('#guess .opts button').forEach(function(b){ b.classList.remove('right','wrong'); });
+    });
+  });
+  render(); $('out').hidden = true;
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
