@@ -168,6 +168,7 @@
 | # | 页面 | 内容 |
 |---|------|------|
 | 01 | [三高知识地图](https://archeu.github.io/study-notes/arch/three-highs-map.html) | 高性能、高并发、高可用是同一本账：Little 定律算线程和连接、可用率串联相乘并联互补、超时舱壁降级为什么缺一不可、知识点挂在请求链路（含网络 IO、服务治理）和投产六关上、日常开发和投产两张清单、积分卡住时四种写法实测，线程账实验台 |
+| 02 | [3 台 TC 挂了 2 台，下单直接报错：CAP、BASE 与一致性模型](https://archeu.github.io/study-notes/arch/cap-base-consistency.html) | 分区时拒绝还是先答、PACELC、一致性模型五级尺子、多数派与 W+R>N、BASE 软状态的期限和收尾、七个误用，3 副本抢券实验台 |
 
 ## JDK
 

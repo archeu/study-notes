@@ -1,0 +1,1298 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>3 台 TC 挂了 2 台，下单直接报错：CAP、BASE 与一致性模型</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J09 knowledge point 1 (CAP, BASE, consistency models), stations 3, 7, 11 of the J09 panorama, design-thought type. Roles: pd = consistency first / CP / majority (TC Raft), of = availability first / AP / BASE (page accent), bk = the three business DBs, cg = consistency-model ladder / what the reader sees, rn = network partition, g2 = latency (PACELC else-branch). Fixed: bad = wrong result, good = correct, other = old way. Interaction: one quorum bench (pick W/R, partition share, replication lag, guess double-locked coupons, see counts from the same simulation as the Java lab). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>架构</span><span aria-hidden="true">/</span><span class="tb-here">CAP、BASE 与一致性模型</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+    <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-of"/></marker>
+    <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bk"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">CAP · PACELC · BASE · 线性一致 · 顺序一致 · 因果一致 · 读己之写 · 最终一致 · 多数派与 W+R&gt;N · JDK 17 跑的 3 副本模拟</p>
+  <h1>3 台 TC 挂了 2 台，下单直接报错：CAP、BASE 与一致性模型</h1>
+  <p class="lead">网络断开（分区）不是你能选的，它一定会发生。CAP 要你选的只是断开的那一刻：联系不上多数派的节点，是<b>拒绝回答</b>（选 C），还是<b>拿手上可能过期的数据先答</b>（选 A）。没断开时也在取舍：多等一次复制，换来读到最新（PACELC）。选了 A，就要配上 BASE：中间状态有名字、有期限、有人收尾，“最终一致”才不是一句空话。一致性模型是量“读到的有多新”的尺子：<b>线性一致 → 顺序 → 因果 → 读己之写 → 最终一致</b>，越往下越便宜，分区时越能继续服务，也越容易读到旧数据。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j09-order-across-three-dbs.html#s-3">一次下单跨三个库 · 第 3、7、11 站</a></span><span>地图：<a href="../java/roadmap.html#j09">J09 · CAP、BASE 与一致性模型</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>J09 的第一个下钻知识点，给后面几页发词汇。分布式事务、幂等、超时、Raft 那几页都会用到这里的词：“第 ④⑤⑥ 站那几十毫秒里三个库不一样，算不算错”“TC 为什么宁可报错”“对账看到对不上，是 bug 还是还没到”。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：订单 9527 路上的三个“这算不算错”</h2>
+  </div>
+  <p class="lead">在全景第 3、7、11 站，这一步要解决的是同一件事：<b>几份数据暂时对不上的时候，系统该怎么表现，什么时候算出了错。</b>先看全景里三处真实的“对不上”。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="三个场景。左：第 4、5、6 站之后，订单库里 9527 是 CREATING，库存冻结 2 件，券是 LOCKED，三个库都只是预留，演练时要挂 60 秒。中：第 3、7 站，TC 集群 3 个节点挂了 2 个，剩下的 tc-3 收到开事务的请求，回了报错。右：第 11 站，对账任务读从库，主库上券已经回到 UNUSED，从库还是 LOCKED，看起来对不上。">
+  <text x="20" y="24" class="t-h">同一单，三处“对不上”</text>
+  <!-- col 1 -->
+  <rect x="20" y="40" width="290" height="270" rx="14" class="f-card e-mut"/>
+  <text x="36" y="64" class="t-bk">第 ④⑤⑥ 站之后 · 几十毫秒到 60 秒</text>
+  <rect x="40" y="80" width="250" height="40" rx="8" class="f-bkt e-bk"/><text x="54" y="105" class="t-mono">order_db   9527 CREATING</text>
+  <rect x="40" y="128" width="250" height="40" rx="8" class="f-bkt e-bk"/><text x="54" y="153" class="t-mono">inventory  可售 48 · 冻结 2</text>
+  <rect x="40" y="176" width="250" height="40" rx="8" class="f-bkt e-bk"/><text x="54" y="201" class="t-mono">coupon_db  MINUS20 LOCKED</text>
+  <text x="40" y="240" class="t-s">三个库都改了，可都只是“预留”。</text>
+  <text x="40" y="260" class="t-s">演练时订单服务被 kill -9，要挂满 60 秒。</text>
+  <text x="40" y="292" class="t-of">这算不一致吗？算错吗？</text>
+  <!-- col 2 -->
+  <rect x="335" y="40" width="290" height="270" rx="14" class="f-card e-mut"/>
+  <text x="351" y="64" class="t-pd">第 3、7 站 · TC 集群</text>
+  <circle cx="400" cy="120" r="28" class="f-pdt e-pd"/><text x="400" y="125" text-anchor="middle" class="t-b">tc-1</text>
+  <circle cx="480" cy="120" r="28" class="f-pdt e-pd"/><text x="480" y="125" text-anchor="middle" class="t-b">tc-2</text>
+  <path d="M378,98 L422,142 M422,98 L378,142 M458,98 L502,142 M502,98 L458,142" class="e-bad"/>
+  <circle cx="560" cy="120" r="28" class="f-pdt e-pd"/><text x="560" y="125" text-anchor="middle" class="t-b">tc-3</text>
+  <rect x="470" y="182" width="140" height="34" rx="8" class="f-neut e-mut"/><text x="540" y="204" text-anchor="middle" class="t-s">订单服务 begin</text>
+  <path d="M552,182 L558,152" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text x="351" y="196" class="t-bad">✕ 凑不够多数派，</text>
+  <text x="351" y="214" class="t-bad">  开不了全局事务</text>
+  <text x="351" y="250" class="t-s">tc-3 自己明明活着，</text>
+  <text x="351" y="270" class="t-s">却宁可报错，也不自己拍板。</text>
+  <text x="351" y="292" class="t-of">为什么不让它先顶着？</text>
+  <!-- col 3 -->
+  <rect x="650" y="40" width="290" height="270" rx="14" class="f-card e-mut"/>
+  <text x="666" y="64" class="t-cg">第 11 站 · 对账</text>
+  <rect x="670" y="82" width="120" height="56" rx="8" class="f-bkt e-bk"/><text x="730" y="104" text-anchor="middle" class="t-b">券库 主</text><text x="730" y="124" text-anchor="middle" class="t-mono">UNUSED</text>
+  <rect x="810" y="82" width="120" height="56" rx="8" class="f-bkt e-bk"/><text x="870" y="104" text-anchor="middle" class="t-b">券库 从</text><text x="870" y="124" text-anchor="middle" class="t-mono">LOCKED</text>
+  <path d="M790,110 L806,110" class="e-g2" marker-end="url(#ah-ink)"/>
+  <text x="798" y="156" text-anchor="middle" class="t-g2">binlog 晚到 3 秒</text>
+  <rect x="770" y="180" width="160" height="34" rx="8" class="f-cgt e-cg"/><text x="850" y="202" text-anchor="middle" class="t-s">对账任务读从库</text>
+  <path d="M870,180 L870,142" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text x="666" y="250" class="t-s">订单已 CANCELLED，</text>
+  <text x="666" y="270" class="t-s">从库上券还 LOCKED：报警。</text>
+  <text x="666" y="292" class="t-of">是 bug，还是还没到？</text>
+</svg>
+  </div>
+  </figure>
+  <div class="q3">
+    <div class="fact" data-role="bk"><h4>要一个词：软状态<small>第 ④⑤⑥ 站</small></h4><p>中间态是设计出来的，不是半截数据。要说清它对谁可见、最多挂多久、谁来收尾。</p></div>
+    <div class="fact" data-role="pd"><h4>要一个判断：分区时选 C<small>第 3、7 站</small></h4><p>TC 记的是“这单提交还是回滚”的决议。两台各拍各的板，比开不了事务糟糕得多。</p></div>
+    <div class="fact" data-role="cg"><h4>要一把尺子：最终一致<small>第 11 站</small></h4><p>从库“最终”会追上，但没说多久。对账要知道自己读的那份数据保证到哪一级。</p></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>不用它会怎样：要么全锁死，要么两个决议</h2>
+  </div>
+  <p class="lead">没有这套词，团队讨论“一致性”时常落进两个极端。两种做法都能上线，也都会在网络出问题的那天出事。</p>
+  <div class="design">
+    <div class="way" data-role="other"><h4>极端一：任何时刻都要一致<small>XA 两阶段，三个库一起锁到最后</small></h4>
+<svg class="sv" viewBox="0 0 440 250" role="img" aria-label="XA 做法：订单库、库存库、券库三个分支在 prepare 之后一直持有行锁，直到协调者发出 commit。券库在中途重启，另外两个库的锁一直挂着，88 号商品其他人都买不了，整单最后失败。">
+  <text x="10" y="20" class="t-h">锁从 prepare 一直挂到 commit</text>
+  <line x1="90" y1="40" x2="90" y2="210" class="e-axis"/>
+  <text x="10" y="64" class="t-s">order_db</text><rect x="100" y="50" width="320" height="22" rx="5" class="f-neut e-mut"/><text x="110" y="66" class="t-xs">行锁 9527</text>
+  <text x="10" y="104" class="t-s">inventory</text><rect x="100" y="90" width="320" height="22" rx="5" class="f-neut e-mut"/><text x="110" y="106" class="t-xs">行锁 sku 88：别人下单都在等</text>
+  <text x="10" y="144" class="t-s">coupon_db</text><rect x="100" y="130" width="120" height="22" rx="5" class="f-neut e-mut"/>
+  <path d="M226,128 L246,156 M246,128 L226,156" class="e-bad"/><text x="256" y="146" class="t-bad">券库重启</text>
+  <path d="M100,180 L420,180" class="e-ink" marker-end="url(#ah-ink)"/><text x="400" y="200" text-anchor="end" class="t-xs">时间</text>
+  <text x="10" y="232" class="t-bad">一个库抖一下，三个库一起不可用</text>
+</svg>
+      <ul class="pains">
+        <li>任何一个库、任何一段网络慢了，整单都在等，锁住的行别人也用不了。</li>
+        <li>协调者在 prepare 之后挂了，参与者只能锁着等它回来。</li>
+      </ul>
+    </div>
+    <div class="way" data-role="bad"><h4>极端二：谁活着谁拍板<small>两台 TC 互为主备，断网就各自当主</small></h4>
+<svg class="sv" viewBox="0 0 440 250" role="img" aria-label="两台 TC 互为主备。网络断开后，tc-a 收到订单服务的 commit，给库存推 Confirm；tc-b 联系不上 tc-a，以为它挂了，等 60 秒超时后给券推 Cancel。结果库存扣了，券还在。">
+  <text x="10" y="20" class="t-h">断网后两台都当主</text>
+  <rect x="20" y="40" width="130" height="44" rx="10" class="f-card e-bad"/><text x="85" y="67" text-anchor="middle" class="t-b">tc-a：commit</text>
+  <rect x="290" y="40" width="130" height="44" rx="10" class="f-card e-bad"/><text x="355" y="67" text-anchor="middle" class="t-b">tc-b：超时 rollback</text>
+  <path d="M220,30 L210,60 L230,70 L218,100" class="e-rn"/><text x="220" y="118" text-anchor="middle" class="t-rn">分区</text>
+  <rect x="20" y="150" width="130" height="44" rx="10" class="f-bkt e-bk"/><text x="85" y="172" text-anchor="middle" class="t-s">库存 Confirm</text><text x="85" y="188" text-anchor="middle" class="t-xs">真扣 2 件</text>
+  <rect x="290" y="150" width="130" height="44" rx="10" class="f-bkt e-bk"/><text x="355" y="172" text-anchor="middle" class="t-s">券 Cancel</text><text x="355" y="188" text-anchor="middle" class="t-xs">MINUS20 退回 UNUSED</text>
+  <path d="M85,84 L85,146" class="e-bad" marker-end="url(#ah-bad)"/>
+  <path d="M355,84 L355,146" class="e-bad" marker-end="url(#ah-bad)"/>
+  <text x="10" y="232" class="t-bad">库存扣了、券还在：两个决议，补不回来</text>
+</svg>
+      <ul class="pains">
+        <li>“它联系不上我”和“它挂了”在网络上看起来一模一样。</li>
+        <li>同一个全局事务出现两个结局，Confirm 和 Cancel 都不能再撤回。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="rule-box"><b>缺的那一块</b>：先承认网络会断，再按数据分别决定“断开时拒绝还是先答”，以及“先答的话，中间状态怎么收尾”。这就是 CAP 和 BASE 的精华。</p>
+  <div class="pit" id="p-misuse"><b><em>!</em>不懂精华时的典型误用</b>
+    <dl><dt>一种</dt><dd>“我们用了 Seata 和 Raft，所以整个下单是强一致的。”TC 的决议是强一致的；三个库之间在 ④⑤⑥ 站照样有几十毫秒到 60 秒对不上，只是被设计成用户看不到。</dd>
+    <dt>另一种</dt><dd>“我们是 AP 的，最终一致就行。”结果中间状态没有超时、没人对账，那张券就一直 LOCKED。</dd></dl></div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种流派：四个说法，各回答一个问题</h2>
+  </div>
+  <p class="lead">CAP、PACELC、BASE、一致性模型常被混着说，其实各管一件事。分清它们回答的问题，就知道什么时候该拿出哪一个。</p>
+  <div class="tbl-wrap"><table class="t">
+    <thead><tr><th scope="col">说法</th><th scope="col">回答什么问题</th><th scope="col">什么时候拿出来</th><th scope="col">局限</th></tr></thead>
+    <tbody>
+      <tr data-role="pd"><td><b>CAP</b><br><small>Brewer 2000 猜想，Gilbert、Lynch 2002 证明</small></td><td>网络分区时，“读到最新”（C）和“每个活着的节点都回答”（A）能不能同时做到。答案：不能。</td><td>设计“断网那一刻怎么办”：TC、注册中心、主从切换</td><td>只管分区那一刻；C 和 A 的定义都很严格，现实系统多数两样都不完全满足</td></tr>
+      <tr data-role="g2"><td><b>PACELC</b><br><small>Abadi 2012</small></td><td>分区时选 A 还是 C；<b>不分区时（Else）</b>，选低延迟（L）还是一致（C）</td><td>解释“平时为什么慢”：多等一次复制、读主还是读从</td><td>仍然是粗分类，说不出具体读到什么</td></tr>
+      <tr data-role="of"><td><b>BASE</b><br><small>Brewer 等人 90 年代末提出，Pritchett 2008 年展开</small></td><td>拆成多个库以后，怎样在不全局加锁的前提下把业务做对</td><td>设计业务流程：冻结、预留、补偿、对账</td><td>是做法，不是保证；“最终”多久要自己定</td></tr>
+      <tr data-role="cg"><td><b>一致性模型</b><br><small>线性、顺序、因果、会话、最终</small></td><td>一次读最多能“旧”到什么程度，多个人看到的顺序是否相同</td><td>落到具体接口：这个读要读主还是可以读从</td><td>名字多，要配一张谱系图</td></tr>
+    </tbody>
+  </table></div>
+  <p class="pick-line"><b>本页学</b>：四个都讲，主线是两件事。一是 <b>CAP 那一刻的二选一</b>，加上 PACELC 的平时取舍；二是<b>一致性模型这把尺子</b>，加上选了 A 以后 BASE 怎么收尾。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>核心取舍：断开时拒绝还是先答，平时等不等复制</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>副本</b>：同一份数据存在几台机器上，靠复制（发日志、发变更）保持一样。MySQL 主从、Kafka 分区副本、Seata TC 集群都是。</li>
+      <li><b>网络分区</b>：几台机器之间的消息到不了，但每台自己都还活着。交换机故障、跨机房链路断、一次很长的 GC 停顿，从对端看都像分区。</li>
+      <li><b>多数派</b>：N 台里超过一半，3 台要 2 台，5 台要 3 台。为什么偏偏是一半，下面机制 3 讲。</li>
+      <li><b>复制延迟</b>：主库提交了，从库还没应用。见<a href="../database/mysql-replication-lag.html">付完款跳回订单页，还是待付款</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-cap">机制 1：分区那一刻，只剩两个选择</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="TC 集群 3 个节点，tc-3 被分区隔开。tc-1 和 tc-2 是多数派，刚把全局事务 X 的状态改成 Committing。订单服务实例 B 只能联系上 tc-3，问 X 的状态。tc-3 有两个选择：选 C，回答联系不上多数派、请重试，这是不可用；选 A，用自己手上的 Begin 回答，这是旧数据，B 可能据此做出相反的决定。">
+  <text x="20" y="24" class="t-h">tc-3 被隔开了，这时有人来问它</text>
+  <rect x="20" y="44" width="300" height="200" rx="16" class="f-pdt e-pd"/>
+  <text x="36" y="68" class="t-pd">多数派这一边</text>
+  <circle cx="100" cy="130" r="32" class="f-card e-pd"/><text x="100" y="135" text-anchor="middle" class="t-b">tc-1</text>
+  <circle cx="230" cy="130" r="32" class="f-card e-pd"/><text x="230" y="135" text-anchor="middle" class="t-b">tc-2</text>
+  <path d="M132,130 L198,130" class="e-pd" marker-end="url(#ah-pd)"/>
+  <text x="165" y="120" text-anchor="middle" class="t-xs">复制</text>
+  <text x="40" y="196" class="t-mono">X: Begin → Committing</text>
+  <text x="40" y="218" class="t-xs">两台都写下了，2/3 过半，决议已定</text>
+  <path d="M352,36 L338,96 L366,112 L344,190 L360,250" class="e-rn"/>
+  <text x="352" y="276" text-anchor="middle" class="t-rn">分区</text>
+  <circle cx="440" cy="130" r="32" class="f-card e-pd"/><text x="440" y="135" text-anchor="middle" class="t-b">tc-3</text>
+  <text x="440" y="186" text-anchor="middle" class="t-mono">X: Begin</text>
+  <text x="440" y="204" text-anchor="middle" class="t-xs">还不知道已经要提交</text>
+  <rect x="380" y="232" width="120" height="36" rx="8" class="f-neut e-mut"/><text x="440" y="255" text-anchor="middle" class="t-s">订单服务 B</text>
+  <path d="M440,232 L440,166" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text x="452" y="222" class="t-xs">X 现在什么状态？</text>
+  <!-- choices -->
+  <rect x="560" y="44" width="380" height="110" rx="14" class="f-pdt e-pd"/>
+  <text x="578" y="70" class="t-pd">选 C：拒绝回答（CP）</text>
+  <text x="578" y="94" class="t-s">“联系不上多数派，稍后重试。”</text>
+  <text x="578" y="116" class="t-s">B 这一单报错，但不会有人做出错的决定。</text>
+  <text x="578" y="138" class="t-xs">代价：分区期间，少数派这一边不可用</text>
+  <rect x="560" y="170" width="380" height="110" rx="14" class="f-oft e-of"/>
+  <text x="578" y="196" class="t-of">选 A：拿手上的数据先答（AP）</text>
+  <text x="578" y="220" class="t-s">“X 还是 Begin。”这是旧数据。</text>
+  <text x="578" y="242" class="t-s">B 以为没决议，可能自己发起回滚：两个结局。</text>
+  <text x="578" y="264" class="t-xs">代价：读到旧值，要事后补偿</text>
+  <path d="M472,124 L556,100" class="e-pd" marker-end="url(#ah-pd)"/>
+  <path d="M472,140 L556,220" class="e-of" marker-end="url(#ah-of)"/>
+  <text x="20" y="312" class="t-s">没有第三条路：要回答“最新的”，就得问到另一边；而另一边的消息此刻到不了。这就是 CAP 定理证明的全部思路。</text>
+</svg>
+  </div>
+  </figure>
+  <div class="facts">
+    <div class="fact" data-role="pd"><h4>C：一致性（线性一致）</h4><p>所有读写看起来像只有一份数据：写完成以后，任何人再读都读到它。</p></div>
+    <div class="fact" data-role="of"><h4>A：可用性</h4><p>每个<b>没宕机的节点</b>收到请求，都必须给出正常回答。回一个“稍后重试”不算。</p></div>
+    <div class="fact" data-role="rn"><h4>P：分区容忍</h4><p>节点之间可以丢任意多的消息，系统照样要按规则工作。分布式系统没得选，P 必须要。</p></div>
+    <div class="fact" data-role="g2"><h4>PACELC：平时也在选</h4><p>不分区时，要读到最新就得等复制、问多数派（多花延迟 L），不等就可能旧。全景第 3 站每次开事务多一次 tc-1 → tc-2 的往返，就是这笔延迟。</p></div>
+  </div>
+  <p class="lead">所以“CAP 三选二”的说法容易误导：P 不是选项，分区一来只剩 C 和 A 二选一；而网络正常时，C 和 A 可以都要。Brewer 本人在 2012 年的回顾里也是这么纠正的。</p>
+
+  <h3 id="m-ladder">机制 2：一致性模型，一把量“读到的有多新”的尺子</h3>
+  <p class="lead">C 和 A 之间不是只有两档。从“像单机一样”到“最后会一样”，中间有好几级，越往下越便宜，分区时也越能继续服务。</p>
+  <figure>
+  <div class="fig-box wide ladder-wrap">
+<svg class="sv" viewBox="0 0 960 420" role="img" aria-label="一致性模型从强到弱五级。线性一致：写完成后任何人都读到它，例子是 TC 的全局事务状态和 etcd 默认的读，分区时不可用。顺序一致：所有人看到同一个顺序，但可以落后，例子是 ZooKeeper，分区时不可用。因果一致：有因果的先后大家都同意，例子是先付款后退款，分区时只要客户端一直连同一个节点就可用。读己之写和单调读：只对自己保证，例子是付完款跳回订单页，读己之写同样要粘着同一节点，单调读完全可用。最终一致：不再写入后副本最后会相同，没说多久，例子是商品详情缓存和对账读的从库，分区时完全可用。">
+  <text x="20" y="24" class="t-h">从强到弱（越往下越便宜，越可能读到旧的）</text>
+  <text x="560" y="24" class="t-xs">保证</text>
+  <text x="790" y="24" class="t-xs">分区时（Jepsen 的分类）</text>
+  <g>
+    <rect x="20" y="40" width="920" height="66" rx="12" class="f-pdt e-pd"/>
+    <text x="36" y="66" class="t-pd">① 线性一致 linearizable</text>
+    <text x="36" y="90" class="t-xs">例：TC 里全局事务的状态 · etcd 默认的读 · 主库上 WHERE status='UNUSED' 的条件更新</text>
+    <text x="560" y="66" class="t-s">写一旦完成，之后任何人</text><text x="560" y="86" class="t-s">都读得到，像只有一份数据</text>
+    <rect x="790" y="58" width="134" height="28" rx="14" class="f-card e-bad"/><text x="857" y="77" text-anchor="middle" class="t-bad">不可用</text>
+  </g>
+  <g>
+    <rect x="50" y="114" width="890" height="66" rx="12" class="f-pdt e-pd"/>
+    <text x="66" y="140" class="t-pd">② 顺序一致 sequential</text>
+    <text x="66" y="164" class="t-xs">例：ZooKeeper（读本地副本可能落后，要最新先 sync）</text>
+    <text x="560" y="140" class="t-s">所有人看到同一个顺序，</text><text x="560" y="160" class="t-s">但可以比别人慢几步</text>
+    <rect x="790" y="132" width="134" height="28" rx="14" class="f-card e-bad"/><text x="857" y="151" text-anchor="middle" class="t-bad">不可用</text>
+  </g>
+  <g>
+    <rect x="80" y="188" width="860" height="66" rx="12" class="f-cgt e-cg"/>
+    <text x="96" y="214" class="t-cg">③ 因果一致 causal</text>
+    <text x="96" y="238" class="t-xs">例：先付款、后退款，谁都不能先看到退款</text>
+    <text x="560" y="214" class="t-s">有因果的先后大家都同意，</text><text x="560" y="234" class="t-s">无关的写可以各看各的顺序</text>
+    <rect x="790" y="206" width="134" height="28" rx="14" class="f-card e-of"/><text x="857" y="225" text-anchor="middle" class="t-of">粘着可用</text>
+  </g>
+  <g>
+    <rect x="110" y="262" width="830" height="66" rx="12" class="f-cgt e-cg"/>
+    <text x="126" y="288" class="t-cg">④ 读己之写 · 单调读（会话保证）</text>
+    <text x="126" y="312" class="t-xs">例：付完款跳回订单页 · 刷新不倒退</text>
+    <text x="560" y="288" class="t-s">只对“我自己”保证：我写的</text><text x="560" y="308" class="t-s">我能读到；读过的不会再变旧</text>
+    <rect x="790" y="280" width="134" height="28" rx="14" class="f-card e-of"/><text x="857" y="299" text-anchor="middle" class="t-of">粘着 / 完全可用</text>
+  </g>
+  <g>
+    <rect x="140" y="336" width="800" height="66" rx="12" class="f-oft e-of"/>
+    <text x="156" y="362" class="t-of">⑤ 最终一致 eventual</text>
+    <text x="156" y="386" class="t-xs">例：商品详情缓存 · 搜索索引 · 对账读的从库</text>
+    <text x="560" y="362" class="t-s">不再有新写入后，副本最后相同；</text><text x="560" y="382" class="t-s">没说多久，中间读到什么都算数</text>
+    <rect x="790" y="354" width="134" height="28" rx="14" class="f-card e-good"/><text x="857" y="373" text-anchor="middle" class="t-good">完全可用</text>
+  </g>
+</svg>
+  </div>
+  </figure>
+  <ul class="callouts">
+    <li><b>粘着可用</b>（sticky available）：分区时，只要客户端一直连着同一个节点，就还能用；换了节点就可能做不到。读己之写就是这样：我刚写在 A 上，下次还去 A 读就一定读得到。</li>
+    <li><b>CAP 里的 C 就是第 ① 级</b>。“选 A”不等于什么都不保证，可以落在 ③④⑤ 任何一级，看业务要哪一级。</li>
+    <li>这一页只讲单个对象（一行、一个键）怎么读。多个对象一起改的“隔离级别”（可串行化、快照隔离），是另一条轴，⑥ 第三圈说两者的区别。</li>
+  </ul>
+
+  <h3 id="m-quorum">机制 3：多数派，为什么 3 台挂 2 台就停</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 290" role="img" aria-label="左图：3 个副本，写入集合是节点 1 和 2，读取集合是节点 2 和 3，两者在节点 2 重叠，所以读一定能看到最近的写，这就是 W 加 R 大于 N。右表：N 等于 2 时多数派是 2，能挂 0 台；N 等于 3 时多数派 2，能挂 1 台；N 等于 4 时多数派 3，能挂 1 台；N 等于 5 时多数派 3，能挂 2 台。">
+  <text x="20" y="24" class="t-h">两个多数派一定有交集</text>
+  <ellipse cx="190" cy="140" rx="150" ry="70" class="f-pdt e-pd" opacity=".85"/>
+  <ellipse cx="310" cy="140" rx="150" ry="70" class="f-oft e-of" opacity=".7"/>
+  <circle cx="110" cy="140" r="28" class="f-card e-ink"/><text x="110" y="145" text-anchor="middle" class="t-b">1</text>
+  <circle cx="250" cy="140" r="28" class="f-card e-ink"/><text x="250" y="145" text-anchor="middle" class="t-b">2</text>
+  <circle cx="390" cy="140" r="28" class="f-card e-ink"/><text x="390" y="145" text-anchor="middle" class="t-b">3</text>
+  <text x="80" y="66" class="t-pd">写进 W=2 个：1、2</text>
+  <text x="300" y="66" class="t-of">读 R=2 个：2、3</text>
+  <text x="250" y="190" text-anchor="middle" class="t-s">重叠在 2：读到的版本里</text>
+  <text x="250" y="208" text-anchor="middle" class="t-s">一定有最近那次写</text>
+  <text x="40" y="250" class="t-s">W + R &gt; N，读和写一定碰头；W + R ≤ N，可能正好错开，读到旧的。</text>
+  <text x="40" y="272" class="t-s">同理，分区时最多只有一边凑得齐多数派，所以不会出现两个各自拍板的 leader。</text>
+  <!-- table -->
+  <rect x="600" y="40" width="340" height="190" rx="12" class="f-card e-mut"/>
+  <text x="620" y="66" class="t-b">节点数 N</text><text x="740" y="66" class="t-b">多数派</text><text x="840" y="66" class="t-b">能挂几台</text>
+  <line x1="612" y1="76" x2="928" y2="76" class="e-axis"/>
+  <text x="620" y="102" class="t-mono">2</text><text x="740" y="102" class="t-mono">2</text><text x="840" y="102" class="t-bad">0</text>
+  <text x="620" y="134" class="t-mono">3</text><text x="740" y="134" class="t-mono">2</text><text x="840" y="134" class="t-mono">1</text>
+  <text x="620" y="166" class="t-mono">4</text><text x="740" y="166" class="t-mono">3</text><text x="840" y="166" class="t-bad">1（白加一台）</text>
+  <text x="620" y="198" class="t-mono">5</text><text x="740" y="198" class="t-mono">3</text><text x="840" y="198" class="t-mono">2</text>
+  <text x="620" y="222" class="t-xs">所以集群用 3、5、7 台，不用偶数</text>
+</svg>
+  </div>
+  </figure>
+  <p class="lead">全景第 3 站：3 个 TC 挂了 2 个，剩下的 tc-3 凑不齐 2 票，开不了新事务。这不是故障处理没做好，而是设计上<b>宁可停，也不让一台孤立的节点自己拍板</b>。W+R&gt;N 保证的是“读得到最近一次完成的写”；要做成线性一致的“先读后改”，还要一个 leader 给并发的写排好先后，这是下一页 Raft 的事（⑥ 第三圈细说）。</p>
+
+  <h3 id="m-base">机制 4：选了 A 以后，BASE 怎么收尾</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 270" role="img" aria-label="券 MINUS20 的状态：UNUSED，第 6 站 Try 后变成 LOCKED，这是软状态，最长挂 60 秒。第 8 站 Confirm 后变成 USED；第 10 站超时 Cancel 后回到 UNUSED；第 11 站对账每 10 分钟检查，LOCKED 超过 10 分钟就报警。">
+  <text x="20" y="24" class="t-h">券 MINUS20 的一生：软状态要有名字、有期限、有人收尾</text>
+  <rect x="20" y="100" width="150" height="56" rx="12" class="f-bkt e-bk"/><text x="95" y="133" text-anchor="middle" class="t-mono">UNUSED</text>
+  <path d="M170,128 L316,128" class="e-ink" marker-end="url(#ah-ink)"/><text x="243" y="118" text-anchor="middle" class="t-xs">⑥ Try：锁给 9527</text>
+  <rect x="320" y="92" width="210" height="72" rx="12" class="f-oft e-of"/><text x="425" y="122" text-anchor="middle" class="t-mono">LOCKED → 9527</text><text x="425" y="146" text-anchor="middle" class="t-of">软状态 · 最长 60 秒</text>
+  <path d="M530,112 L746,62" class="e-good" marker-end="url(#ah-good)"/><text x="640" y="72" text-anchor="middle" class="t-good">⑧ Confirm（失败就重试）</text>
+  <rect x="750" y="36" width="190" height="56" rx="12" class="f-bkt e-bk"/><text x="845" y="69" text-anchor="middle" class="t-mono">USED</text>
+  <path d="M530,148 L746,196" class="e-ink" marker-end="url(#ah-ink)"/><text x="640" y="200" text-anchor="middle" class="t-s">⑩ 超时 Cancel</text>
+  <rect x="750" y="172" width="190" height="56" rx="12" class="f-bkt e-bk"/><text x="845" y="205" text-anchor="middle" class="t-mono">UNUSED</text>
+  <path d="M425,164 L425,226" class="e-dash"/>
+  <text x="425" y="246" text-anchor="middle" class="t-cg">⑪ 对账：LOCKED 超过 10 分钟就报警</text>
+</svg>
+  </div>
+  </figure>
+  <div class="trio">
+    <div class="fact" data-role="of"><h4>BA · 基本可用</h4><p>出问题时降级，而不是整体停下：TC 挂了开不了新单，已经在路上的单照样由恢复任务推完。</p></div>
+    <div class="fact" data-role="of"><h4>S · 软状态</h4><p>允许中间态存在：CREATING、冻结、LOCKED。前提是它<b>有名字</b>，用户看不到或看得懂，而不是“扣了一半”。</p></div>
+    <div class="fact" data-role="of"><h4>E · 最终一致</h4><p>中间态<b>有期限</b>（60 秒超时）、<b>有人收尾</b>（Confirm 重试、Cancel、对账）。少了任何一个，“最终”就可能是永远。</p></div>
+  </div>
+
+  <h3 id="m-design">为什么这样设计：TC 选 C，商品详情选 A</h3>
+  <div class="design">
+    <div class="way" data-role="pd"><h4>TC 选 C<small>Raft 多数派，Seata 2.x 的 raft 模式</small></h4>
+<svg class="sv" viewBox="0 0 440 210" role="img" aria-label="TC 选 C：分区时少数派一边拒绝开事务，用户看到下单失败可以重试；多数派一边照常工作；决议只有一个。">
+  <text x="10" y="22" class="t-h">分区时：少数派报错</text>
+  <rect x="20" y="40" width="190" height="60" rx="10" class="f-pdt e-pd"/><text x="115" y="66" text-anchor="middle" class="t-b">tc-1 + tc-2</text><text x="115" y="88" text-anchor="middle" class="t-xs">照常开事务、写决议</text>
+  <rect x="250" y="40" width="170" height="60" rx="10" class="f-card e-pd"/><text x="335" y="66" text-anchor="middle" class="t-b">tc-3</text><text x="335" y="88" text-anchor="middle" class="t-xs">拒绝：不够多数派</text>
+  <path d="M230,34 L226,110" class="e-rn"/>
+  <text x="20" y="140" class="t-good">✓ 每个全局事务只有一个结局</text>
+  <text x="20" y="164" class="t-s">✕ 连到 tc-3 的那部分下单失败，</text>
+  <text x="20" y="184" class="t-s">  用户点一下“重试”</text>
+</svg>
+    </div>
+    <div class="way" data-role="bad"><h4>TC 选 A<small>被放弃：每台都能自己拍板</small></h4>
+<svg class="sv" viewBox="0 0 440 210" role="img" aria-label="TC 选 A：分区时两边各自处理同一个全局事务，一边提交一边回滚，库存扣了券退了，只能人工补。">
+  <text x="10" y="22" class="t-h">分区时：两边各拍各的</text>
+  <rect x="20" y="40" width="190" height="60" rx="10" class="f-card e-bad"/><text x="115" y="66" text-anchor="middle" class="t-b">tc-1 + tc-2</text><text x="115" y="88" text-anchor="middle" class="t-xs">X → Committed</text>
+  <rect x="250" y="40" width="170" height="60" rx="10" class="f-card e-bad"/><text x="335" y="66" text-anchor="middle" class="t-b">tc-3</text><text x="335" y="88" text-anchor="middle" class="t-xs">X → Rollbacked</text>
+  <path d="M230,34 L226,110" class="e-rn"/>
+  <text x="20" y="140" class="t-bad">✕ 同一单两个结局，钱和货对不上</text>
+  <text x="20" y="164" class="t-s">✓ 分区时没有人看到报错，</text>
+  <text x="20" y="184" class="t-s">  可事后只能人工一单单查</text>
+</svg>
+    </div>
+  </div>
+  <p class="rule-box"><b>决定胜负的约束</b>：决议错了是资金事故，补不回来；开不了事务只是这一单失败，用户可以重试。<b>错的代价远大于停的代价，就选 C</b>。商品详情页反过来：价格晚几秒更新没人在意，打不开才是事故，所以缓存、从库都选 A。同一个系统里，不同的数据选不同的位置。</p>
+
+  <h3 id="m-knobs">最少的“语法”：这些开关就是在 C 和 A 之间拧</h3>
+  <div class="codebox" data-role="g2"><div class="code-bar"><b>常见中间件里，决定 C 还是 A 的配置</b><code>默认值和版本细节放到 ⑥</code></div>
+<pre><code><span class="c"># Seata TC：决议写进 Raft 多数派（偏 C）</span>
+seata.store.mode=raft
+seata.server.raft.server-addr=tc-1:9091,tc-2:9091,tc-3:9091
+
+<span class="c"># Kafka：在线副本少于 2 个就拒绝写（偏 C）；不让落后的副本当 leader</span>
+acks=all
+min.insync.replicas=2
+unclean.leader.election.enable=false
+
+<span class="c"># MySQL 半同步：等 1 个从库收到 binlog，等不到 10 秒就退回异步（先 C，后 A）</span>
+rpl_semi_sync_source_wait_for_replica_count=1
+rpl_semi_sync_source_timeout=10000
+
+<span class="c"># Nacos：临时实例走 AP，持久实例走 CP</span>
+spring.cloud.nacos.discovery.ephemeral=true
+
+<span class="c"># 读要不要最新：etcd 默认线性一致读；ZooKeeper 先 sync 再读</span>
+etcdctl get /orders/9527 --consistency=s   <span class="c"># s：本地读，可能旧</span>
+zk.sync("/orders/9527", cb, null);</code></pre></div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>套进场景：券 MINUS20 存 3 份，拧 W 和 R 看谁出事</h2>
+  </div>
+  <p class="lead">交易靶场的券服务。假设券状态不放在一个 MySQL 主库上，而是存在 3 个副本里（像 Cassandra、Dynamo 那样按 W/R 读写）。1000 张券，每张都有两单来抢（同一个用户两台手机，或者两张单），抢完马上读一次“我锁到了吗”。网络时不时把一台隔开，副本之间异步复制有几片时间的延迟。分别用 5 种 W/R 组合各跑一遍。</p>
+  <div class="codebox" data-role="of"><div class="code-bar"><b>抢券：读 R 份、写 W 份</b><code>CouponQuorum.java 节选（略简化），JDK 8 写法；完整模拟约 150 行</code></div>
+<pre><code><span class="c">// reach：从协调节点 c 此刻能联系上的副本（分区时被隔开的那台只能联系自己）</span>
+List&lt;Integer&gt; rc = reach(e.c, e.t);
+if (rc.size() &lt; r || rc.size() &lt; w) { m.lockRejected++; continue; }       <span class="c">// 凑不齐：拒绝，选 C</span>
+if (readQuorum(rc.subList(0, r), k) != 0) { m.alreadyUsed++; continue; }   <span class="c">// 读到已被锁：券已用</span>
+int v = ++gv, ow = 2 * k + e.ord;
+List&lt;Integer&gt; wset = rc.subList(0, w);
+for (int n : wset) apply(n, k, ow, v);                                     <span class="c">// 同步写进 W 份</span>
+for (int n = 0; n &lt; N; n++)
+    if (!wset.contains(n)) q.add(new Msg(n, e.c, k, ow, v, e.t + lag()));  <span class="c">// 其余异步复制</span>
+
+<span class="c">// 分区恢复以后：把没送到的复制全补上，版本大的赢（LWW）</span>
+for (Msg x : q) apply(x.to, x.k, x.owner, x.ver);</code></pre></div>
+<pre class="console"><b>$ mvn -q -pl arch/cap-base-consistency compile exec:java -Dexec.mainClass=labs.arch.cap_base_consistency.CouponQuorum -Dexec.args="0.1 5"</b>
+<span class="c">JDK 17（--release 8）· 本机 ARM · 种子 42 · 同一参数每次输出相同</span>
+3 副本 · 1000 张券 · 每张两单来抢 · 分区时间占比 10% · 异步复制延迟 1..5 片 · 种子 42
+W R | W+R&gt;N | 抢券被拒(不可用) | 两单都锁到(要补偿) | 刚锁到读成UNUSED | 读被拒 | 恢复后副本不一致
+1 1 | 否     |    <span class="w">0</span> / 2000 |   <span class="r">70</span> |  <span class="r">538</span> |    0 | 0
+2 1 | 否     |   53 / 2000 |   <span class="r">17</span> |  <span class="r">284</span> |    0 | 0
+2 2 | 是     |   53 / 2000 |    <span class="w">0</span> |    <span class="w">0</span> |   31 | 0
+3 1 | 是     |  185 / 2000 |    0 |    0 |    0 | 0
+1 3 | 是     |  185 / 2000 |    0 |    0 |  100 | 0</pre>
+  <ul class="callouts">
+    <li><b>W1R1 是纯 AP</b>：2000 次抢券一次没拒，可 70 张券被两单都锁到。分区恢复后副本都一样了（最后一列 0），最终一致做到了，但那 70 单里有一单以为自己用了券，<b>要补偿</b>：取消订单，或者按原价补差。最终一致不等于业务正确。</li>
+    <li><b>W+R&gt;N 的三行</b>：双锁 0、读到旧值 0。代价是分区时被拒：W2R2 拒 53 次（只有被隔开的那台拒），W3R1 和 W1R3 要 3 台都在，拒 185 次。多数派是“够用的最小代价”。</li>
+    <li><b>W2R1 看着也像多数派，还是错了</b>：W+R=3，没大于 N。写进的两台和读的那一台可能正好错开，284 次读到旧值。</li>
+    <li><b>把分区调到 0%</b>（<code>-Dexec.args="0 5"</code>）：W1R1 仍有 51 张双锁、539 次读旧。这是 PACELC 的 E：没断网，只因为不等复制，就已经在拿一致换延迟。</li>
+  </ul>
+  <p class="lead">完整代码 → <a href="https://github.com/archeu/study-labs/tree/main/java/arch/cap-base-consistency">study-labs / java/arch/cap-base-consistency</a>。下面的实验台是同一份逻辑的 JS 版，用的是同一个随机数，同样的参数出同样的数字。</p>
+
+  <h3 id="lab">实验台：拧 W、R、分区和复制延迟</h3>
+  <div class="lab">
+    <div class="rb-ctl"><span class="lbl">W / R</span>
+      <div class="seg" id="q-wr" role="group" aria-label="写几份、读几份">
+        <button type="button" data-w="1" data-r="1" aria-pressed="false">W1 R1</button>
+        <button type="button" data-w="2" data-r="1" aria-pressed="true">W2 R1</button>
+        <button type="button" data-w="2" data-r="2" aria-pressed="false">W2 R2</button>
+        <button type="button" data-w="3" data-r="1" aria-pressed="false">W3 R1</button>
+        <button type="button" data-w="1" data-r="3" aria-pressed="false">W1 R3</button>
+      </div>
+    </div>
+    <div class="rb-ctl"><span class="lbl">分区时间</span>
+      <div class="seg" id="q-part" role="group" aria-label="分区时间占比">
+        <button type="button" data-v="0" aria-pressed="false">0%</button>
+        <button type="button" data-v="0.1" aria-pressed="true">10%</button>
+        <button type="button" data-v="0.3" aria-pressed="false">30%</button>
+      </div>
+    </div>
+    <div class="rb-ctl"><span class="lbl">复制延迟</span>
+      <div class="seg" id="q-lag" role="group" aria-label="异步复制延迟">
+        <button type="button" data-v="0" aria-pressed="false">无</button>
+        <button type="button" data-v="5" aria-pressed="true">1～5 片</button>
+      </div>
+    </div>
+    <div class="guess" id="q-guess">
+      <p id="q-ask">先猜：这样配，1000 张券里有几张被两单都锁到？</p>
+      <div class="opts" id="q-opts">
+        <button type="button" data-g="0">0 张</button>
+        <button type="button" data-g="few">1～30 张</button>
+        <button type="button" data-g="many">30 张以上</button>
+        <button type="button" class="skip" data-g="skip">不猜，直接看</button>
+      </div>
+      <p class="res" id="q-res" hidden></p>
+    </div>
+    <div id="q-out" hidden>
+      <div class="tiles4">
+        <div class="tile" data-role="pd"><small>抢券被拒（不可用）</small><b id="q-rej">–</b><span>共 2000 次</span></div>
+        <div class="tile" data-role="bad"><small>两单都锁到（要补偿）</small><b id="q-dbl">–</b><span>共 1000 张</span></div>
+        <div class="tile" data-role="cg"><small>刚锁到又读成 UNUSED</small><b id="q-stale">–</b><span>读己之写被破坏</span></div>
+        <div class="tile" data-role="other"><small>读被拒</small><b id="q-rrej">–</b><span>共 1000 次</span></div>
+      </div>
+      <div class="lab-res" data-role="of" id="q-verdict" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <div class="done-box"><b>到这里已经能交差了。</b>拿到一份新数据，你能说出三件事：它要哪一级一致性；断网时拒绝还是先答；先答的话，谁来收尾、多久收完。</div>
+  <p class="lead">已知还没处理的细节：这个模拟里的请求是一个接一个处理的，真并发的“先读后改”光靠 W+R&gt;N 不够（<a href="#d-cas">⑥ 第三圈</a>）；LWW 合并要靠时钟（<a href="#d-lww">⑥ 第三圈</a>）；读己之写不一定要多数派，粘着同一节点或读主也行（<a href="#p-ryw">⑥ 坑 4</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="rn">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>反例和误用：挂着 CAP 的名字，没满足它的约束</h2>
+  </div>
+
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：说错一句话，就会设计错一个系统</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-ca"><b><em>1</em>“我们的系统选的是 CA”<a class="rootmark" href="#m-cap">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>设计文档里写“不考虑分区”，主从之间断网时，两边都继续接写，事后数据对不上。</dd>
+      <dt>根源</dt><dd>只要数据在两台以上的机器上，分区就会发生，不是你选不选。CA 只在单机上成立。</dd>
+      <dt>做法</dt><dd class="fix">把“断网时这一边怎么办”写进设计：拒绝、只读，还是继续写并准备合并。</dd></dl></div>
+    <div class="pit" id="p-zk"><b><em>2</em>“上了 ZooKeeper / etcd，读就一定是最新的”<a class="rootmark" href="#m-ladder">← ④ 尺子</a></b>
+      <dl><dt>现象</dt><dd>A 在 leader 上改了配置，B 连的 follower 还没同步，读到旧值。</dd>
+      <dt>根源</dt><dd>ZooKeeper 保证的是顺序一致：所有人看到同一个顺序，但可以落后；文档原话是另一个客户端“可能读到旧值”。etcd 默认是线性一致读，但改成 serializable 读就是本地读。</dd>
+      <dt>做法</dt><dd class="fix">ZooKeeper 读前先 <code>sync()</code>；etcd 别为了快随手改成 <code>--consistency=s</code>。</dd></dl></div>
+    <div class="pit" id="p-forever"><b><em>3</em>“最终一致”没写多久、没人收尾<a class="rootmark" href="#m-base">← ④ BASE</a></b>
+      <dl><dt>现象</dt><dd>全景第 10 站没开 fence：Cancel 先到、什么都没改，迟到的 Try 把券锁上，再没人来解，MINUS20 永远 LOCKED。</dd>
+      <dt>根源</dt><dd>软状态少了期限和收尾人，“最终”就是永远。</dd>
+      <dt>做法</dt><dd class="fix">每个中间态配超时和负责的任务；对账任务按“LOCKED 超过 X 分钟”报警。</dd></dl></div>
+    <div class="pit" id="p-ryw"><b><em>4</em>读写分离以后，用户读不到自己刚写的<a class="rootmark" href="#m-ladder">← ④ 读己之写</a></b>
+      <dl><dt>现象</dt><dd>付完款跳回订单页，从库还没追上，显示“待付款”，用户又付了一次。见<a href="../database/mysql-replication-lag.html">复制延迟那页</a>。</dd>
+      <dt>根源</dt><dd>从库只给最终一致，而用户要的是读己之写。⑤ 里 W2R1 的 284 次就是这个。</dd>
+      <dt>做法</dt><dd class="fix">写后几秒内这个用户的读走主库；或者读带上版本号，从库没追到就回退到主库。不必把整个系统升到线性一致。</dd></dl></div>
+    <div class="pit" id="p-even"><b><em>5</em>两台互为主备、自动切换<a class="rootmark" href="#m-quorum">← ④ 多数派</a></b>
+      <dl><dt>现象</dt><dd>心跳线断了，两台都认为对方挂了，都当主：② 里的两个决议。</dd>
+      <dt>根源</dt><dd>2 台的多数派是 2，挂一台就没有多数派；不看多数派、只看心跳的切换，分区时必然脑裂。</dd>
+      <dt>做法</dt><dd class="fix">要自动切换，就用 3 台以上奇数个节点，或者加一个仲裁节点；2 台只能人工切换。</dd></dl></div>
+    <div class="pit" id="p-recon"><b><em>6</em>对账读从库，误报一大片<a class="rootmark" href="#m-ladder">← ④ 最终一致</a></b>
+      <dl><dt>现象</dt><dd>全景第 11 站：订单刚 CANCELLED，从库上券还 LOCKED，报警。几秒后自己好了。</dd>
+      <dt>根源</dt><dd>对账读的数据本身只保证最终一致，“对不上”可能只是还没到。</dd>
+      <dt>做法</dt><dd class="fix">对账跳过最近几分钟的单；报警前回主库复查一次；或者看从库的延迟，超过阈值就暂停对账。</dd></dl></div>
+    <div class="pit" id="p-semi"><b><em>7</em>以为开了半同步就不丢数据<a class="rootmark" href="#m-cap">← ④ PACELC</a></b>
+      <dl><dt>现象</dt><dd>从库网络抖了十几秒，主库照常提交；这期间主库宕机切到从库，最近的事务没了。</dd>
+      <dt>根源</dt><dd>MySQL 8.4 的 <code>rpl_semi_sync_source_timeout</code> 默认 10000 毫秒，等不到从库确认就退回异步复制。也就是说，它先选 C，等满 10 秒后悄悄换成 A。</dd>
+      <dt>做法</dt><dd class="fix">监控半同步状态（是否退回了异步）；切主前比较位点；真要不丢，把决议放进多数派复制的系统。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范：每类数据写明要哪一级</h3></div>
+  <div class="tbl-wrap"><table class="t">
+    <thead><tr><th scope="col">数据（交易靶场）</th><th scope="col">要哪一级</th><th scope="col">怎么做到</th><th scope="col">防的是什么</th></tr></thead>
+    <tbody>
+      <tr><td>TC 里全局事务的状态</td><td>线性一致</td><td>Raft 多数派，3 或 5 台</td><td>同一单两个结局</td></tr>
+      <tr><td>券、库存的扣减</td><td>单行线性一致</td><td>主库上的条件更新：<code>WHERE status='UNUSED'</code>、<code>available &gt;= 2</code></td><td>两单抢到同一张券、超卖</td></tr>
+      <tr><td>用户刚下的那一单</td><td>读己之写</td><td>写后 N 秒内读主，或带版本号读</td><td>付完款还显示待付款</td></tr>
+      <tr><td>订单列表、商品详情</td><td>最终一致（秒级）</td><td>从库、缓存，写明延迟上限并监控</td><td>主库被读打满</td></tr>
+      <tr><td>报表、对账</td><td>最终一致（分钟级）</td><td>从库，跳过最近几分钟</td><td>误报、拖慢主库</td></tr>
+    </tbody>
+  </table></div>
+  <ul class="pains">
+    <li class="ok">每个“最终一致”都写上期限，比如“从库延迟 &lt; 3 秒”，并且有监控。<b>防</b>：期限只存在于脑子里。</li>
+    <li class="ok">每个软状态有超时和收尾的任务，有对账。<b>防</b>：坑 3 的“永远”。</li>
+    <li class="ok">对外接口文档写清给的是哪一级，不承诺比实现更强的。<b>防</b>：调用方按线性一致去用一个从库接口。</li>
+    <li class="ok">要自动切主的集群用奇数个节点，切主看多数派。<b>防</b>：坑 5 的脑裂。</li>
+  </ul>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：几个常被说错的地方</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="pd" id="d-label"><h4>“CP / AP”的标签太粗</h4><p>CAP 的 C 是线性一致，A 是每个活节点都必须回答，两个定义都很严。MySQL 异步主从既不满足 C（从库会旧），也不满足 A（被隔开的从库不能写）。Kleppmann 2015 年的文章就建议别再给数据库贴 CP、AP 标签，直接说一致性模型和延迟。Redis 也是一例：文档明说 <code>WAIT</code> 不能把 Redis 变成强一致的存储，主从切换时<b>已确认的写也可能丢</b>。</p></div>
+    <div class="dp" data-role="cg" id="d-serial"><h4>线性一致 ≠ 可串行化</h4><p>线性一致管单个对象：读要看到实时上最新的写。可串行化管多个对象的事务：结果等于某种串行执行，但不要求是实时顺序。两个都要叫严格可串行化。Seata 的全局事务两个都不保证：AT 模式文档写明默认全局隔离是读未提交；TCC 的隔离靠你自己的冻结字段。</p></div>
+    <div class="dp" data-role="of" id="d-cas"><h4>W+R&gt;N 不等于线性一致</h4><p>⑤ 的请求是一个接一个处理的。真并发时，两个协调者可以同时读到 UNUSED、各自写进多数派，版本号一比较只剩一个，另一单的“成功”就丢了。要线性一致的“先读后改”，得有一个 leader 给写排好先后，并且换 leader 时不丢已确认的写：这是 Raft 那一页。</p></div>
+    <div class="dp" data-role="g2" id="d-lww"><h4>LWW 合并靠时钟</h4><p>⑤ 恢复时“版本大的赢”，版本号是全局计数器，模拟里很干净。真实系统常用时间戳当版本：两台机器时钟差 200 毫秒，后写的反而被先写的盖掉，而且悄无声息。这是“时钟、超时与重试”那一页的事；另一条路是 CRDT，让合并不依赖先后。</p></div>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li><b>Raft</b>：leader 怎么选、日志怎么复制，为什么换了 leader 已提交的决议也不丢（J09 第 5 个下钻）。</li>
+    <li><b>分布式事务</b>：2PC、TCC、Saga、本地消息表，各自停在一致性尺子的哪一级（J09 第 3 个）。</li>
+    <li><b>Jepsen</b>：怎么用故障注入测出一个数据库实际给的是哪一级。</li>
+    <li><b>Spanner 和 TrueTime</b>：用带误差的时钟换来全球范围的外部一致性。</li>
+    <li><b>CRDT</b>：选 A 以后，怎么设计不需要补偿的数据结构（计数器、集合）。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改券服务的模拟</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="cg"><h4>练习 1 · 不用多数派也能读己之写</h4><p>在 <code>CouponQuorum</code> 里加一种读法：读请求发给“上次写成功的那个协调节点”（粘着会话）。W1R1 下再跑：读成 UNUSED 的次数降到多少？双锁变了吗？</p><p class="uses">用到 ④ 尺子、⑥ 坑 4</p></div>
+    <div class="exc" data-role="pd"><h4>练习 2 · 换成 5 个副本</h4><p>N 改成 5，分区时隔开 2 台。比较 W3R3 和 W2R2：哪个出现双锁？哪个拒绝更多？先猜再跑。</p><p class="uses">用到 ④ 多数派</p></div>
+    <div class="exc" data-role="of"><h4>练习 3 · 给双锁记补偿</h4><p>恢复后按 LWW 定下券的主人，输哪单就记一笔“补偿”（取消订单或补差）。再加一个对账：扫一遍三份副本，统计恢复前有多少张券处在不一致状态。</p><p class="uses">用到 ④ BASE、⑥ 坑 3、坑 6</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>分区一定会发生，CAP 要你选的只是断开时拒绝（C）还是用可能过期的数据先答（A）；不断开时也在拿延迟换一致（PACELC）。选了 A 就要配上 BASE：软状态有名字、有期限、有人收尾。具体读到什么，用一致性模型那把尺子说清。</p></details>
+    <details><summary>2. ② 里“两台 TC 互为主备、谁活着谁拍板”痛在哪？</summary><p>分区时“对方挂了”和“联系不上对方”看起来一样，两台都当主，同一个全局事务一边提交、一边回滚。Confirm 和 Cancel 都撤不回，库存扣了券还在。</p></details>
+    <details><summary>3. ⑥ 坑 5（两台主备脑裂）的根源是 ④ 的哪条？</summary><p>机制 3 多数派：2 台的多数派是 2，挂一台（或断网）就没有任何一边有多数派。不看多数派的切换，分区时两边都会当主。3 台以上奇数个节点，最多一边凑得齐多数派。</p></details>
+    <details><summary>4. 预测：⑤ 里把 W2R1 改成 W2R2，分区 30%，双锁和读被拒各会怎样？</summary><p>双锁和读到旧值都变成 0（W+R=4&gt;3，读写一定重叠）。代价是读也要两台：被隔开的那台连读都拒，读被拒从 0 变成 96 次。抢券被拒不变（170），因为写本来就要两台。</p></details>
+    <details><summary>5. 预测：TC 从 3 台扩到 4 台，挂 2 台时还能下单吗？</summary><p>不能。4 台的多数派是 3，挂 2 台只剩 2 台，凑不齐。4 台和 3 台一样只能挂 1 台，多出来的一台没有提高可用性，还让每次写多等一台。所以用 5 台。</p></details>
+    <details><summary>6. 放回全景：第 3、7、11 站前后各发生了什么？这一页的东西坏了，整条链路会怎样？</summary><p>第 3 站在发号之后、订单 Try 之前，TC 把“新事务”写进多数派才回 XID；第 7 站在三个 Try 之后、推 Confirm 之前，把 Committing 写进多数派；第 11 站不在单子的路上，每 10 分钟对一次三个库。如果 TC 不按多数派、谁活着谁拍板（选了 A），分区时同一单会在第 8 站收到 Confirm、第 10 站又收到 Cancel，库存和券对不上，第 11 站的对账只能报警、人工修。如果对账不知道自己读的是最终一致的从库，第 11 站会误报一大片。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过：<code>CouponQuorum</code> 是一个 3 副本 W/R 读写的模拟（不是真数据库），JDK 17 按 <code>--release 8</code> 编译，固定种子 42，页上实验台用同一套逻辑和同一个随机数，输出逐项一致。分区占比 10%、30% 是为了看清现象故意调高的，真实网络的分区少得多。</p>
+  <p>按文档：Brewer 2012《CAP Twelve Years Later》（“三选二”有误导、分区时才取舍、恢复后补偿）；Abadi 的 PACELC（2010 年博客，2012 年 IEEE Computer）；Pritchett 2008《BASE: An Acid Alternative》，BASE 一词据 Brewer 2012 由他和同事在 90 年代末提出；Vogels 2008《Eventually Consistent》（最终一致、读己之写、W+R&gt;N）；Jepsen 一致性模型页（各模型分区时的可用性）；ZooKeeper Programmer's Guide；etcd API guarantees；MySQL 8.4 半同步参数；Seata 2.0.0 发行说明（raft 存储模式）；Kafka <code>min.insync.replicas</code> 与 <code>unclean.leader.election.enable</code> 的配置说明；Redis <code>WAIT</code> 与 Cluster 规范；Nacos 文档（AP 只支持临时实例，持久实例走简化 Raft 的 CP）。Gilbert、Lynch 2002 的定义用的是通行转述，没有逐字引用原文。</p>
+  <p>相关：<a href="../java/pano-j09-order-across-three-dbs.html">全景：一次下单跨三个库</a> · <a href="../database/mysql-replication-lag.html">主从复制与复制延迟</a> · <a href="../kafka/kafka-leader-election-elr.html">Kafka 的 ISR、ELR 与 unclean 选举</a> · <a href="../redis/redis-restart-failover.html">Redis 重启、切主以后丢了什么</a> · <a href="../redis/cache-consistency.html">先改库还是先删缓存</a> · <a href="../java/roadmap.html#j09">Java 地图 J09</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+// 3 replicas of coupon status; W/R quorum; partition isolates one node part of each 100-tick period; async replication lag
+function capSim(o){
+  var N=3,W=o.w,R=o.r,C=o.coupons||1000,T=o.ticks||10000,P=100,partLen=Math.round((o.part||0)*P),lagMax=o.lag||0,rnd=mulberry32(o.seed==null?42:o.seed);
+  var iso=[];for(var p=0;p<T/P+2;p++)iso.push(Math.floor(rnd()*N));
+  function reach(c,t){var p=Math.floor(t/P),inPart=(t%P)<partLen;var r=[c];
+    for(var i=0;i<N;i++){if(i===c)continue;if(inPart&&(c===iso[p]||i===iso[p]))continue;r.push(i);}return r;}
+  var owner=[],ver=[];for(var n=0;n<N;n++){owner.push(new Int32Array(C));ver.push(new Int32Array(C));}
+  var ev=[],seq=0;
+  for(var k=0;k<C;k++){var tA=Math.floor(k*T/C)+Math.floor(rnd()*5),gap=2+Math.floor(rnd()*20);
+    ev.push({t:tA,s:seq++,op:'lock',k:k,ord:1,c:Math.floor(rnd()*N)});
+    ev.push({t:tA+1,s:seq++,op:'read',k:k,c:Math.floor(rnd()*N)});
+    ev.push({t:tA+gap,s:seq++,op:'lock',k:k,ord:2,c:Math.floor(rnd()*N)});}
+  ev.sort(function(a,b){return a.t-b.t||a.s-b.s;});
+  var q=[],gv=0,m={lockReq:0,lockRejected:0,lockOk:0,alreadyUsed:0,doubleLock:0,reads:0,readRejected:0,staleReads:0,maxPending:0};
+  var got=new Int8Array(C);
+  function apply(n,k,ow,v){if(v>ver[n][k]){ver[n][k]=v;owner[n][k]=ow;}}
+  function deliver(t){var keep=[];for(var i=0;i<q.length;i++){var x=q[i];
+      if(x.due<=t&&reach(x.from,t).indexOf(x.to)>=0)apply(x.to,x.k,x.ow,x.v);else keep.push(x);}q=keep;}
+  function readQ(nodes,k){var b=nodes[0];for(var i=1;i<nodes.length;i++)if(ver[nodes[i]][k]>ver[b][k])b=nodes[i];return owner[b][k];}
+  var cur=-1;
+  for(var i=0;i<ev.length;i++){var e=ev[i];if(e.t!==cur){cur=e.t;deliver(cur);if(q.length>m.maxPending)m.maxPending=q.length;}
+    var r=reach(e.c,e.t),k=e.k;
+    if(e.op==='read'){m.reads++;if(r.length<R){m.readRejected++;continue;}
+      var ow=readQ(r.slice(0,R),k);if((got[k]&1)&&ow!==2*k+1)m.staleReads++;continue;}
+    m.lockReq++;if(r.length<R||r.length<W){m.lockRejected++;continue;}
+    if(readQ(r.slice(0,R),k)!==0){m.alreadyUsed++;continue;}
+    var v=++gv,ow2=2*k+e.ord;
+    var wset=r.slice(0,W);for(var j=0;j<wset.length;j++)apply(wset[j],k,ow2,v);
+    for(n=0;n<N;n++)if(wset.indexOf(n)<0)q.push({to:n,from:e.c,k:k,ow:ow2,v:v,due:e.t+(lagMax?1+Math.floor(rnd()*lagMax):0)});
+    m.lockOk++;got[k]|=(e.ord===1?1:2);}
+  for(k=0;k<C;k++)if(got[k]===3)m.doubleLock++;
+  // heal: anti-entropy, LWW
+  for(i=0;i<q.length;i++)apply(q[i].to,q[i].k,q[i].ow,q[i].v);
+  var diverge=0;for(k=0;k<C;k++)if(!(owner[0][k]===owner[1][k]&&owner[1][k]===owner[2][k]))diverge++;
+  m.divergeAfterHeal=diverge;return m;}
+/*SIM-END*/
+(function(){
+  var st={w:2,r:1,part:0.1,lag:5,guess:null};
+  function $(id){return document.getElementById(id);}
+  function bucket(n){return n===0?'0':(n<=30?'few':'many');}
+  function segBind(id,fn){var box=$(id);box.addEventListener('click',function(ev){var b=ev.target.closest('button');if(!b)return;
+    box.querySelectorAll('button').forEach(function(x){x.setAttribute('aria-pressed',x===b?'true':'false');});fn(b);reset();});}
+  segBind('q-wr',function(b){st.w=+b.dataset.w;st.r=+b.dataset.r;});
+  segBind('q-part',function(b){st.part=+b.dataset.v;});
+  segBind('q-lag',function(b){st.lag=+b.dataset.v;});
+  function reset(){$('q-out').hidden=true;$('q-res').hidden=true;
+    $('q-opts').querySelectorAll('button').forEach(function(x){x.classList.remove('right','wrong');x.setAttribute('aria-pressed','false');});
+    $('q-ask').textContent='先猜：W'+st.w+' R'+st.r+'、分区 '+Math.round(st.part*100)+'%、复制延迟'+(st.lag?'1～5 片':'无')+'，1000 张券里有几张被两单都锁到？';}
+  function verdict(m){var N=3,q=st.w+st.r>N,items=[];
+    if(q)items.push('W+R='+(st.w+st.r)+' > N=3：读和最近一次写至少重叠一个副本，所以两单都锁到 '+m.doubleLock+' 张、读成 UNUSED '+m.staleReads+' 次。');
+    else items.push('W+R='+(st.w+st.r)+' ≤ N=3：读和写可能正好错开，两单都锁到 '+m.doubleLock+' 张，读成 UNUSED '+m.staleReads+' 次。');
+    if(m.lockRejected===0&&m.readRejected===0)items.push(st.part===0?'没有分区，所以一次都没拒。':'一次都没拒：这是选了 A，代价落在上一条。');
+    else items.push('分区时凑不齐 '+Math.max(st.w,st.r)+' 个副本就拒绝：抢券被拒 '+m.lockRejected+' 次、读被拒 '+m.readRejected+' 次。这是选了 C 的代价'+(Math.max(st.w,st.r)===3?'；要 3 台都在，比多数派（2 台）拒得多。':'。'));
+    if(st.part===0&&m.doubleLock>0)items.push('没断网也出错：只因为不等异步复制。这是 PACELC 的 E，平时就在拿一致换延迟。');
+    if(!q&&st.lag===0&&m.doubleLock===0&&st.part>0)items.push('没有复制延迟时，写不够 W 份会被拒，挡住了双锁；可读到旧值的问题还在。');
+    if(m.doubleLock>0)items.push('分区恢复后副本都一样了（最终一致），但这 '+m.doubleLock+' 单里各有一单要补偿：取消或补差。');
+    return '<b>'+(q?'W+R>N：读写一定碰头':'W+R≤N：读写可能错开')+'</b><ul><li>'+items.join('</li><li>')+'</li></ul>';}
+  function show(){var m=capSim({w:st.w,r:st.r,part:st.part,lag:st.lag,seed:42});
+    $('q-rej').textContent=m.lockRejected;$('q-dbl').textContent=m.doubleLock;$('q-stale').textContent=m.staleReads;$('q-rrej').textContent=m.readRejected;
+    $('q-verdict').innerHTML=verdict(m);$('q-out').hidden=false;
+    var g=st.guess,res=$('q-res');
+    if(g&&g!=='skip'){var ok=bucket(m.doubleLock)===g;
+      $('q-opts').querySelector('[data-g="'+g+'"]').classList.add(ok?'right':'wrong');
+      if(!ok)$('q-opts').querySelector('[data-g="'+bucket(m.doubleLock)+'"]').classList.add('right');
+      res.textContent=(ok?'猜对了。':'没猜中。')+(st.w+st.r>3?'决定它的是 W+R 是否大于 N（④ 机制 3）。':'W+R 没有大于 N，读写可能错开（④ 机制 3）；错多少取决于分区和复制延迟。');
+      res.hidden=false;}else res.hidden=true;}
+  $('q-opts').addEventListener('click',function(ev){var b=ev.target.closest('button');if(!b)return;
+    $('q-opts').querySelectorAll('button').forEach(function(x){x.classList.remove('right','wrong');x.setAttribute('aria-pressed',x===b?'true':'false');});
+    st.guess=b.dataset.g;show();});
+  reset();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
