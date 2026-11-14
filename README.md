@@ -194,3 +194,9 @@
 | 06 | [异常、反射、注解与动态代理：Spring 下面那一层](https://archeu.github.io/study-notes/javase/exception-reflection-proxy.html) | J01 第 5 个知识点的下一圈（JDK 层）：受检与非受检、异常贵在填栈与 OmitStackTraceInFastThrow、try-with-resources 与 suppressed，Method.invoke 的 inflation 与 JDK 18 的 MethodHandle 实现、强封装，注解的保留策略与“注解对象也是代理”，生成的 $Proxy 类和异常表，手写事务 + 审计拦截器，代理调用分步演示，JDK 17 实测 |
 | 07 | [IO 与 NIO 基础：字节怎么进来，怎么出去](https://archeu.github.io/study-notes/javase/io-nio-basics.html) | J01 第 6 个知识点的下一圈（API 与字节）：流的装饰器、字符集与乱码、缓冲为什么快（strace 数系统调用：一次一字节 200 万次对 263 次）、ByteBuffer 三指针与 flip / compact、堆内与直接缓冲、FileChannel.transferTo 与 sendfile、Files 工具，交易靶场导出导入，ByteBuffer 演示，JDK 17 实测 |
 | 08 | [数据结构与算法：日常和面试够用的那部分](https://archeu.github.io/study-notes/javase/algorithms-everyday.html) | J01 最后一个知识点：先按数据量估复杂度，按最频繁的操作选结构，二分的不变式、Top K 小顶堆、滑动窗口限流、TimSort 与双轴快排及比较器约定，红黑树插入分步手推（和 TreeMap 反射实测逐步一致），面试题型地图，交易靶场四道题，JDK 17 实测 |
+
+## RocketMQ
+
+| # | 页面 | 内容 |
+|---|------|------|
+| 01 | [改库和发消息怎么一起成功：RocketMQ 的事务消息、定时消息、顺序消息](https://archeu.github.io/study-notes/rocketmq/rocketmq-tx-delay-order.html) | 半消息 + 回查、延迟级别与时间轮、选队列与锁队列，交易靶场实测（进程死在四个位置、定时取消、三种顺序消费），回查时间线实验台 |

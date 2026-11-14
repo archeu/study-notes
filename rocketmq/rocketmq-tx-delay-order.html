@@ -1,0 +1,1445 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>改库和发消息怎么一起成功：RocketMQ 的事务消息、定时消息、顺序消息</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J08 knowledge point 5 "RocketMQ transactional / timer / ordered messages" (first round), stations 1 and 2 of the J08 panorama. Roles: of = order service / producer and its local transaction, cg = broker, topics and queues, pd = transactional message (half message, OP records, check-back), g2 = timer messages (delay levels, timing wheel), rn = ordered messages (queue selector, queue locks); bad / good / neutral keep their global meaning. Interactions: one lab (transaction check-back timeline: where the producer dies, how checkLocalTransaction answers, whether another instance is online, restart time, check-task phase) with guess-first. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+ul.plain{margin:0 0 0 1.2em;padding:0;display:flex;flex-direction:column;gap:6px}
+.tl-wrap{overflow-x:auto;margin-top:12px}
+.tl-wrap svg{min-width:620px}
+.tl-list{margin:8px 0 0 1.4em;padding:0;font-size:14px;line-height:1.6;max-height:260px;overflow-y:auto}
+.tl-list li b{font-family:var(--font-mono);font-weight:600;margin-right:6px}
+.tl-list li.bad{color:var(--bad)}
+#c-phase{width:100%}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>RocketMQ</span><span aria-hidden="true">/</span><span class="tb-here">改库和发消息怎么一起成功</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+    <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g2"/></marker>
+    <marker id="ah-rn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-rn"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">半消息 · 回查 · TransactionMQProducer · 定时消息 · 时间轮 · 18 个延迟级别 · MessageQueueSelector · MessageListenerOrderly · 队列锁 · RocketMQ 5.5.1</p>
+  <h1>改库和发消息怎么一起成功：RocketMQ 的事务消息、定时消息、顺序消息</h1>
+  <p class="lead">这三样 Kafka 都没有现成的，要靠 outbox 表、扫表任务、消费端车道自己拼。RocketMQ 把它们做进了 Broker。<b>事务消息</b>：消息先存进 Broker，但消费者看不见；订单库提交以后才放出来；生产者中途死了，Broker 会回头问“这一单到底成没成”。<b>定时消息</b>：Broker 把消息先停在一个时间轮上，到点再投。<b>顺序消息</b>：发送时按订单号选定一个队列，消费时把这个队列锁住，一次只交给一个线程。三样都只管到“消息怎么进出 Broker”，消费端的幂等还得自己做。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么学</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>老办法</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>选谁</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>跑起来</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j08-order-event-life.html#s-1">一条订单消息的一生 · 第 1、2 站</a></span><span>地图：<a href="../java/roadmap.html#j08">J08 · RocketMQ：事务消息、延迟消息、顺序消息</a></span></p>
+  <p class="scene"><b>接着全景</b><span>全景第 1 站用 outbox 表解决“改库和发消息要一起成功”；上一页<a href="../kafka/kafka-idempotent-ordering.html">幂等消费与顺序消息</a>讲了 Kafka 下怎么去重、怎么保序。这一页换一个 MQ，看 RocketMQ 把这几件事做进 Broker 以后，机制是什么、代价在哪，和 outbox、Kafka 对照着学。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么学：交易靶场里有三件事，Kafka 都给不了现成的</h2>
+    <p class="lead">在全景第 1 站，支付回调到了，订单服务要把 9527 改成 PAID，再发一条“已支付”，两件事得一起成功。下单 30 分钟还没付款的单要自动取消，得有一条“30 分钟后才到”的消息。在第 2 站，9527 的“已支付”“已发货”“已退款”要按顺序生效。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="三件事。第 1 站：订单服务在一个事务里把 9527 改成 PAID，还要给 Broker 发一条已支付；库在 MySQL，消息在 Broker，两边没有共同的事务。下单那一刻：要发一条 30 分钟后才投递的取消检查消息，到时如果还没付款就取消。第 2 站：9527 的 PAID、SHIPPED、REFUNDED 三条事件要按发生的顺序生效。">
+  <text x="20" y="26" class="t-h">第 1 站：改库和发消息，两件事要一起成功</text>
+  <rect x="20" y="42" width="250" height="56" rx="8" class="b-of"/>
+  <text x="145" y="64" text-anchor="middle" class="t-s">订单服务</text>
+  <text x="145" y="84" text-anchor="middle" class="t-xs t-mono">UPDATE … SET status='PAID'</text>
+  <path d="M270,70 L330,70" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="334" y="42" width="160" height="56" rx="8" class="b-neu"/>
+  <text x="414" y="64" text-anchor="middle" class="t-s">MySQL</text>
+  <text x="414" y="84" text-anchor="middle" class="t-xs">订单 9527 → PAID</text>
+  <path d="M494,70 L554,70" class="e-bad" stroke-dasharray="5 4"/>
+  <text x="524" y="62" text-anchor="middle" class="t-xs t-bad">没有共同的事务</text>
+  <rect x="558" y="42" width="170" height="56" rx="8" class="b-cg"/>
+  <text x="643" y="64" text-anchor="middle" class="t-s">Broker</text>
+  <text x="643" y="84" text-anchor="middle" class="t-xs t-mono">order-paid: PAID:9527</text>
+  <text x="748" y="66" class="t-xs">积分、库存、通知</text>
+  <text x="748" y="84" class="t-xs">都靠这条消息</text>
+
+  <text x="20" y="136" class="t-h">下单那一刻：30 分钟后再看一眼</text>
+  <rect x="20" y="152" width="250" height="56" rx="8" class="b-of"/>
+  <text x="145" y="174" text-anchor="middle" class="t-s">下单成功</text>
+  <text x="145" y="194" text-anchor="middle" class="t-xs">发“30 分钟后检查 9527”</text>
+  <path d="M270,180 L554,180" class="e-g2" marker-end="url(#ah-g2)"/>
+  <text x="412" y="172" text-anchor="middle" class="t-xs">消息在路上停 30 分钟</text>
+  <rect x="558" y="152" width="170" height="56" rx="8" class="b-g2"/>
+  <text x="643" y="174" text-anchor="middle" class="t-s">取消服务</text>
+  <text x="643" y="194" text-anchor="middle" class="t-xs">还没付？取消、回补库存</text>
+  <text x="748" y="176" class="t-xs">付过了就什么都不做</text>
+
+  <text x="20" y="246" class="t-h">第 2 站：同一单的三条事件按顺序生效</text>
+  <rect x="20" y="262" width="96" height="40" rx="6" class="b-rn"/><text x="68" y="287" text-anchor="middle" class="t-xs">PAID</text>
+  <rect x="124" y="262" width="96" height="40" rx="6" class="b-rn"/><text x="172" y="287" text-anchor="middle" class="t-xs">SHIPPED</text>
+  <rect x="228" y="262" width="96" height="40" rx="6" class="b-rn"/><text x="276" y="287" text-anchor="middle" class="t-xs">REFUNDED</text>
+  <path d="M324,282 L554,282" class="e-rn" marker-end="url(#ah-rn)"/>
+  <text x="440" y="274" text-anchor="middle" class="t-xs">也要能并行：1000 单一起来</text>
+  <rect x="558" y="262" width="170" height="40" rx="8" class="b-neu"/>
+  <text x="643" y="287" text-anchor="middle" class="t-s">订单视图：REFUNDED</text>
+  <text x="748" y="287" class="t-xs">停在 SHIPPED 就错了</text>
+</svg>
+  </div>
+  <figcaption>为什么现在学：国内电商、支付链路里 RocketMQ 很常见，“事务消息怎么保证一致”“延迟消息怎么实现”“顺序消息怎么保证”几乎是消息队列面试的固定题；而且三样都有一个能讲清楚的机制，讲清了就能推出它们各自的坑。</figcaption>
+  </figure>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>老办法行不行：能做，但每样都要自己拼</h2>
+    <p class="lead">先用已经会的东西各做一遍。第一张卡片的两个数，是本机 RocketMQ 5.5.1 上让进程死在中间跑出来的，代码见 <a href="#s5">⑤</a>。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 290" role="img" aria-label="三张卡片。改库和发消息：先提交库再发，进程死在中间，订单 9531 已经 PAID，消息永远没发；先发再提交，进程死在中间，积分服务收到了 9532 的已支付，库里却是 NEW。outbox 能解决，但要建表、写投递线程、定期清理。30 分钟取消：定时扫表有最多一个扫描周期的误差，订单表越大越慢；Redis ZSet 要自己写搬运和失败重试。顺序：Kafka 按 key 分区以后，消费端要一条条处理，想并行就得自己写车道。">
+  <rect x="20" y="20" width="290" height="250" rx="12" class="b-card"/>
+  <text x="40" y="50" class="t-s t-b">改库和发消息</text>
+  <text x="40" y="76" class="t-xs">先提交库、再发，死在中间：</text>
+  <text x="40" y="100" class="t-s t-bad t-b">9531：库 PAID，没有消息</text>
+  <text x="40" y="126" class="t-xs">先发、再提交库，死在中间：</text>
+  <text x="40" y="150" class="t-s t-bad t-b">9532：收到“已支付”，库 NEW</text>
+  <text x="40" y="190" class="t-xs">老办法：outbox 表（全景第 1 站）。</text>
+  <text x="40" y="208" class="t-xs">能解决，但每个服务都要建表、写</text>
+  <text x="40" y="226" class="t-xs">投递线程、标记已发、定期清理。</text>
+  <text x="40" y="252" class="t-xs">⑤ 实测，两次运行结果一样</text>
+
+  <rect x="335" y="20" width="290" height="250" rx="12" class="b-card"/>
+  <text x="355" y="50" class="t-s t-b">30 分钟没付就取消</text>
+  <text x="355" y="76" class="t-xs">Kafka 没有延迟投递。常见的两种：</text>
+  <text x="355" y="104" class="t-xs t-b">定时扫表：每分钟一次</text>
+  <text x="355" y="122" class="t-xs">WHERE status='NEW' AND 下单时间</text>
+  <text x="355" y="140" class="t-xs">早于 30 分钟前。最多晚一个周期，</text>
+  <text x="355" y="158" class="t-xs">订单表越大越慢，还要防多实例重复扫。</text>
+  <text x="355" y="190" class="t-xs t-b">Redis ZSet：分数 = 到期时间</text>
+  <text x="355" y="208" class="t-xs">要自己写“到期了搬走”的循环、</text>
+  <text x="355" y="226" class="t-xs">搬到一半失败怎么办、Redis 丢数据怎么办。</text>
+
+  <rect x="650" y="20" width="290" height="250" rx="12" class="b-card"/>
+  <text x="670" y="50" class="t-s t-b">同一单按顺序生效</text>
+  <text x="670" y="76" class="t-xs">Kafka：key = 订单号，同一单进同一个</text>
+  <text x="670" y="94" class="t-xs">分区；消费端一条条处理就有序。</text>
+  <text x="670" y="122" class="t-xs">要并行，得自己按订单号分车道，</text>
+  <text x="670" y="140" class="t-xs">还要自己管“只提交连续完成的位点”。</text>
+  <text x="670" y="168" class="t-xs">上一页实测：丢进线程池，1000 单</text>
+  <text x="670" y="186" class="t-s t-bad t-b">487 单错</text>
+  <text x="670" y="226" class="t-xs">这一样不算“做不到”，</text>
+  <text x="670" y="244" class="t-xs">只是要自己写的东西多。</text>
+</svg>
+  </div>
+  <figcaption>缺的那一块，是让 MQ 自己参与进来：事务消息让 Broker 替你记住“这条消息等着本地事务的结论”；定时消息让 Broker 替你记住“这条几点再投”；顺序消费让客户端替你做“一个队列一次一个线程”。</figcaption>
+  </figure>
+  <p class="misj"><b>不懂精华时的典型误用</b>“上了事务消息，就是分布式事务了，下游积分加失败，订单也会回滚。”不会。事务消息只保证一件事：<b>本地事务提交了，消息最终一定投出去；本地事务没提交，消息一定不投</b>。消息投出去以后，积分服务失败了就重试，重试不成就进死信，上游的订单不会因此回滚。它管的是“发”，不管“收”和“下游做没做成”，消费端照样是至少一次，照样要去重。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>选谁：三件事各有几种做法</h2>
+    <p class="lead">RocketMQ 不是每一项都必选。下面三张表各回答一件事，最后一行是本页学的。</p>
+  </div>
+  <h3>改库和发消息一起成功</h3>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>做法</th><th>怎么做到的</th><th>代价</th></tr></thead>
+    <tbody>
+      <tr><td><b>outbox / 本地消息表</b> + 任意 MQ</td><td>消息先当成一行数据，和订单在同一个本地事务里提交；投递线程扫出来发，发成功再标记</td><td>每个服务一张表、一个投递线程；和 MQ 无关，换 MQ 不用改</td></tr>
+      <tr><td><b>Kafka 事务</b></td><td>让几条写 Kafka 的操作原子地生效</td><td>只覆盖 Kafka 自己；MySQL 不在事务里，解决不了这件事</td></tr>
+      <tr><td><b>先提交再发 + 对账补发</b></td><td>不保证，靠定时对账把漏发的补上</td><td>有一段窗口期不一致；对账任务本身要写</td></tr>
+      <tr><td><b>RocketMQ 事务消息</b></td><td>半消息 + 回查：消息先进 Broker 但不可见，本地事务的结论来了才放出；结论没来，Broker 定时回查</td><td>要写一个“查本地事务结果”的回查接口；绑定 RocketMQ</td></tr>
+    </tbody>
+  </table></div>
+  <h3>30 分钟以后再投</h3>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>做法</th><th>精度</th><th>代价</th></tr></thead>
+    <tbody>
+      <tr><td><b>定时扫表</b></td><td>一个扫描周期</td><td>订单表上要有合适的索引；大表扫描压库；多实例要加锁</td></tr>
+      <tr><td><b>Redis ZSet</b>（<a href="../redis/redis-stream-mq.html">Redis Stream 页</a>讲过）</td><td>取决于轮询间隔</td><td>搬运循环、失败重试、持久化都要自己保证</td></tr>
+      <tr><td><b>RabbitMQ</b>：TTL + 死信队列，或延迟插件</td><td>较高</td><td>TTL 方式下同一队列只能用一个时长；延迟插件要另外安装</td></tr>
+      <tr><td><b>RocketMQ 定时消息</b>（5.0 起，任意时刻）/ 延迟级别（18 档）</td><td>定时消息约 1 秒；延迟级别约 0.1 秒（⑤ 实测）</td><td>定时消息最长 3 天；延迟级别只有 1s～2h 共 18 个固定档</td></tr>
+    </tbody>
+  </table></div>
+  <h3>同一单按顺序生效</h3>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>做法</th><th>顺序怎么来的</th><th>并行度</th></tr></thead>
+    <tbody>
+      <tr><td><b>Kafka：key 分区 + 一条条处理</b></td><td>同一单进同一个分区，一个分区一个消费者</td><td>分区数；要更高就自己写车道</td></tr>
+      <tr><td><b>RocketMQ 5.x FIFO 消息</b>（gRPC 客户端）</td><td>发送时设消息组（messageGroup），Broker 保证同一组一次只交出一条</td><td>按消息组并行，不受队列数限制（按文档）</td></tr>
+      <tr><td><b>RocketMQ 顺序消息</b>（remoting 客户端）</td><td>发送时按订单号选队列，消费时锁住队列，一个队列一次一个线程</td><td>队列数；一个消费者实例里多个队列并行</td></tr>
+    </tbody>
+  </table></div>
+  <p class="pick-line"><b>选择规则</b>：已经在用 Kafka、团队又不想多维护一套 MQ，就用 outbox + 定时扫表或 ZSet，顺序用 key 分区。交易链路选的是 RocketMQ，就直接用它的三样，少写一张 outbox 表、一个扫表任务。<b>本页学 RocketMQ 5.5.1 的这三样</b>，用的是 remoting 客户端（<code>rocketmq-client</code>，rocketmq-spring 用的也是它），直连 NameServer 和 Broker；5.x 新的 gRPC 客户端放在 <a href="#deep">⑥ 第三圈</a>。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：消息先停在 Broker 的系统 topic 里，条件满足了再放进真正的 topic</h2>
+    <p class="lead">三样东西用的是同一招：消息先写进一个消费者不会订阅的<b>系统 topic</b>，Broker 记着它真正要去哪；等本地事务有了结论、或者时间到了，再把它重新写进真正的 topic，消费者这时才看得见。顺序消息不用这一招，它靠的是选队列和锁队列。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>Topic 和队列</b>：RocketMQ 的 topic 分成若干个<b>队列</b>（MessageQueue），相当于 Kafka 的分区；同一个队列里的消息有先后，队列之间没有。</li>
+      <li><b>CommitLog</b>：一个 Broker 上所有 topic 的消息都追加写进同一串 CommitLog 文件，每个队列另有一个只记位置的索引（ConsumeQueue）。消息写下去就不能改，只能追加。和 Kafka 每个分区一份日志的对照见 <a href="../kafka/kafka-storage-zerocopy.html">Kafka 存储与零拷贝</a>。</li>
+      <li><b>NameServer 和组</b>：NameServer 只管路由（哪个 topic 在哪个 Broker）。生产者属于<b>生产者组</b>，消费者属于<b>消费者组</b>；同一个消费者组里，一个队列同一时刻只分给一个实例。</li>
+    </ul>
+  </div>
+
+  <h3 id="tx">事务消息：半消息 + 回查</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 420" role="img" aria-label="事务消息的时序。1 订单服务发半消息，Broker 把它写进系统 topic RMQ_SYS_TRANS_HALF_TOPIC，真正的 topic order-paid 记在属性里，消费者看不见。2 Broker 回 SEND_OK。3 订单服务执行本地事务，把 9527 改成 PAID 并提交。4 订单服务用 oneway 发 endTransaction：COMMIT 时 Broker 把消息重新写进 order-paid，并往 RMQ_SYS_TRANS_OP_HALF_TOPIC 记一条已处理；ROLLBACK 时只记已处理。积分服务这时才收到。下半部分：如果第 4 步没来，Broker 的检查任务每 30 秒扫一轮半消息，对照已处理记录，找出存在超过 6 秒还没结论的，向同一生产者组里任一在线实例发回查，实例调用 checkLocalTransaction 查库，回答 COMMIT、ROLLBACK 或 UNKNOW；UNKNOW 下一轮再查，查满 15 次移到 TRANS_CHECK_MAX_TIME_TOPIC。">
+  <rect x="20" y="20" width="190" height="380" rx="12" class="b-of"/>
+  <text x="115" y="46" text-anchor="middle" class="t-s t-b">订单服务</text>
+  <text x="115" y="64" text-anchor="middle" class="t-xs">生产者组 order-tx-pg</text>
+  <rect x="260" y="20" width="430" height="380" rx="12" class="b-cg"/>
+  <text x="475" y="46" text-anchor="middle" class="t-s t-b">Broker</text>
+  <rect x="280" y="60" width="190" height="44" rx="6" class="b-pd"/>
+  <text x="375" y="80" text-anchor="middle" class="t-xs t-mono">RMQ_SYS_TRANS_HALF_TOPIC</text>
+  <text x="375" y="96" text-anchor="middle" class="t-xs">半消息，真 topic 记在属性里</text>
+  <rect x="490" y="60" width="180" height="44" rx="6" class="b-pd"/>
+  <text x="580" y="80" text-anchor="middle" class="t-xs t-mono">RMQ_SYS_TRANS_OP_HALF</text>
+  <text x="580" y="96" text-anchor="middle" class="t-xs">已处理记录（OP）</text>
+  <rect x="490" y="180" width="180" height="44" rx="6" class="b-good"/>
+  <text x="580" y="200" text-anchor="middle" class="t-xs t-mono">order-paid</text>
+  <text x="580" y="216" text-anchor="middle" class="t-xs">消费者这时才看得见</text>
+  <rect x="740" y="180" width="200" height="44" rx="8" class="b-neu"/>
+  <text x="840" y="200" text-anchor="middle" class="t-s">积分服务</text>
+  <text x="840" y="216" text-anchor="middle" class="t-xs">仍是至少一次，要去重</text>
+  <path d="M670,202 L736,202" class="e-good" marker-end="url(#ah-good)"/>
+
+  <path d="M210,90 L276,90" class="e-pd" marker-end="url(#ah-pd)"/>
+  <text x="216" y="84" class="t-xs">① 半消息</text>
+  <path d="M276,118 L214,118" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text x="216" y="134" class="t-xs">② SEND_OK</text>
+  <rect x="34" y="146" width="162" height="44" rx="6" class="b-neu"/>
+  <text x="115" y="166" text-anchor="middle" class="t-xs">③ 本地事务</text>
+  <text x="115" y="182" text-anchor="middle" class="t-xs t-mono">9527 → PAID，COMMIT</text>
+  <path d="M210,206 L486,206" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="216" y="200" class="t-xs">④ endTransaction(COMMIT)，oneway</text>
+  <text x="300" y="232" class="t-xs">COMMIT：重新写进 order-paid + 记 OP</text>
+  <text x="300" y="250" class="t-xs">ROLLBACK：只记 OP，消息不放出</text>
+
+  <path d="M280,268 L670,268" class="e-mut" stroke-dasharray="4 4"/>
+  <text x="280" y="290" class="t-xs t-b">④ 没来（UNKNOW、进程死了、包丢了）</text>
+  <rect x="280" y="300" width="390" height="56" rx="6" class="b-card"/>
+  <text x="296" y="320" class="t-xs">检查任务每 30 s 一轮：半消息对照 OP，</text>
+  <text x="296" y="338" class="t-xs">找出存在超过 6 s 还没结论的，回查次数 +1</text>
+  <path d="M276,330 L214,330" class="e-pd" marker-end="url(#ah-pd)"/>
+  <text x="216" y="322" class="t-xs">⑤ 回查</text>
+  <rect x="34" y="300" width="162" height="56" rx="6" class="b-neu"/>
+  <text x="115" y="320" text-anchor="middle" class="t-xs">同组任一在线实例</text>
+  <text x="115" y="338" text-anchor="middle" class="t-xs t-mono">checkLocalTransaction</text>
+  <path d="M196,368 L486,224" class="e-pd" marker-end="url(#ah-pd)"/>
+  <text x="200" y="386" class="t-xs">⑥ 查库后回答 COMMIT / ROLLBACK / UNKNOW</text>
+  <text x="300" y="376" class="t-xs t-bad">查满 15 次 → TRANS_CHECK_MAX_TIME_TOPIC，不再投</text>
+</svg>
+  </div>
+  <figcaption>⑤ 实测：进程在本地事务提交之后、发 COMMIT 之前被杀，半消息存在 20.5 秒（第二遍 31.7 秒）时被回查，父进程查库看到 PAID，答 COMMIT，积分服务随后收到。回查什么时候来，取决于半消息写进去时，30 秒一轮的检查任务转到了哪里，所以落在 6～36 秒之间。</figcaption>
+  </figure>
+  <p>三个细节决定了后面的坑，都在客户端和 Broker 的源码里：</p>
+  <ul class="plain">
+    <li><code>executeLocalTransaction</code> 抛了异常或者返回 <code>null</code>，客户端都按 <b>UNKNOW</b> 处理，不会替你回滚（<code>DefaultMQProducerImpl.sendMessageInTransaction</code>）。本地事务失败，要自己返回 <code>ROLLBACK_MESSAGE</code>，就像 ⑤ 里的 9528。</li>
+    <li>第 ④ 步 <code>endTransaction</code> 是 <b>oneway</b> 发的，不等回应；包丢了生产者也不知道，靠回查兜底。</li>
+    <li>Broker 每次回查前先把回查次数加一，再去找同组里在线的实例（<code>TransactionalMessageServiceImpl.needDiscard</code>、<code>AbstractTransactionalMessageCheckListener.sendCheckMessage</code>）。组里一个在线的都没有，这一次就白查了，次数照样算。</li>
+  </ul>
+
+  <h3 id="txwhy">为什么这样设计：本地事务不能等 Broker，Broker 也不能等生产者</h3>
+  <div class="design">
+    <div class="way" data-role="pd">
+      <h4>半消息 + 回查<small>RocketMQ 选的</small></h4>
+<svg viewBox="0 0 460 170" role="img" aria-label="选中的设计：先把消息存进 Broker 但不可见，本地事务照常提交，不持有任何跨系统的锁。结论丢了，Broker 自己按时回查，生产者死了也有同组的其他实例来回答。">
+  <rect x="20" y="20" width="130" height="40" rx="8" class="b-pd"/>
+  <text x="85" y="45" text-anchor="middle" class="t-xs">半消息先落盘</text>
+  <path d="M150,40 L180,40" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="184" y="20" width="120" height="40" rx="8" class="b-of"/>
+  <text x="244" y="45" text-anchor="middle" class="t-xs">本地事务照常提交</text>
+  <path d="M304,40 L334,40" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="338" y="20" width="102" height="40" rx="8" class="b-good"/>
+  <text x="389" y="45" text-anchor="middle" class="t-xs">告诉 Broker</text>
+  <path d="M389,60 C389,110 85,110 85,64" class="e-pd" stroke-dasharray="5 4" marker-end="url(#ah-pd)"/>
+  <text x="240" y="104" text-anchor="middle" class="t-xs">结论没来：Broker 回头去问</text>
+  <text x="20" y="140" class="t-xs t-good">MySQL 不用支持任何协议，锁也不跨网络</text>
+  <text x="20" y="158" class="t-xs">代价：要写回查接口；结论最晚几分钟才到</text>
+</svg>
+      <p>赢在哪：本地事务和平常一样，提交前不用等 Broker 投票，生产者随时可以死。要求只有一条：回查时能从库里查出“这一单成没成”。</p>
+    </div>
+    <div class="way" data-role="other">
+      <h4>两阶段提交（XA）<small>被放弃的</small></h4>
+<svg viewBox="0 0 460 170" role="img" aria-label="被放弃的设计：协调者先让 MySQL 和 MQ 都 prepare，两边都同意再一起 commit。MySQL 要在 prepare 和 commit 之间一直持有行锁；MQ 要当 XA 参与者；协调者挂了两边都卡住。">
+  <rect x="160" y="14" width="140" height="36" rx="8" class="b-neu"/>
+  <text x="230" y="37" text-anchor="middle" class="t-xs">协调者</text>
+  <rect x="30" y="80" width="150" height="40" rx="8" class="b-neu"/>
+  <text x="105" y="105" text-anchor="middle" class="t-xs">MySQL：prepare</text>
+  <rect x="280" y="80" width="150" height="40" rx="8" class="b-neu"/>
+  <text x="355" y="105" text-anchor="middle" class="t-xs">MQ：prepare</text>
+  <path d="M200,50 L120,78" class="e-ink" marker-end="url(#ah-ink)"/>
+  <path d="M260,50 L340,78" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text x="20" y="146" class="t-xs t-bad">9527 的行锁要一直持有到第二阶段</text>
+  <text x="20" y="162" class="t-xs t-bad">协调者一挂，两边都卡在 prepare</text>
+</svg>
+      <p>输在哪：MQ 要实现 XA 参与者，订单行锁要跨两次网络往返，协调者本身又成了要高可用的单点。决定胜负的约束和上一页一样：<b>MySQL 和 Broker 是两个系统，没有共同的事务</b>。半消息、outbox 都选了“最终一致”：outbox 把消息搬进库，半消息把“等结论”这件事交给 Broker。</p>
+    </div>
+  </div>
+
+  <h3 id="timer">定时消息：18 个延迟级别，和 5.0 起的时间轮</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 360" role="img" aria-label="左边是延迟级别：消息设了 delayLevel 3，Broker 把它改写进 SCHEDULE_TOPIC_XXXX 的第 3 个队列（队列号 2）。18 个级别各一个队列，同一个队列里延迟一样，先进来的先到期，所以每个队列只要看队头；定时任务每 100 毫秒看一次，到期的重新写进真正的 topic。右边是 5.0 起的定时消息：消息带着 deliverTimeMs，先写进 rmq_sys_wheel_timer，再按到期的那一秒挂进时间轮的一格，同一格的消息在 TimerLog 里串成链；指针每秒走一格，把这一格的消息取出，重新写进真正的 topic。时间轮一圈默认 2 天，定时最长 3 天，⑤ 里 4 天的消息发送时就被拒了。">
+  <text x="20" y="26" class="t-h">延迟级别：每级一个队列，只看队头</text>
+  <rect x="20" y="44" width="150" height="44" rx="8" class="b-of"/>
+  <text x="95" y="64" text-anchor="middle" class="t-xs">delayLevel = 3</text>
+  <text x="95" y="80" text-anchor="middle" class="t-xs">（第 3 级 = 10s）</text>
+  <path d="M170,66 L206,66" class="e-g2" marker-end="url(#ah-g2)"/>
+  <rect x="210" y="40" width="250" height="196" rx="10" class="b-g2"/>
+  <text x="335" y="60" text-anchor="middle" class="t-xs t-mono">SCHEDULE_TOPIC_XXXX</text>
+  <text x="226" y="86" class="t-xs">队列 0 · 1s</text>
+  <rect x="300" y="74" width="40" height="16" rx="3" class="b-card"/><rect x="344" y="74" width="40" height="16" rx="3" class="b-card"/>
+  <text x="226" y="110" class="t-xs">队列 1 · 5s</text>
+  <rect x="300" y="98" width="40" height="16" rx="3" class="b-card"/>
+  <text x="226" y="134" class="t-xs t-b">队列 2 · 10s</text>
+  <rect x="300" y="122" width="40" height="16" rx="3" class="b-of"/><rect x="344" y="122" width="40" height="16" rx="3" class="b-card"/><rect x="388" y="122" width="40" height="16" rx="3" class="b-card"/>
+  <text x="300" y="156" class="t-xs">↑ 只看队头：没到期，后面的更不会到期</text>
+  <text x="226" y="182" class="t-xs">…… 共 18 个队列，</text>
+  <text x="226" y="200" class="t-xs">1s 5s 10s 30s 1m～10m 20m 30m 1h 2h</text>
+  <text x="226" y="222" class="t-xs">每 100 ms 看一次队头</text>
+  <path d="M460,138 L496,138" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="430" y="262" text-anchor="end" class="t-xs">到期：重新写进 order-cancel-check</text>
+
+  <text x="510" y="26" class="t-h">定时消息：任意时刻，挂在时间轮上</text>
+  <rect x="510" y="44" width="160" height="44" rx="8" class="b-of"/>
+  <text x="590" y="64" text-anchor="middle" class="t-xs">deliverTimeMs =</text>
+  <text x="590" y="80" text-anchor="middle" class="t-xs">下单时间 + 30 分钟</text>
+  <path d="M670,66 L706,66" class="e-g2" marker-end="url(#ah-g2)"/>
+  <rect x="710" y="44" width="230" height="44" rx="8" class="b-g2"/>
+  <text x="825" y="64" text-anchor="middle" class="t-xs t-mono">rmq_sys_wheel_timer</text>
+  <text x="825" y="80" text-anchor="middle" class="t-xs">先落盘，再按到期秒挂进轮子</text>
+  <circle cx="640" cy="196" r="70" class="b-card"/>
+  <g class="e-mut">
+    <path d="M640,126 L640,140"/><path d="M689.5,146.5 L679.6,156.4"/><path d="M710,196 L696,196"/><path d="M689.5,245.5 L679.6,235.6"/>
+    <path d="M640,266 L640,252"/><path d="M590.5,245.5 L600.4,235.6"/><path d="M570,196 L584,196"/><path d="M590.5,146.5 L600.4,156.4"/>
+  </g>
+  <path d="M640,196 L686,160" class="e-g2" marker-end="url(#ah-g2)"/>
+  <text x="640" y="290" text-anchor="middle" class="t-xs">TimerWheel：1 格 = 1 秒（timerPrecisionMs）</text>
+  <text x="640" y="306" text-anchor="middle" class="t-xs">一圈 2 天（timerRollWindowSlot）</text>
+  <rect x="730" y="130" width="210" height="72" rx="8" class="b-card"/>
+  <text x="746" y="150" class="t-xs">TimerLog：同一格的消息</text>
+  <text x="746" y="168" class="t-xs">追加写，串成一条链</text>
+  <text x="746" y="190" class="t-xs">指针走到这一格，整条链取出</text>
+  <path d="M700,170 L726,166" class="e-ink" marker-end="url(#ah-ink)"/>
+  <path d="M835,202 L835,236" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="835" y="254" text-anchor="middle" class="t-xs">重新写进 order-cancel-check</text>
+  <text x="510" y="340" class="t-xs t-bad">超过 timerMaxDelaySec = 3 天：发送时就被拒（⑤ 实测 CODE 13）</text>
+</svg>
+  </div>
+  <figcaption>⑤ 实测 300 条“10 秒后”：定时消息实际比预定晚 0.07～1.06 秒，中位 0.64～0.67 秒，正好是“1 秒一格”；延迟级别晚 0.004～0.16 秒，中位约 0.06 秒，对应“每 100 毫秒看一次队头”。两者都只会晚，不会早。</figcaption>
+  </figure>
+
+  <div class="design">
+    <div class="way" data-role="g2">
+      <h4>按时间分格，或者按延迟分队列<small>RocketMQ 选的两种</small></h4>
+<svg viewBox="0 0 460 150" role="img" aria-label="选中的设计：延迟相同的放一个队列，天然按到期时间有序，只看队头；任意时刻的，按到期那一秒挂进时间轮的一格，同一格的追加成链。两种都只追加写，不需要排序。">
+  <rect x="20" y="20" width="200" height="40" rx="8" class="b-g2"/>
+  <text x="120" y="45" text-anchor="middle" class="t-xs">同一延迟一个队列：只看队头</text>
+  <rect x="240" y="20" width="200" height="40" rx="8" class="b-g2"/>
+  <text x="340" y="45" text-anchor="middle" class="t-xs">同一秒一格：追加成链</text>
+  <text x="20" y="96" class="t-xs t-good">写入只追加，取出时不用排序</text>
+  <text x="20" y="116" class="t-xs">代价：级别只有 18 档；时间轮精度 1 秒、</text>
+  <text x="20" y="134" class="t-xs">最长 3 天，还多一份 TimerLog 要存</text>
+</svg>
+      <p>赢在哪：CommitLog 只能追加，消息写下去就不再挪动。这两种结构都把“排序”变成了“放进对的格子”：延迟级别靠“同一个队列延迟相同”，时间轮靠“同一格到期时间相同”。</p>
+    </div>
+    <div class="way" data-role="other">
+      <h4>一个按到期时间排序的集合<small>被放弃的</small></h4>
+<svg viewBox="0 0 460 150" role="img" aria-label="被放弃的设计：所有延迟消息放进一个按到期时间排序的结构，比如 Redis 的 ZSet 或一个堆。每次插入都要找位置，数据要能随机改写，几亿条时内存放不下，落盘又要随机写。">
+  <rect x="20" y="20" width="420" height="40" rx="8" class="b-neu"/>
+  <text x="230" y="45" text-anchor="middle" class="t-xs">所有消息按到期时间排好序（ZSet、堆）</text>
+  <text x="20" y="96" class="t-xs t-bad">每次插入都要找位置：放内存装不下几亿条，</text>
+  <text x="20" y="114" class="t-xs t-bad">落盘就是随机写</text>
+  <text x="20" y="138" class="t-xs">Redis ZSet 的做法，适合量不大的场景</text>
+</svg>
+      <p>输在哪：它要求存储能在中间插入，和 CommitLog“只追加”的约束正好相反。量小时它最灵活，所以 Redis 方案在小系统里一直有人用。</p>
+    </div>
+  </div>
+
+  <h3 id="fifo">顺序消息：发送时选队列，消费时锁队列</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="发送端：MessageQueueSelector 用订单号对队列数取模，9527 的三条都进队列 7。消费端用 MessageListenerOrderly：先向 Broker 申请队列锁，同一个消费者组里只有一个实例能锁住队列 7，每 20 秒续一次；拿到消息后，实例内部再按队列加一把锁，同一时刻只有一个线程处理队列 7，处理完一批才取下一批。8 个队列可以由 8 个线程并行处理。失败时，顺序消费返回 SUSPEND_CURRENT_QUEUE_A_MOMENT，在本地暂停 1 秒再试同一条，默认重试次数是 Integer.MAX_VALUE，队列会一直卡着；并发消费返回 RECONSUME_LATER，消息发回 Broker 的重试 topic，后面的照常处理，顺序就没了。">
+  <text x="20" y="26" class="t-h">发送端</text>
+  <rect x="20" y="40" width="230" height="64" rx="8" class="b-of"/>
+  <text x="135" y="62" text-anchor="middle" class="t-xs t-mono">MessageQueueSelector</text>
+  <text x="135" y="82" text-anchor="middle" class="t-xs t-mono">9527 % 8 = 7</text>
+  <text x="135" y="98" text-anchor="middle" class="t-xs">PAID、SHIPPED、REFUNDED 都进队列 7</text>
+  <path d="M250,72 L296,72" class="e-rn" marker-end="url(#ah-rn)"/>
+  <rect x="300" y="40" width="200" height="140" rx="10" class="b-cg"/>
+  <text x="400" y="60" text-anchor="middle" class="t-xs t-mono">order-status（8 个队列）</text>
+  <text x="316" y="84" class="t-xs">队列 0 ……</text>
+  <text x="316" y="108" class="t-xs">……</text>
+  <rect x="316" y="122" width="168" height="40" rx="6" class="b-rn"/>
+  <text x="400" y="140" text-anchor="middle" class="t-xs">队列 7</text>
+  <text x="400" y="156" text-anchor="middle" class="t-xs t-mono">PAID · SHIPPED · REFUNDED</text>
+
+  <text x="540" y="26" class="t-h">消费端：MessageListenerOrderly</text>
+  <path d="M500,142 L546,142" class="e-rn" marker-end="url(#ah-rn)"/>
+  <rect x="550" y="40" width="390" height="40" rx="8" class="b-cg"/>
+  <text x="566" y="65" class="t-xs">锁 1 · Broker 队列锁：组里只有一个实例能锁队列 7，每 20 s 续</text>
+  <rect x="550" y="88" width="390" height="40" rx="8" class="b-rn"/>
+  <text x="566" y="113" class="t-xs">锁 2 · 实例内每个队列一把锁：同一时刻一个线程处理队列 7</text>
+  <rect x="550" y="136" width="390" height="40" rx="8" class="b-neu"/>
+  <text x="566" y="161" class="t-xs">锁 3 · 处理中的队列重平衡时先等这一批做完，再交出去</text>
+  <text x="550" y="200" class="t-xs">8 个队列 → 最多 8 个线程并行（默认线程池 20 个）</text>
+
+  <path d="M20,224 L940,224" class="e-mut" stroke-dasharray="4 4"/>
+  <text x="20" y="250" class="t-h">处理失败时，两种消费方式走两条路</text>
+  <rect x="20" y="262" width="450" height="56" rx="8" class="b-rn"/>
+  <text x="36" y="284" class="t-xs">顺序：<tspan class="t-mono">SUSPEND_CURRENT_QUEUE_A_MOMENT</tspan>，本地停 1 s 再试同一条</text>
+  <text x="36" y="304" class="t-xs t-bad">默认重试 Integer.MAX_VALUE 次：队列 7 后面的订单全卡住</text>
+  <rect x="490" y="262" width="450" height="56" rx="8" class="b-neu"/>
+  <text x="506" y="284" class="t-xs">并发：<tspan class="t-mono">RECONSUME_LATER</tspan>，发回 Broker 的重试 topic</text>
+  <text x="506" y="304" class="t-xs">后面的照常处理（不卡），16 次后进死信；顺序没了</text>
+</svg>
+  </div>
+  <figcaption>⑤ 实测 1000 单 × 3 条，每条处理 1 ms：顺序消费 0.50～0.62 秒，一单不错；同样按订单号选队列、但用并发消费，0.26 秒，错 427～490 单；不选队列（轮询发到 8 个队列）、再用顺序消费，错 560～703 单。顺序要发送端和消费端两头都做到。</figcaption>
+  </figure>
+  <div class="design">
+    <div class="way" data-role="rn">
+      <h4>锁队列<small>RocketMQ 选的</small></h4>
+<svg viewBox="0 0 460 120" role="img" aria-label="选中的设计：并行的单位是队列，一个队列一把锁，客户端自带，业务代码只写处理一条消息的逻辑。">
+  <rect x="20" y="20" width="420" height="40" rx="8" class="b-rn"/>
+  <text x="230" y="45" text-anchor="middle" class="t-xs">并行单位 = 队列；客户端自带锁，业务只管处理一条</text>
+  <text x="20" y="92" class="t-xs t-good">位点按队列提交，没有“车道里谁先做完”的问题</text>
+  <text x="20" y="110" class="t-xs">代价：并行度封顶在队列数；一条卡住，整队卡住</text>
+</svg>
+      <p>Kafka 的消费端只给到“一个分区一个实例”，实例里怎么并行要自己写车道，车道之间做完的先后又会让位点提交变麻烦（上一页 ⑥ 第三圈）。RocketMQ 把“一个队列一个线程”做进了客户端，换来的是并行度上限就是队列数。</p>
+    </div>
+    <div class="way" data-role="other">
+      <h4>按条并发 + 业务层排序<small>被放弃的</small></h4>
+<svg viewBox="0 0 460 120" role="img" aria-label="被放弃的设计：消息并发处理，业务层自己按订单号排队或用版本号判断。">
+  <rect x="20" y="20" width="420" height="40" rx="8" class="b-neu"/>
+  <text x="230" y="45" text-anchor="middle" class="t-xs">按条并发，业务里自己排队、或者用版本号挡旧事件</text>
+  <text x="20" y="92" class="t-xs">每个业务都要写一遍；覆盖型事件用版本号最省事，</text>
+  <text x="20" y="110" class="t-xs">累加型事件（加积分）挡不住</text>
+</svg>
+      <p>不是错的设计，是另一种取舍：上一页的版本号守卫就属于这一类，对“改状态”很好用。RocketMQ 两种都给：要顺序就用 Orderly，不要就用 Concurrently。</p>
+    </div>
+  </div>
+
+  <h3>最少的写法</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">三样的 API</span><span>rocketmq-client 5.5.1（remoting 客户端），JDK 8 起可用</span></div>
+<pre><code><span class="cm">// 1. 事务消息：同一个监听器里，一个方法做本地事务，一个方法回答回查</span>
+TransactionMQProducer p = <span class="kw">new</span> TransactionMQProducer(<span class="s">"order-tx-pg"</span>);
+p.setTransactionListener(<span class="kw">new</span> TransactionListener() {
+    <span class="kw">public</span> LocalTransactionState executeLocalTransaction(Message m, Object arg) {
+        <span class="kw">try</span> { pay(orderId); <span class="kw">return</span> COMMIT_MESSAGE; }               <span class="cm">// UPDATE … SET status='PAID' 并提交</span>
+        <span class="kw">catch</span> (SQLException e) { <span class="kw">return</span> ROLLBACK_MESSAGE; }       <span class="cm">// 别让异常抛出去：抛出去 = UNKNOW</span>
+    }
+    <span class="kw">public</span> LocalTransactionState checkLocalTransaction(MessageExt m) {
+        <span class="kw">return</span> <span class="s">"PAID"</span>.equals(statusOf(m.getKeys())) ? COMMIT_MESSAGE : UNKNOW;  <span class="cm">// 查主库</span>
+    }
+});
+p.sendMessageInTransaction(<span class="kw">new</span> Message(<span class="s">"order-paid"</span>, tag, <span class="s">"9527"</span>, body), <span class="kw">null</span>);
+
+<span class="cm">// 2. 定时消息（5.0 起）：到点的绝对时间；4.x 只能 m.setDelayTimeLevel(1..18)</span>
+m.setDeliverTimeMs(createdAt + 30 * 60_000L);
+
+<span class="cm">// 3. 顺序消息：发送端按订单号选队列，消费端用 Orderly</span>
+producer.send(m, (mqs, msg, id) -&gt; mqs.get(Math.floorMod((Long) id, mqs.size())), 9527L);
+consumer.registerMessageListener((MessageListenerOrderly) (msgs, ctx) -&gt; { apply(msgs); <span class="kw">return</span> SUCCESS; });</code></pre>
+  </div>
+  <p class="cap">回查接口怎么写才不会误判、回查查满 15 次以后去哪了，放到 <a href="#p3">⑥-3</a>、<a href="#p4">⑥-4</a>；定时消息最长 3 天、精度 1 秒、到点要不要再查一次库，放到 <a href="#p5">⑥-5</a>；顺序消费里一条消息一直失败会怎样，放到 <a href="#p7">⑥-7</a>。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>跑起来：交易靶场的订单服务，对着 RocketMQ 5.5.1 跑三组</h2>
+    <p class="lead">单节点 NameServer + Broker，参数全用默认值（只把堆改小）。订单库是 H2 文件库，代替 MySQL：进程被杀以后，另一个进程还能查到它提交了什么。<code>tx</code> 让 6 个订单各在一个位置出事；<code>delay</code> 是“下单 10 秒（代替 30 分钟）没付就取消”；<code>order</code> 是 1000 单 × 3 条事件，三种消费写法。</p>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">跑起来</span><span>RocketMQ 5.5.1 + rocketmq-client 5.5.1 + H2 2.4.240，JDK 17；<a href="https://github.com/archeu/study-labs/tree/main/java/rocketmq/rocketmq-tx-delay-order">完整代码 →</a></span></div>
+<pre><code><span class="cm"># study-labs/java/rocketmq/rocketmq-tx-delay-order</span>
+./run.sh                  <span class="cm"># 下载并起 NameServer + Broker，tx、delay、order 全跑</span>
+./run.sh tx               <span class="cm"># 只跑一组：tx | delay | order orderly|concurrent|rr</span>
+./run.sh clean            <span class="cm"># 停掉，删 data/</span></code></pre>
+<pre><code><span class="cm">// tx 的骨架：9529 在子进程里跑，本地事务提交后用 halt 结束自己（等同 kill -9），不发 COMMIT</span>
+<span class="kw">public</span> LocalTransactionState executeLocalTransaction(Message msg, Object arg) {
+    pay(id, <span class="cm">/*commit=*/</span> mode.equals(<span class="s">"half-commit-die"</span>));      <span class="cm">// 9530 只执行 UPDATE、不提交</span>
+    Runtime.getRuntime().halt(9);
+    <span class="kw">return null</span>;
+}
+<span class="cm">// 父进程是同一个生产者组的另一个实例，负责回答回查</span>
+<span class="kw">public</span> LocalTransactionState checkLocalTransaction(MessageExt msg) {
+    String st = status(db, idOf(msg));
+    <span class="kw">return</span> <span class="s">"PAID"</span>.equals(st) ? COMMIT_MESSAGE
+         : now() - msg.getBornTimestamp() &gt; 10_000 ? ROLLBACK_MESSAGE : UNKNOW;
+}</code></pre>
+  </div>
+  <div class="codebox console" style="margin-top:12px">
+    <div class="code-bar"><span class="n">实测输出</span><span>本机 2 核 ARM，JDK 17.0.21，RocketMQ 和测试程序同机；每组跑了两遍</span></div>
+<pre><code><b>== tx</b>（第一遍）
+<span class="w">+  1.6s 9527 正常：发半消息 → 本地事务提交 → COMMIT</span>
++  1.7s 订单 9528 本地事务失败：订单 9528 不是待支付 → 返回 ROLLBACK
+  [子进程 9529] 半消息已写入 Broker，开始本地事务
+  [子进程 9529] 库已提交 PAID，正要 COMMIT……
+  [子进程 9530] UPDATE 已执行、没提交……
+  [子进程 9531] 库已提交 PAID，正要发消息……
+  [子进程 9532] 普通消息已发出 SEND_OK，正要提交库……
++  7.5s 积分服务收到 PAID:9532，<span class="r">库里订单状态 NEW</span>
+<span class="w">+ 23.5s Broker 回查订单 9529（半消息已存在 20.5s，第 1 次）：库里 PAID → COMMIT_MESSAGE</span>
+<span class="w">+ 23.5s Broker 回查订单 9530（半消息已存在 18.6s，第 1 次）：库里 NEW → ROLLBACK_MESSAGE</span>
++ 23.5s 积分服务收到 PAID:9529，库里订单状态 PAID
+订单  库里最终状态  积分服务收到“已支付”了吗
+9527  PAID        +  2.7s
+9528  CANCELLED   没收到
+9529  PAID        + 23.5s          <span class="cm">第二遍：半消息存在 31.7s 时回查</span>
+9530  NEW         没收到
+9531  PAID        <span class="r">没收到</span>          <span class="cm">老写法：先提交库再发</span>
+9532  NEW         <span class="r">+  7.5s</span>          <span class="cm">老写法：先发再提交库</span>
+
+<b>== delay</b>（300 单，10 秒后检查；3 秒时付掉 100 单）
+取消 200 单，跳过（已付款）100 单
+4 天后的定时消息：<span class="r">被拒绝 —— CODE: 13 timer message illegal, the delay time should not be bigger than the max delay 259200000ms</span>
+实际投递比预定时间晚多少毫秒：
+  定时消息 setDeliverTimeMs  最早 150 · 中位 668 · p99 1055 · 最晚 1064    <span class="cm">第二遍 68 / 635 / 1052 / 1055</span>
+  延迟级别 setDelayTimeLevel 最早   8 · 中位  65 · p99  148 · 最晚  159    <span class="cm">第二遍 4 / 63 / 104 / 107</span>
+
+<b>== order</b>（两遍）
+order orderly    3000 条 618 / 498 ms，最终不是 REFUNDED 的 <span class="w">0</span> 单，新状态被旧事件盖掉 0 次
+order concurrent 3000 条 266 / 259 ms，最终不是 REFUNDED 的 <span class="r">427 / 490</span> 单，盖掉 623 / 733 次
+order rr         3000 条 593 / 485 ms，最终不是 REFUNDED 的 <span class="r">703 / 560</span> 单，盖掉 1120 / 856 次</code></pre>
+  </div>
+  <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>看到了什么</th><th>由哪条原理决定</th></tr></thead>
+      <tbody>
+        <tr><td>9529 的进程死了，消息还是在 20～32 秒后送到了</td><td><a href="#tx">④ 回查</a>：结论没来，Broker 每 30 秒一轮去问同组的其他实例</td></tr>
+        <tr><td>9530 半消息已经写进 Broker，积分服务却一直没收到</td><td><a href="#tx">④ 半消息</a>：它存在系统 topic 里，回查答 ROLLBACK 以后只记一条 OP，从来没进 order-paid</td></tr>
+        <tr><td>两种老写法各丢一边：9531 有库没消息，9532 有消息没库</td><td><a href="#txwhy">④ 两个系统</a>：改库和发消息之间那一刻，谁先做都不对</td></tr>
+        <tr><td>定时消息晚 0.07～1.06 秒，延迟级别只晚 0.1 秒左右</td><td><a href="#timer">④ 时间轮</a>：1 秒一格；延迟级别每 100 毫秒看一次队头</td></tr>
+        <tr><td>3 秒时付了款的 100 单没被取消</td><td>不是 MQ 的功劳：消费端用 <code>WHERE status='NEW'</code> 条件更新，到点再看一眼库</td></tr>
+        <tr><td>按订单号选队列 + 并发消费，快了一倍，却错了四五百单</td><td><a href="#fifo">④ 锁队列</a>：并发消费没有锁 2，同一队列的三条被不同线程处理</td></tr>
+        <tr><td>顺序消费、但发送时不选队列，错得最多</td><td><a href="#fifo">④ 选队列</a>：三条进了三个队列，队列之间没有先后，锁再多也没用</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="done-box"><b>到这里已经能交差了</b>：支付回调用事务消息，回查查主库；下单时发一条 30 分钟后的定时消息，取消时条件更新；订单状态事件按订单号选队列、顺序消费。已知还没处理的细节：回查接口怎么写才不会误判（<a href="#p3">⑥-3</a>）；回查找不到人会怎样（<a href="#p4">⑥-4</a>）；顺序消费里一条消息一直失败（<a href="#p7">⑥-7</a>）；消费端去重（<a href="#p1">⑥-1</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+
+  <h3 id="lab-h">实验台：生产者死在哪、回查怎么写，积分服务最后收到什么</h3>
+  <p>一条事务消息“已支付 9527”。选生产者在哪一步出事、回查方法怎么写、同组还有没有别的实例在线，再选半消息写进去时，Broker 30 秒一轮的检查任务还差几秒转到它。参数全是 5.5.1 的默认值：半消息存在不满 6 秒不查，查满 15 次就放弃。先猜，再看时间线。</p>
+  <div class="lab" id="lab" data-role="pd">
+    <div class="presets" id="presets">
+      <button type="button" data-p="9529"><b>⑤ 的 9529</b><span>提交后被杀，回查查库</span></button>
+      <button type="button" data-p="9530"><b>⑤ 的 9530</b><span>提交前被杀，回查查库</span></button>
+      <button type="button" data-p="lazy"><b>回查偷懒</b><span>永远返回 UNKNOW</span></button>
+      <button type="button" data-p="down"><b>整组下线</b><span>只有一个实例，5 分钟后才重启</span></button>
+    </div>
+    <div class="ctl-grid">
+      <div class="ctl"><span class="lbl">生产者在哪出事</span>
+        <select id="c-crash"><option value="none">不出事</option><option value="before">UPDATE 了、没提交，就被杀</option><option value="after" selected>库已提交、还没发 COMMIT，就被杀</option><option value="lost">COMMIT 发了，包在网络上丢了</option></select></div>
+      <div class="ctl"><span class="lbl">checkLocalTransaction 怎么写</span>
+        <select id="c-checker"><option value="db-unknow">查库：PAID → COMMIT，NEW → UNKNOW</option><option value="db-rollback" selected>查库：PAID → COMMIT，NEW 超过 10 s → ROLLBACK</option><option value="unknow">没实现，永远 UNKNOW</option><option value="commit">偷懒：永远 COMMIT</option></select></div>
+      <div class="ctl"><span class="lbl">同组别的实例</span>
+        <select id="c-others"><option value="1" selected>还有别的实例在线</option><option value="0">没有，只有这一个</option></select></div>
+      <div class="ctl"><span class="lbl">被杀的实例多久重启</span>
+        <select id="c-restart"><option value="never" selected>不重启</option><option value="30">30 秒后</option><option value="300">5 分钟后</option></select></div>
+      <div class="ctl"><span class="lbl">检查任务还差 <b id="v-phase">20</b> 秒转到它</span>
+        <input type="range" id="c-phase" min="0" max="29" step="1" value="20" aria-label="检查任务还差几秒转到这条半消息"></div>
+    </div>
+    <div class="guess" id="guess">
+      <p><b>先猜：</b>积分服务最后收到“已支付 9527”了吗？</p>
+      <div class="opts">
+        <button type="button" data-g="fast">1 秒内就收到</button>
+        <button type="button" data-g="check">靠回查，1 分钟内收到</button>
+        <button type="button" data-g="slow">收到了，但过了好几分钟</button>
+        <button type="button" data-g="none">收不到，这是对的（库里没付款）</button>
+        <button type="button" data-g="lost">收不到，可库里已经付了款</button>
+        <button type="button" data-g="ghost">收到了，可库里没付款</button>
+        <button type="button" data-g="skip" class="skip">不猜了，直接看</button>
+      </div>
+      <p class="res" id="g-res" hidden></p>
+    </div>
+    <div id="out" hidden>
+      <div class="res-grid" id="tiles">
+        <div class="tile" data-role="of"><small>订单库</small><b id="t-db"></b></div>
+        <div class="tile" data-role="pd"><small>消息的结局</small><b id="t-res"></b></div>
+        <div class="tile" data-role="g2"><small>回查次数</small><b id="t-checks"></b></div>
+        <div class="tile" data-role="cg" id="t-vtile"><small>两边一致吗</small><b id="t-verdict"></b></div>
+      </div>
+      <div class="tl-wrap"><svg id="tl" class="sv" viewBox="0 0 960 120" role="img" aria-label="时间线"></svg></div>
+      <ol class="tl-list" id="tl-list"></ol>
+      <div class="lab-res" id="verdict"></div>
+    </div>
+  </div>
+  <p class="cap">时间线按 Broker 的检查规则推出来，不是真跑 RocketMQ；和 ⑤ 对得上：9529 那一组，检查任务差 20 秒时，模拟在第 20 秒回查、COMMIT，实测是半消息存在 20.5 秒时回查。回查的回答当作立刻到达；本地事务按 50 毫秒算。</p>
+
+  <h3>第一圈 · 注意事项：不知道就会出事故</h3>
+  <div class="pits">
+    <div class="pit" id="p1"><b><em>1</em>以为用了事务消息，消费端就不会重复<a class="root" href="#tx">← ④ 只管“发”</a></b>
+      <dl><dt>现象</dt><dd>支付链路换成事务消息以后，积分服务的去重表被删了，“反正一单只发一条”。一次重平衡后，积分又多发了一批。</dd>
+      <dt>根源</dt><dd>事务消息保证的是“库提交了 ⇔ 消息最终投出去”，一条半消息最多变成一条真消息。消费端的“处理完、位点还没提交就崩了”和 Kafka 一模一样，照样至少一次。</dd>
+      <dt>做法</dt><dd class="fix">消费端去重照做，写法见<a href="../kafka/kafka-idempotent-ordering.html">幂等消费与顺序消息</a>；消息 key 用业务单号，去重表以它为主键。</dd></dl></div>
+    <div class="pit" id="p2"><b><em>2</em>本地事务失败时把异常抛出去<a class="root" href="#tx">← ④ 异常 = UNKNOW</a></b>
+      <dl><dt>现象</dt><dd>余额不足、订单已取消这类失败，消息过了半分钟才被回滚，日志里每单多一次回查；回查接口写得不严时，甚至被 COMMIT 出去。</dd>
+      <dt>根源</dt><dd>客户端捕获 <code>executeLocalTransaction</code> 抛出的异常后，按 UNKNOW 结束事务，不会替你回滚，结论只能等回查。</dd>
+      <dt>做法</dt><dd class="fix">方法里自己 <code>try/catch</code>，明确失败返回 <code>ROLLBACK_MESSAGE</code>；只有“说不清”（比如提交时连接断了）才返回 UNKNOW。</dd></dl></div>
+    <div class="pit" id="p3"><b><em>3</em>回查写成“查不到 PAID 就 ROLLBACK”<a class="root" href="#tx">← ④ 回查</a></b>
+      <dl><dt>现象</dt><dd>大促时偶尔有订单已经付了款，下游却从没收到消息，查日志发现这条半消息被回查 ROLLBACK 了。</dd>
+      <dt>根源</dt><dd>回查最早在半消息存在 6 秒后就来。本地事务那时可能还没提交（慢 SQL、锁等待），或者回查查的是还没同步过来的从库，都会看到 NEW。把“看不到”当成“没成功”，就把一笔成功的支付回滚了。</dd>
+      <dt>做法</dt><dd class="fix">回查只查主库；本地事务里顺手写一行事务记录（以 transactionId 或订单号为主键）；查不到时，没超过本地事务最长耗时就返回 UNKNOW，超过了再 ROLLBACK。⑤ 里用的“超过 10 秒”只是演示。</dd></dl></div>
+    <div class="pit" id="p4"><b><em>4</em>回查找不到人，或者一直答 UNKNOW<a class="root" href="#tx">← ④ 先计数、再找人</a></b>
+      <dl><dt>现象</dt><dd>发布时整组下线了几分钟，或者把生产者组改了名；又或者回查方法根本没实现。库里已经 PAID 的订单，消息永远没到。</dd>
+      <dt>根源</dt><dd>Broker 先把回查次数加一，再找同组在线的实例；找不到就算白查。查满 <code>transactionCheckMax=15</code> 次（默认 30 秒一轮，大约 7.5 分钟），半消息被移到 <code>TRANS_CHECK_MAX_TIME_TOPIC</code>，不再投递。回查按生产者组找人，组名改了，旧的半消息就没人认领。</dd>
+      <dt>做法</dt><dd class="fix">生产者组名当成接口一样固定下来；滚动发布，别整组同时下线；监控 <code>TRANS_CHECK_MAX_TIME_TOPIC</code> 的消息数，有就报警并人工补发。实验台的“整组下线”能看到这个过程。</dd></dl></div>
+    <div class="pit" id="p5"><b><em>5</em>把定时消息当成精确闹钟、长期提醒<a class="root" href="#timer">← ④ 时间轮</a></b>
+      <dl><dt>现象</dt><dd>“30 天后自动确认收货”发不出去，报 <code>timer message illegal</code>；或者取消消息到点直接取消，把刚付了款的单也取消了。</dd>
+      <dt>根源</dt><dd>定时消息最长 <code>timerMaxDelaySec</code> = 3 天（⑤ 实测 4 天被拒），精度 1 秒，只会晚不会早。它只负责“到点送达”，不知道这段时间里订单变成了什么样。</dd>
+      <dt>做法</dt><dd class="fix">超过 3 天的用数据库记到期时间 + 定时任务，快到期了再发 MQ；消费端到点再查一次库，用 <code>WHERE status='NEW'</code> 条件更新，就像 ⑤ 里没被取消的 100 单。</dd></dl></div>
+    <div class="pit" id="p6"><b><em>6</em>4.x 想要“7 分钟后”，去改 messageDelayLevel<a class="root" href="#timer">← 历史原因</a></b>
+      <dl><dt>现象</dt><dd>为了一个业务把 Broker 的 <code>messageDelayLevel</code> 改了，别的服务发的“第 5 级”从 1 分钟变成了别的时长。</dd>
+      <dt>根源</dt><dd>延迟级别是 Broker 级的配置，所有 topic、所有生产者共用；5.0 之前开源版只有这 18 档。</dd>
+      <dt>做法</dt><dd class="fix">升到 5.x 用 <code>setDeliverTimeMs</code>；还在 4.x 就只用默认的 18 档，凑不出来的时长用“多级接力”或者定时任务。</dd></dl></div>
+    <div class="pit" id="p7"><b><em>7</em>顺序消费里一条消息一直失败，整个队列卡住<a class="root" href="#fifo">← ④ 锁队列</a></b>
+      <dl><dt>现象</dt><dd>一单的 SHIPPED 因为数据问题一直抛异常，同一队列里其他几百单的状态全停了，堆积告警只报了一个队列。</dd>
+      <dt>根源</dt><dd>顺序消费失败时在本地暂停 1 秒再试同一条（<code>suspendCurrentQueueTimeMillis</code>），remoting 客户端默认重试次数是 <code>Integer.MAX_VALUE</code>。后面的消息不能越过它，否则就不是顺序了。</dd>
+      <dt>做法</dt><dd class="fix">设 <code>maxReconsumeTimes</code>，超过后客户端把它发回 Broker、进死信队列，并报警；业务上分清“重试能好”和“重试也没用”，后者直接记下来、返回成功。</dd></dl></div>
+    <div class="pit" id="p8"><b><em>8</em>以为发送端选了队列，就万事大吉<a class="root" href="#fifo">← ④ 选队列</a></b>
+      <dl><dt>现象</dt><dd>扩容时把 topic 从 8 个队列加到 16 个，或者一个 Broker 挂了，那一阵子有订单显示“已退款”后又变回“已发货”。</dd>
+      <dt>根源</dt><dd><code>id % 队列数</code> 里的队列数变了，同一单前后两条进了不同队列；Broker 挂了时，路由里少了它的队列，<code>mqs.size()</code> 变小，同样会换队列。和 Kafka 加分区是同一个坑。</dd>
+      <dt>做法</dt><dd class="fix">队列数一开始就留够，扩容放在低峰、先停写；顺序消息宁可发送失败、由上游重试，也不手动换队列；覆盖型事件再加一道版本号守卫兜底。</dd></dl></div>
+  </div>
+
+  <h3 id="rules">第二圈 · 使用规范</h3>
+  <div class="rules-list">
+    <div class="rl"><b>事务消息只用在“改库 + 发消息”这一处</b><p>普通的通知、日志用普通消息。事务消息每条至少多写两次 CommitLog（半消息、OP 记录），还要回查。防的是性能被白白吃掉。</p></div>
+    <div class="rl"><b>本地事务里写一行可回查的记录</b><p>回查靠它判断，查主库。防的是 ⑥-3。</p></div>
+    <div class="rl"><b>生产者组名固定，发布滚动进行</b><p>组名写进配置，不随版本变；同组至少两个实例在线。防的是 ⑥-4。</p></div>
+    <div class="rl"><b>监控两个系统 topic</b><p><code>TRANS_CHECK_MAX_TIME_TOPIC</code> 有消息就报警；顺序消费组的死信队列 <code>%DLQ%组名</code> 有消息也报警。</p></div>
+    <div class="rl"><b>定时消息的消费端到点再查一次库</b><p>条件更新，处理完就幂等。防的是 ⑥-5。</p></div>
+    <div class="rl"><b>选队列用 <code>Math.floorMod</code> 和稳定的业务 ID</b><p>订单号是 long，<code>hashCode()</code> 可能是负数，直接 <code>%</code> 会越界。防的是发送时偶发的 <code>IndexOutOfBounds</code>。</p></div>
+    <div class="rl"><b>顺序消费设上限、配死信</b><p><code>maxReconsumeTimes</code> 设成十几次，超过就进死信并报警。防的是 ⑥-7。</p></div>
+    <div class="rl"><b>消费端一律幂等</b><p>三种特殊消息都不改变“至少一次”。防的是 ⑥-1。</p></div>
+  </div>
+
+  <h3 id="deep">第三圈 · 深处：5.x 的新客户端、事务消息的存储代价、半消息被查几次</h3>
+  <div class="rules-list">
+    <div class="rl"><b>5.x 的 gRPC 客户端：消息类型绑在 topic 上</b><p>RocketMQ 5 推荐的新客户端 <code>rocketmq-client-java</code> 经过 Proxy 访问 Broker。topic 建的时候声明类型（普通、FIFO、定时、事务），生产者发的消息要和它对上；顺序不再靠选队列，而是给消息设一个消息组（messageGroup），同一组按顺序投，消费者组要开启顺序消费。本页用的 remoting 客户端仍然能连 5.x 的 Broker，rocketmq-spring 也还用它，所以老项目升级 Broker 时，客户端可以先不动。</p></div>
+    <div class="rl"><b>事务消息在 Broker 里至少写三次</b><p>半消息写一次，COMMIT 时真消息再写一次，再记一条 OP。检查任务每轮要把半消息队列和 OP 队列对着读一遍；每回查一次，这条半消息就被重新写回半消息队列一次，回查次数记在它的属性里。所以大量长期 UNKNOW 的半消息，会让检查越来越慢、CommitLog 越来越大。⑤ 两遍跑完，半消息队列里已经写了 12 条，其实只发了 8 条事务消息。</p></div>
+    <div class="rl"><b>回查时机的几个参数</b><p><code>transactionTimeOut=6000</code>：半消息存在不满 6 秒不查；<code>transactionCheckInterval=30000</code>：检查任务的周期；<code>transactionCheckMax=15</code>：最多查几次。单条消息可以用属性 <code>CHECK_IMMUNITY_TIME_IN_SECONDS</code> 把“不满多久不查”调长，适合本地事务本来就慢的业务，比调全局参数安全。半消息存在超过 CommitLog 保留期（默认 72 小时）也会被丢弃。</p></div>
+  </div>
+  <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>版本</th><th>和这一页有关的变化</th></tr></thead>
+      <tbody>
+        <tr><td>3.x</td><td>开源版的事务消息去掉了回查，只剩半消息</td></tr>
+        <tr><td>4.3.0</td><td>事务消息连同回查重新开源：<code>TransactionMQProducer</code>、<code>TransactionListener</code></td></tr>
+        <tr><td>4.x</td><td>延迟消息只有 18 个级别（<code>messageDelayLevel</code>，Broker 级配置）</td></tr>
+        <tr><td>5.0</td><td>任意时刻的定时消息（时间轮，<code>timerWheelEnable</code> 默认开）；Proxy 和 gRPC 客户端；topic 的消息类型、FIFO 消息组</td></tr>
+        <tr><td>5.5.1</td><td>本页实测版本；事务回查的三个默认值仍是 6 s、30 s、15 次，定时消息仍是 1 秒精度、最长 3 天</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <h3>这一层没有尽头</h3>
+  <ul class="next">
+    <li>5.x gRPC 客户端实测：建 FIFO 和事务类型的 topic，用消息组代替选队列，比较并行度</li>
+    <li>时间轮源码：<code>TimerMessageStore</code> 怎么把一格的消息取出来、Broker 重启后怎么恢复、同一秒的消息太多时怎么流控</li>
+    <li>事务消息的高可用：主从切换时半消息和 OP 记录怎么同步，切换后回查会不会重复</li>
+    <li>RocketMQ 的消费重试和死信：重试 topic、延迟级别 3 起步的退避、Pop 消费模式</li>
+    <li>J09 分布式事务：本地消息表、事务消息、TCC、Seata 的 AT 模式放在一起比</li>
+    <li>怎么选：Kafka、RocketMQ、RabbitMQ、Redis Stream（J08 下钻的最后一个）</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到第⑤步：改一改交易靶场</h2>
+  </div>
+  <ol class="ex">
+    <li><b>回查偷懒（⑥-4）</b>：把父进程的 <code>checkLocalTransaction</code> 改成永远返回 <code>UNKNOW</code>，等 8 分钟以上。先猜 9529 会被回查几次、最后去了哪，再用 <code>mqadmin topicStatus -t TRANS_CHECK_MAX_TIME_TOPIC</code> 确认。</li>
+    <li><b>毒消息（⑥-7）</b>：在 <code>orderly</code> 里让订单 10003 的 SHIPPED 一直返回 <code>SUSPEND_CURRENT_QUEUE_A_MOMENT</code>，10 秒后数一数同一个队列里还有多少单没处理完；再设 <code>maxReconsumeTimes=3</code> 重跑，看它进了哪个 topic。</li>
+    <li><b>取消和支付撞车（⑥-5）</b>：把 <code>delay</code> 的取消语句去掉 <code>AND status='NEW'</code>，猜付了款的 100 单会怎样；再想一想：取消消息先到、支付回调后到时，支付那边的 <code>UPDATE</code> 该怎么写。</li>
+  </ol>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>RocketMQ 把“等条件满足再投”做进了 Broker：事务消息的条件是本地事务的结论，结论没来就回查；定时消息的条件是时间，靠时间轮；顺序消息则靠“发送时按业务 ID 选队列、消费时一个队列一个线程”。三样都不改变消费端的至少一次。</p></details>
+    <details><summary>2. 老办法（先提交再发、outbox）疼在哪？</summary><p>先提交再发，死在中间就丢消息（⑤ 的 9531）；先发再提交，死在中间就有一条库里没有的“已支付”（9532）。outbox 能解决，但每个服务要自己建表、写投递线程、清理。事务消息把“等结论、问结论”交给了 Broker，代价是要写一个能从库里查出结论的回查方法。</p></details>
+    <details><summary>3. 头号坑“回查误判成 ROLLBACK”的根源是哪条原理？</summary><p>④ 回查：半消息存在满 6 秒就可能被查，Broker 并不知道本地事务还在不在跑。回查方法只能看到库里此刻的样子，看到 NEW 不等于失败。所以要查主库、要有一行事务记录，看不清时答 UNKNOW。</p></details>
+    <details><summary>4. 预测：9529 那种情况（库已提交、COMMIT 没发出去），但同组只有这一个实例，它 3 分钟后才重启。积分服务什么时候收到？</summary><p>大约 3 分钟出头。重启前的那几次回查都找不到人，白查，但回查次数照样累加（④ 先计数、再找人）。重启以后的下一轮检查（最多再等 30 秒）查到 PAID，答 COMMIT。3 分钟只用掉 6～7 次，离 15 次还远；要是 9 分钟后才重启，15 次早就用完，消息已经被移走了。可以在实验台里选“没有别的实例”“5 分钟后重启”对照着看。</p></details>
+    <details><summary>5. 预测：把 order-status 从 8 个队列扩到 16 个，消费端仍是顺序消费、发送端仍按 <code>id % mqs.size()</code> 选队列。扩容那一刻会出什么事？</summary><p>扩容前已经发了 PAID、扩容后才发 SHIPPED 的订单，两条可能落在不同队列（模数从 8 变 16），两个队列由不同线程甚至不同实例处理，SHIPPED 可能先生效，状态短暂倒退或最终停错。和 Kafka 加分区同一个坑（④ 选队列）。扩容后发的新订单不受影响。</p></details>
+    <details><summary>6. 放回全景：第 1 站换成事务消息以后，第 1 站前后各发生了什么？这一页讲的东西坏了，整条链路会怎样？</summary><p>第 1 站之前是支付回调到达订单服务；之后是第 2 站按订单号决定进哪个队列（RocketMQ 里就是选队列），再往后是落盘、复制、三个消费组各自消费。换成事务消息以后，第 1 站不再需要 outbox 表和投递线程，改成“半消息 → 本地事务 → COMMIT”，投递线程的活由 Broker 的回查接手。回查坏了（误判 ROLLBACK、整组下线超过 7.5 分钟），就是库里已付款、下游永远没收到：积分不加、库存不扣、通知不发，而且 Kafka 页里那些 LAG 监控全是正常的，只有 <code>TRANS_CHECK_MAX_TIME_TOPIC</code> 里有痕迹。选队列坏了（不选、扩容），第 2 站的顺序保证就没了，订单视图会出现“已退款又变回已发货”。第 8 站的去重仍然要做，事务消息管不到那里。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。RocketMQ 5.5.1 单节点（NameServer + Broker，remoting 客户端直连，没起 Proxy），rocketmq-client 5.5.1、H2 2.4.240（MySQL 模式），JDK 17.0.21，本机 2 核 ARM。Broker 只把堆从 8 GB 改成 1 GB、CommitLog 文件从 1 GB 改成 100 MB，事务和定时相关的参数都是默认值。代码按 JDK 17 编译，写法没有用到 8 以后的语法；H2 2.x 需要 Java 11，所以没有按 JDK 8 跑。</p>
+  <p>标“实测”的都在本机跑过：<code>tx</code>、<code>delay</code>、<code>order</code> 三种各两遍。回查参数（6 s、30 s、15 次）、“先计数再找人”、异常按 UNKNOW 处理、<code>endTransaction</code> 用 oneway 发送、顺序消费默认重试 <code>Integer.MAX_VALUE</code> 次、Broker 队列锁每 20 秒续、延迟级别每 100 毫秒检查、时间轮精度 1 秒、一圈 2 天、最长 3 天，都出自 5.5.1 源码（<code>BrokerConfig</code>、<code>MessageStoreConfig</code>、<code>TransactionalMessageServiceImpl</code>、<code>AbstractTransactionalMessageCheckListener</code>、<code>DefaultMQProducerImpl</code>、<code>DefaultMQPushConsumer</code>、<code>ConsumeMessageOrderlyService</code>、<code>ProcessQueue</code>、<code>ScheduleMessageService</code>）。版本表里 3.x、4.3、5.0 的变化按社区发布记录整理，5.x gRPC 客户端的部分按文档，没有在本机跑。实验台是按回查规则推出来的模拟，在 node 里核对过。</p>
+  <p>相关：<a href="../java/pano-j08-order-event-life.html">全景：一条订单消息的一生</a> · <a href="../kafka/kafka-idempotent-ordering.html">幂等消费与顺序消息</a> · <a href="../kafka/kafka-reliability-group.html">Kafka 可靠性与消费组</a> · <a href="../redis/redis-stream-mq.html">Redis Stream 与消息队列选型</a> · <a href="../spring/spring-events.html">Spring 事件（事务提交后再发）</a> · <a href="../java/roadmap.html#j08">Java 地图 J08</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 事务消息回查的时间线（RocketMQ 5.5.1 Broker 默认值）：
+// 检查任务每 transactionCheckInterval=30s 扫一轮；半消息存在不满 transactionTimeOut=6s 不查；
+// 每次回查前先把回查次数 +1，已满 transactionCheckMax=15 次就移到 TRANS_CHECK_MAX_TIME_TOPIC；
+// 回查发给同一个生产者组里任一在线的实例，组里没人在线，这一次就白查（次数照算）。
+function simTx(o) {
+  var INTERVAL = 30, TIMEOUT = 6, MAX = 15, HORIZON = 900;
+  var ev = [], checks = 0, res = null;
+  var dbPaid = o.crash !== 'before';
+  var restartAt = o.restart === 'never' ? Infinity : +o.restart;
+  ev.push({t: 0, k: 'half', txt: '半消息写入 Broker（消费者看不见）'});
+  if (o.crash === 'none') {
+    ev.push({t: 0.05, k: 'db', txt: '本地事务提交：订单 PAID'});
+    ev.push({t: 0.05, k: 'commit', txt: 'endTransaction(COMMIT) 到达 Broker，消息放进 order-paid'});
+    res = {kind: 'commit', t: 0.05, by: 'end'};
+  } else if (o.crash === 'before') {
+    ev.push({t: 0.03, k: 'crash', txt: 'UPDATE 执行了、还没提交，进程被杀：库里仍是 NEW'});
+  } else if (o.crash === 'after') {
+    ev.push({t: 0.05, k: 'db', txt: '本地事务提交：订单 PAID'});
+    ev.push({t: 0.06, k: 'crash', txt: '还没发 COMMIT，进程被杀'});
+  } else if (o.crash === 'lost') {
+    ev.push({t: 0.05, k: 'db', txt: '本地事务提交：订单 PAID'});
+    ev.push({t: 0.06, k: 'lost', txt: 'COMMIT 是 oneway 发的，这个包丢了；进程还活着'});
+  }
+  var selfDown = o.crash === 'before' || o.crash === 'after';
+  if (selfDown && restartAt !== Infinity) ev.push({t: restartAt, k: 'up', txt: '被杀的实例重启，重新加入生产者组'});
+  function online(t) { return o.others || !selfDown || t >= restartAt; }
+  function answer(t) {
+    if (o.checker === 'db-unknow') return dbPaid ? 'COMMIT' : 'UNKNOW';
+    if (o.checker === 'db-rollback') return dbPaid ? 'COMMIT' : t > 10 ? 'ROLLBACK' : 'UNKNOW';
+    if (o.checker === 'unknow') return 'UNKNOW';
+    return 'COMMIT';
+  }
+  for (var s = o.phase; !res && s <= HORIZON; s += INTERVAL) {
+    if (s <= TIMEOUT) { ev.push({t: s, k: 'scan', txt: '检查任务扫到它，存在不满 6 秒，跳过'}); continue; }
+    if (checks >= MAX) {
+      ev.push({t: s, k: 'discard', txt: '已回查 15 次，移到 TRANS_CHECK_MAX_TIME_TOPIC，不再投递'});
+      res = {kind: 'discard', t: s};
+      break;
+    }
+    checks++;
+    if (!online(s)) { ev.push({t: s, k: 'miss', n: checks, txt: '第 ' + checks + ' 次回查：组里没有在线的生产者，白查'}); continue; }
+    var a = answer(s);
+    ev.push({t: s, k: 'check', n: checks, a: a, txt: '第 ' + checks + ' 次回查：库里 ' + (dbPaid ? 'PAID' : 'NEW') + ' → ' + a});
+    if (a === 'COMMIT') res = {kind: 'commit', t: s, by: 'check'};
+    else if (a === 'ROLLBACK') res = {kind: 'rollback', t: s};
+  }
+  if (!res) res = {kind: 'pending', t: HORIZON};
+  var delivered = res.kind === 'commit';
+  var verdict = delivered && dbPaid ? 'ok-sent' : !delivered && !dbPaid ? 'ok-none' : delivered ? 'ghost' : 'lost';
+  return {events: ev, checks: checks, res: res, dbPaid: dbPaid, delivered: delivered, verdict: verdict};
+}
+// 读者猜的选项：fast 1 秒内收到；check 靠回查、一分钟内收到；slow 一分钟以后才收到；none 收不到且该收不到；lost 库已付款却收不到；ghost 库没付款却收到了
+function bucketTx(r) {
+  if (r.verdict === 'ghost') return 'ghost';
+  if (r.verdict === 'lost') return 'lost';
+  if (r.verdict === 'ok-none') return 'none';
+  return r.res.t < 1 ? 'fast' : r.res.t <= 60 ? 'check' : 'slow';
+}
+/*SIM-END*/
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var NS = 'http://www.w3.org/2000/svg';
+  var guess = null;
+  var presets = {
+    '9529': {crash: 'after', checker: 'db-rollback', others: '1', restart: 'never', phase: 20},
+    '9530': {crash: 'before', checker: 'db-rollback', others: '1', restart: 'never', phase: 20},
+    lazy: {crash: 'after', checker: 'unknow', others: '1', restart: 'never', phase: 20},
+    down: {crash: 'after', checker: 'db-unknow', others: '0', restart: '300', phase: 20}
+  };
+  var label = {fast: '1 秒内就收到', check: '靠回查，1 分钟内收到', slow: '收到了，但过了好几分钟', none: '收不到，这是对的', lost: '收不到，可库里已经付了款', ghost: '收到了，可库里没付款'};
+  function opts(){
+    return {crash: $('c-crash').value, checker: $('c-checker').value, others: $('c-others').value === '1',
+            restart: $('c-restart').value, phase: +$('c-phase').value};
+  }
+  function fmt(t){ return t < 1 ? (t * 1000).toFixed(0) + ' ms' : t < 120 ? t.toFixed(0) + ' 秒' : (t / 60).toFixed(1) + ' 分钟'; }
+  function el(tag, attrs, text){
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  var cls = {half: 'f-pd', db: 'f-of', commit: 'f-good', crash: 'f-bad', lost: 'f-bad', up: 'f-of', scan: 'f-mut', miss: 'f-bad', check: 'f-pd', discard: 'f-bad'};
+  function drawTimeline(r){
+    var svg = $('tl'); while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var end = Math.max(60, Math.ceil((r.res.t + 20) / 30) * 30);
+    var x0 = 30, x1 = 930, sx = function(t){ return x0 + (x1 - x0) * Math.min(t, end) / end; };
+    svg.appendChild(el('path', {d: 'M' + x0 + ',60 L' + x1 + ',60', 'class': 'e-axis'}));
+    var step = end <= 60 ? 10 : end <= 180 ? 30 : 60;
+    for (var t = 0; t <= end; t += step) {
+      svg.appendChild(el('path', {d: 'M' + sx(t) + ',56 L' + sx(t) + ',64', 'class': 'e-axis'}));
+      svg.appendChild(el('text', {x: sx(t), y: 84, 'text-anchor': 'middle', 'class': 't-xs'}, t < 120 ? t + 's' : (t / 60) + 'min'));
+    }
+    if (r.dbPaid) {
+      var tp = r.events.filter(function(e){ return e.k === 'db'; })[0];
+      if (tp) svg.appendChild(el('rect', {x: sx(tp.t), y: 96, width: Math.max(2, sx(end) - sx(tp.t)), height: 8, rx: 3, 'class': 'f-of', opacity: 0.35}));
+      svg.appendChild(el('text', {x: x1, y: 116, 'text-anchor': 'end', 'class': 't-xs'}, '订单库：PAID'));
+    } else {
+      svg.appendChild(el('text', {x: x1, y: 116, 'text-anchor': 'end', 'class': 't-xs'}, '订单库：NEW'));
+    }
+    r.events.forEach(function(e){
+      var x = sx(e.t), c = cls[e.k] || 'f-mut';
+      if (e.k === 'scan') { svg.appendChild(el('circle', {cx: x, cy: 60, r: 4, 'class': c})); return; }
+      if (e.k === 'crash' || e.k === 'lost' || e.k === 'discard') {
+        svg.appendChild(el('path', {d: 'M' + (x - 6) + ',' + 34 + ' L' + (x + 6) + ',' + 46 + ' M' + (x + 6) + ',34 L' + (x - 6) + ',46', 'class': 'e-bad'}));
+      }
+      var y = e.k === 'check' || e.k === 'miss' ? 60 : e.k === 'commit' ? 60 : 60;
+      var rr = e.k === 'commit' || e.k === 'discard' ? 8 : 6;
+      var circ = el('circle', {cx: x, cy: y, r: rr, 'class': c});
+      if (e.k === 'check' && e.a === 'UNKNOW') circ.setAttribute('class', 'f-g2');
+      if (e.k === 'check' && e.a === 'ROLLBACK') circ.setAttribute('class', 'f-mut');
+      svg.appendChild(circ);
+    });
+    var lab = r.res.kind === 'commit' ? '放进 order-paid' : r.res.kind === 'rollback' ? '回滚，不投' : r.res.kind === 'discard' ? '移到 TRANS_CHECK_MAX_TIME_TOPIC' : '15 分钟内没有结论';
+    var xr = sx(r.res.t);
+    svg.appendChild(el('text', {x: Math.min(Math.max(xr, 120), x1 - 110), y: 24, 'text-anchor': 'middle', 'class': 't-xs t-b'}, fmt(r.res.t) + '：' + lab));
+  }
+  function explain(o, r){
+    var why = [];
+    if (o.crash === 'none') why.push('本地事务提交后立刻发 COMMIT，Broker 把消息放进 order-paid，用不着回查（④ 第 ④ 步）。');
+    if (o.crash === 'lost') why.push('COMMIT 是 oneway 发的，丢了生产者也不知道；好在生产者还活着，第一次回查就查到 PAID（④ 回查）。');
+    var miss = r.events.filter(function(e){ return e.k === 'miss'; }).length;
+    if (miss) why.push('有 ' + miss + ' 次回查找不到在线的实例：Broker 先把次数加一、再找人，白查也算一次（⑥-4）。');
+    if (r.verdict === 'lost') why.push(o.checker === 'unknow' ? '回查一直答 UNKNOW，查满 15 次，半消息被移走。库里已经 PAID，下游永远收不到（⑥-4）。' : '15 次用完时还没有人答出 COMMIT，库里 PAID 的单就这样丢了消息（⑥-4）。');
+    if (r.verdict === 'ghost') why.push('回查不看库就答 COMMIT：本地事务明明没提交，“已支付”还是发了出去，和老写法“先发再提交”是同一个结果（⑥-3）。');
+    if (r.verdict === 'ok-none' && r.res.kind === 'rollback') why.push('回查查到 NEW，半消息存在超过 10 秒，答 ROLLBACK：只记一条 OP，消息从没进过 order-paid（④ 半消息）。这次判对了，但同样的规则遇上慢事务就会误判（⑥-3）。');
+    if (r.verdict === 'ok-none' && r.res.kind === 'discard') why.push('回查查到 NEW 一直答 UNKNOW，15 次后被移走。结果是对的（库里没付款），只是多查了 15 次、7 分多钟才了结。');
+    if (r.verdict === 'ok-sent' && r.res.by === 'check') why.push('第 ' + r.checks + ' 次回查查到 PAID，答 COMMIT。从半消息写入到放出用了 ' + fmt(r.res.t) + '：半消息不满 6 秒不查，检查任务 30 秒一轮（④ 回查）。');
+    if (o.crash === 'after' && o.checker === 'db-rollback' && r.verdict === 'ok-sent') why.push('这和 ⑤ 的 9529 一样：被杀的进程用不着自己回来，同组的另一个实例替它回答。');
+    var head = {'ok-sent': '库里 PAID，消息也投了：一致', 'ok-none': '库里 NEW，消息没投：一致', lost: '库里 PAID，消息没投：丢消息', ghost: '库里 NEW，消息却投了：幽灵消息'}[r.verdict];
+    return '<b>' + head + '</b><ul><li>' + why.join('</li><li>') + '</li></ul>';
+  }
+  function run(){
+    var o = opts(), r = simTx(o), b = bucketTx(r);
+    $('t-db').textContent = r.dbPaid ? 'PAID' : 'NEW';
+    $('t-res').textContent = r.res.kind === 'commit' ? '投递 · ' + fmt(r.res.t) : r.res.kind === 'rollback' ? '回滚 · ' + fmt(r.res.t) : r.res.kind === 'discard' ? '放弃 · ' + fmt(r.res.t) : '未定';
+    $('t-checks').textContent = r.checks + ' 次';
+    $('t-verdict').textContent = {'ok-sent': '一致', 'ok-none': '一致', lost: '丢消息', ghost: '幽灵消息'}[r.verdict];
+    $('t-vtile').setAttribute('data-role', r.verdict.indexOf('ok') === 0 ? 'done' : 'bad');
+    drawTimeline(r);
+    var list = $('tl-list'); list.innerHTML = '';
+    r.events.forEach(function(e){
+      var li = document.createElement('li');
+      li.innerHTML = '<b>' + fmt(e.t) + '</b> ' + e.txt;
+      if (e.k === 'miss' || e.k === 'crash' || e.k === 'lost' || e.k === 'discard') li.className = 'bad';
+      list.appendChild(li);
+    });
+    $('verdict').innerHTML = explain(o, r);
+    var gr = $('g-res');
+    document.querySelectorAll('#guess .opts button').forEach(function(btn){
+      btn.classList.remove('right', 'wrong');
+      if (guess && guess !== 'skip' && btn.dataset.g === guess) btn.classList.add(guess === b ? 'right' : 'wrong');
+    });
+    if (guess && guess !== 'skip') { gr.hidden = false; gr.textContent = (guess === b ? '猜对了：' : '没猜中：') + '实际是“' + label[b] + '”。原因见下面。'; }
+    else gr.hidden = true;
+    $('out').hidden = false;
+  }
+  function reset(){
+    guess = null; $('out').hidden = true; $('g-res').hidden = true;
+    document.querySelectorAll('#guess .opts button').forEach(function(x){ x.setAttribute('aria-pressed', 'false'); x.classList.remove('right', 'wrong'); });
+  }
+  document.querySelectorAll('#guess .opts button').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      guess = btn.dataset.g;
+      document.querySelectorAll('#guess .opts button').forEach(function(x){ x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'); });
+      run();
+    });
+  });
+  ['c-crash', 'c-checker', 'c-others', 'c-restart'].forEach(function(id){
+    $(id).addEventListener('change', function(){ reset(); document.querySelectorAll('#presets button').forEach(function(x){ x.setAttribute('aria-pressed', 'false'); }); });
+  });
+  $('c-phase').addEventListener('input', function(){ $('v-phase').textContent = this.value; reset(); });
+  document.querySelectorAll('#presets button').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var p = presets[btn.dataset.p];
+      $('c-crash').value = p.crash; $('c-checker').value = p.checker; $('c-others').value = p.others;
+      $('c-restart').value = p.restart; $('c-phase').value = p.phase; $('v-phase').textContent = p.phase;
+      document.querySelectorAll('#presets button').forEach(function(x){ x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'); });
+      reset();
+    });
+  });
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
