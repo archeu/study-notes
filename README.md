@@ -130,6 +130,7 @@
 | 04 | [三台 broker 都倒了，谁能当 leader：Kafka 的 ISR、ELR 与 unclean 选举](https://archeu.github.io/study-notes/kafka/kafka-leader-election-elr.html) | 可靠性第二圈：机架断电后控制器的四张名单（Isr、Elr、LastKnownElr）、选举顺序、unclean 选举截掉已 ACK 消息和 offset 复用、kill -9 被移出 ELR、高水位冻结，Kafka 4.4.0 四个断电剧本实测，选主推演台 |
 | 05 | [大促积压 100 万条：消费组的扩容上限、重平衡风暴与共享组](https://archeu.github.io/study-notes/kafka/kafka-backlog-drain.html) | LAG 曲线三种形状、加机器加分区为什么没用、活锁式重平衡风暴（经典协议 vs KIP-848）、车道 / 搬家 / 共享组 / 跳过过期四条路的实测速度，消化时间计算台 |
 | 06 | [积分服务停了 8 天，消息已经被删：Kafka 的分层存储、日志压缩与位点过期](https://archeu.github.io/study-notes/kafka/kafka-tiered-compact.html) | 三样东西各自过期、分层存储的两截日志（上传、本地删除、远端读、远端过期）、日志压缩和墓碑、__consumer_offsets 与位点过期、按时间戳找回位置、远端挂了会怎样，一个段的晚年分步动画 |
+| 07 | [交易靶场的五种消息：Kafka、RocketMQ、RabbitMQ、Redis Stream 怎么选](https://archeu.github.io/study-notes/kafka/mq-selection.html) | J08 怎么选第二圈：读完留不留、按组记位点还是按条记状态、日志派怎么补单条重试（重试 topic、共享组）、队列派怎么补回放（stream 队列）、确认那一刻消息在哪、四家这几年补的课，RabbitMQ 4.4.0 实测（读完就删、nack 不进死信、路由、原生延迟），五种消息选型台 |
 
 ## Java 并发
 
