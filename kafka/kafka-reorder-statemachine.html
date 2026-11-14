@@ -1,0 +1,1207 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>退款比付款先到：状态机、跳号暂存与过期副作用</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J08 knowledge point 4 (idempotent + ordered consumption) second round, station 8 of the J08 panorama, mechanism type. Roles: bk = order service / source of truth (sequence numbers, outbox), pd = Kafka partition / arrival order, of = points-svc consumer (page accent), cg = pending (parked) table, rn = SMS side effects, g2 = row lock / CAS. Fixed: bad = wrong result / lost, good = correct. Interaction: one replay bench for order 9527 (pick an arrival order and a consumer design, guess the final points, step through each event). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Kafka</span><span aria-hidden="true">/</span><span class="tb-here">退款比付款先到</span></div></nav>
+
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+    <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-cg"/></marker>
+    <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g2"/></marker>
+    <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bk"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">每单连续序号 · 状态机 · 跳号暂存（Resequencer）· SELECT … FOR UPDATE · 超时回查 · 过期副作用 · H2 2.4 + JDK 17 实测</p>
+  <h1>退款比付款先到：状态机、跳号暂存与过期副作用</h1>
+  <p class="lead">去重表只认得“同一条来了两次”，认不出“两条换了顺序”。第一圈的版本守卫让订单状态只升不降，可积分这种每条都要算的、短信这种发了就收不回的，旧事件不能直接丢。办法是让订单服务给<b>每一单的事件编连续序号</b>，消费端按“已经处理到第几号”把来的事件分三类：<b>旧的确认掉，下一号就做，跳号的先暂存</b>，位点照常往前。暂存和放行要在<b>同一把行锁</b>下做；等不来的那一号，超时后去订单服务回查。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j08-order-event-life.html#s-8">一条订单消息的一生 · 第 8 站</a></span><span>地图：<a href="../java/roadmap.html#j08">J08 · 幂等消费与顺序消息</a></span><span>第一圈：<a href="kafka-idempotent-ordering.html">积分加了两次，退款跑到了付款前面</a></span></p>
+  <p class="scene"><b>下一圈</b><span>第一圈讲了去重表怎么写、顺序在哪几处被打乱、覆盖型用版本守卫、累加型只去重不能丢。留下一个口子：累加型事件<b>先到的是退款</b>怎么办？积分还没加，先扣就扣成负数；短信已经发了“付款成功”，退款又先到了。这一圈把加分区、重复、重平衡、并发、丢一条放在一起，看谁还站得住。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：订单 9527 的三条事件，到积分服务时变了样</h2>
+  </div>
+  <p class="lead">在全景第 8 站，三个服务各自处理订单事件。9527 付款后 10 分钟申请了退款，订单服务按顺序发出三条；积分服务收到的却是这样：</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 260" role="img" aria-label="订单服务按顺序发出 9527 的 1 号 CREATED、2 号 PAID 加 798 积分、3 号 REFUNDED 扣 798 积分。中间经过加分区、重试 topic、重平衡重投和两个线程并发处理，积分服务收到的顺序是 3 号、2 号、1 号，2 号还重复来了一次。">
+  <text x="20" y="22" class="t-h">发出去的顺序 ≠ 收到的顺序</text>
+  <text x="20" y="48" class="t-xs">订单服务（改订单那一行的同一个事务里编号）</text>
+  <rect x="20" y="60" width="230" height="38" rx="8" class="f-bkt e-bk"/><text x="34" y="84" class="t-mono">#1 CREATED</text>
+  <rect x="20" y="110" width="230" height="38" rx="8" class="f-bkt e-bk"/><text x="34" y="134" class="t-mono">#2 PAID    +798</text>
+  <rect x="20" y="160" width="230" height="38" rx="8" class="f-bkt e-bk"/><text x="34" y="184" class="t-mono">#3 REFUNDED −798</text>
+  <text x="940" y="48" text-anchor="end" class="t-xs">积分服务收到的顺序（从上往下）</text>
+  <rect x="690" y="60" width="250" height="38" rx="8" class="f-oft e-of"/><text x="704" y="84" class="t-mono">#3 REFUNDED −798</text>
+  <rect x="690" y="110" width="250" height="38" rx="8" class="f-oft e-of"/><text x="704" y="134" class="t-mono">#2 PAID    +798</text>
+  <rect x="690" y="160" width="250" height="38" rx="8" class="f-oft e-of"/><text x="704" y="184" class="t-mono">#1 CREATED</text>
+  <rect x="690" y="210" width="250" height="38" rx="8" class="f-badt e-bad"/><text x="704" y="234" class="t-mono">#2 PAID    +798  重复</text>
+  <g class="e-pd" marker-end="url(#ah-pd)">
+    <path d="M250,79 C470,79 470,179 686,179"/>
+    <path d="M250,129 L686,129"/>
+    <path d="M250,179 C470,179 470,79 686,79"/>
+  </g>
+  <path d="M250,135 C460,140 480,229 686,229" class="e-bad" stroke-dasharray="5 4" marker-end="url(#ah-bad)"/>
+  <text x="470" y="214" text-anchor="middle" class="t-xs">加分区、重试 topic、重平衡重投、两个线程抢着处理</text>
+</svg>
+  </div>
+  </figure>
+  <div class="facts">
+    <div class="fact" data-role="of"><h4>积分：每条都要算</h4><p>+798 和 −798 都得生效一次，而且<b>余额不能为负</b>（表上有 <code>CHECK (points &gt;= 0)</code>）。退款先到，没东西可扣。</p></div>
+    <div class="fact" data-role="rn"><h4>短信：发了收不回</h4><p>退款都已经知道了，再发一条“付款成功，积分已到账”，用户会以为退款没成。</p></div>
+    <div class="fact" data-role="bk"><h4>订单视图：最后一条说了算</h4><p>只要最终是 REFUNDED。第一圈的版本守卫就够用，这一页顺带复核。</p></div>
+    <div class="fact" data-role="g2"><h4>还要扛住并发</h4><p>重平衡时新旧两个消费者可能同时处理 9527 的两条事件，谁都不能把对方的结果盖掉。</p></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：1000 单一起乱，第一圈的写法也错几十单</h2>
+  </div>
+  <p class="lead">把 9527 的情况放大成 1000 单：30% 的单内部乱序，15% 的事件重复，10% 的事件在重平衡后重投，1% 的退款单丢了付款事件，两个线程并发处理（⑤ 有完整输出）。</p>
+  <div class="tbl-wrap"><table class="t">
+    <thead><tr><th scope="col">写法</th><th scope="col">状态错</th><th scope="col">积分错</th><th scope="col">先扣后加被放弃</th><th scope="col">错在哪</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">S1 去重表 + 状态直接覆盖</th><td class="bad">179～183 单</td><td class="bad">26～29 单</td><td class="bad">56～59 次</td><td>后到的 PAID、CREATED 把 REFUNDED 盖掉；退款先到时扣成负数被 CHECK 拒绝，重试 3 次后放弃，付款后到又加上了 798</td></tr>
+      <tr><th scope="row">S2 第一圈：版本守卫 + 积分只去重</th><td class="bad">35～37 单</td><td class="bad">25～26 单</td><td class="bad">54～56 次</td><td>积分错的原因同上；状态也错，是因为状态和积分在<b>同一个事务</b>里，扣积分失败把“改成 REFUNDED”一起回滚了</td></tr>
+      <tr class="pick"><th scope="row">S4 本页：状态机 + 连续序号 + 暂存 + 行锁</th><td class="good">0</td><td class="good">0</td><td class="good">0</td><td>退款先到就暂存，付款到了一起放行；丢的 10 单靠回查补齐</td></tr>
+    </tbody>
+  </table></div>
+  <div class="chain" data-role="bad"><span>#3 退款先到</span><i>→</i><span>0 − 798 违反 CHECK</span><i>→</i><span>重试 3 次</span><i>→</i><span>放弃，进死信</span><i>→</i><span>#2 付款后到 +798</span><i>→</i><span>积分 798，应为 0</span></div>
+  <p class="rule-box"><b>错在把“早到”当成了“失败”</b>。退款没做错什么，只是来早了；重试几次就放弃，等于把一条合法事件扔掉了。第一圈“累加型只能去重，不能丢”这条规则，在乱序时被重试策略悄悄破坏了。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：六种写法，各管住了什么</h2>
+  </div>
+  <div class="tbl-wrap"><table class="t">
+    <thead><tr><th scope="col">写法</th><th scope="col">重复</th><th scope="col">覆盖型乱序</th><th scope="col">累加型乱序</th><th scope="col">副作用</th><th scope="col">代价</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">去重表</th><td class="good">管住</td><td class="bad">不管</td><td class="bad">不管</td><td class="mid">不重发，但顺序乱</td><td>一张表</td></tr>
+      <tr><th scope="row">版本守卫（第一圈）</th><td class="good">管住</td><td class="good">管住</td><td class="bad">旧的不能丢</td><td class="mid">旧的不发，但跳号时会先发后面的</td><td>一列版本号</td></tr>
+      <tr><th scope="row">可交换账本</th><td class="good">去重后管住</td><td>不适用</td><td class="good">+798、−798 先后无所谓</td><td class="bad">不管</td><td>业务得允许余额暂时为负</td></tr>
+      <tr><th scope="row">事件只当通知，回查最新状态</th><td class="good">管住</td><td class="good">管住</td><td class="mid">要自己算差额</td><td class="mid">按最新状态发</td><td>每条事件一次 RPC，订单服务被下游压</td></tr>
+      <tr><th scope="row">一单只走一条线（单分区单线程）</th><td class="bad">不管</td><td class="good">源头之后都不乱就行</td><td class="good">同左</td><td class="good">同左</td><td>加分区、重试 topic、重平衡一来就破</td></tr>
+      <tr class="pick"><th scope="row">状态机 + 连续序号 + 暂存（本页）</th><td class="good">管住</td><td class="good">管住</td><td class="good">管住</td><td class="good">按序放行，可跳过过期的</td><td>一列序号、一张暂存表、一把行锁、一个回查接口</td></tr>
+    </tbody>
+  </table></div>
+  <p class="rule-box"><b>选择规则</b>：只有覆盖型（订单视图、搜索索引）就用版本守卫，别上暂存。累加型而且业务允许暂时为负，用可交换账本最简单。累加型不允许为负，或者有发了收不回的副作用，用本页的暂存。事件少、订单服务扛得住，回查最新状态也行。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：按号排队，跳号的先存着</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>连续序号和版本号的区别</b>：版本号只要求“新的比旧的大”，跳着长也行；连续序号要求每单从 1 开始、每次只加 1。只有连续，消费端才看得出“中间缺了一号”。</li>
+      <li><b>outbox</b>：改订单和写一行“待发事件”在同一个本地事务里，再由转发器发到 Kafka。见<a href="../rocketmq/rocketmq-tx-delay-order.html">改库和发消息怎么一起成功</a>。</li>
+      <li><b>SELECT … FOR UPDATE</b>：读这一行的同时给它加行锁，别的事务想锁同一行就得等到本事务提交。</li>
+      <li><b>重平衡时的“僵尸”消费者</b>：处理太慢超过 <code>max.poll.interval.ms</code> 被踢出组，分区给了别人，它手上那批还在跑。同一单的事件就会被两个进程同时处理。见<a href="kafka-backlog-drain.html">积压那页</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-classify">机制 1：来一条，先和“处理到第几号”比</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="积分服务为每一单记 last_seq，表示已经处理到第几号。来了第 n 号：n 小于等于 last_seq，是旧的或重复的，直接确认；n 等于 last_seq 加 1，是下一号，先用状态机检查转换合法，再生效，然后把暂存里接得上的号一个个放行；n 大于 last_seq 加 1，是跳号，写进暂存表，位点照常确认。">
+  <text x="20" y="22" class="t-h">三种情况，没有一种需要“等着”或“重试”</text>
+  <rect x="20" y="95" width="150" height="60" rx="12" class="f-pdt e-pd"/>
+  <text x="95" y="121" text-anchor="middle" class="t-b">来了第 n 号</text>
+  <text x="95" y="140" text-anchor="middle" class="t-xs">9527 的某条事件</text>
+  <path d="M170,125 L226,125" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="230" y="95" width="170" height="60" rx="12" class="f-oft e-of"/>
+  <text x="315" y="121" text-anchor="middle" class="t-b">progress 表</text>
+  <text x="315" y="140" text-anchor="middle" class="t-mono">last_seq = k</text>
+  <g class="e-ink" marker-end="url(#ah-ink)">
+    <path d="M400,115 C450,115 450,62 496,62"/>
+    <path d="M400,125 L496,125"/>
+    <path d="M400,135 C450,135 450,192 496,192"/>
+  </g>
+  <text x="440" y="54" text-anchor="middle" class="t-mono">n ≤ k</text>
+  <text x="448" y="118" text-anchor="middle" class="t-mono">n = k+1</text>
+  <text x="440" y="214" text-anchor="middle" class="t-mono">n &gt; k+1</text>
+  <rect x="500" y="40" width="440" height="44" rx="10" class="f-neut e-mut"/>
+  <text x="514" y="58" class="t-b">旧的或重复：直接确认，什么也不做</text>
+  <text x="514" y="75" class="t-xs">9527 已经到 3 号，又来一条 2 号</text>
+  <rect x="500" y="103" width="440" height="44" rx="10" class="f-card e-good"/>
+  <text x="514" y="121" class="t-b">下一号：状态机检查 → 生效 → 放行暂存里接得上的</text>
+  <text x="514" y="138" class="t-xs">9527 到 1 号，来了 2 号：加 798，再看暂存里有没有 3 号</text>
+  <rect x="500" y="170" width="440" height="44" rx="10" class="f-cgt e-cg"/>
+  <text x="514" y="188" class="t-b">跳号：写进暂存表，位点照常确认</text>
+  <text x="514" y="205" class="t-xs">9527 到 1 号，先来了 3 号：存起来，不扣积分</text>
+  <text x="20" y="242" class="t-s">三种结果都在<tspan font-weight="700">一个本地事务</tspan>里写进业务库，然后确认位点。分区从不被一条事件卡住。</text>
+</svg>
+  </div>
+  <figcaption>这个结构在《企业集成模式》里叫 Resequencer（重排器）。它和 TCP 的接收端是同一个思路：按序号收，重复的丢掉，乱序的先放进缓冲区，缺的那一段超时再要。</figcaption>
+  </figure>
+
+  <h3 id="m-fsm">机制 2：状态机管“能不能”，序号管“轮没轮到”</h3>
+  <div class="duo">
+  <div class="fig-box">
+<svg class="sv" viewBox="0 0 460 170" role="img" aria-label="订单状态机：NONE 到 CREATED 到 PAID 到 REFUNDED，PAID 也可以到 SHIPPED，SHIPPED 再到 REFUNDED。从 PAID 到 REFUNDED 有两条路，所以光看状态，分不清 REFUNDED 是早到了还是不合法。">
+  <text x="10" y="20" class="t-h">合法转换</text>
+  <rect x="10" y="60" width="74" height="34" rx="8" class="f-neut e-mut"/><text x="47" y="82" text-anchor="middle" class="t-mono">NONE</text>
+  <rect x="110" y="60" width="90" height="34" rx="8" class="f-bkt e-bk"/><text x="155" y="82" text-anchor="middle" class="t-mono">CREATED</text>
+  <rect x="226" y="60" width="74" height="34" rx="8" class="f-bkt e-bk"/><text x="263" y="82" text-anchor="middle" class="t-mono">PAID</text>
+  <rect x="340" y="60" width="110" height="34" rx="8" class="f-bkt e-bk"/><text x="395" y="82" text-anchor="middle" class="t-mono">REFUNDED</text>
+  <rect x="290" y="122" width="90" height="34" rx="8" class="f-card e-mut" stroke-dasharray="4 4"/><text x="335" y="144" text-anchor="middle" class="t-mono">SHIPPED</text>
+  <g class="e-bk" marker-end="url(#ah-bk)">
+    <path d="M84,77 L106,77"/><path d="M200,77 L222,77"/><path d="M300,77 L336,77"/>
+  </g>
+  <g class="e-mut" stroke-dasharray="4 4">
+    <path d="M270,94 L310,120"/><path d="M360,122 L385,98"/>
+  </g>
+  <text x="10" y="44" class="t-xs">虚线是本页实验没用到的分支</text>
+</svg>
+  </div>
+  <ul class="pains">
+    <li class="ok"><b>序号</b>告诉你这条是第几步：旧的、正好、早到。</li>
+    <li class="ok"><b>状态机</b>告诉你这一步从当前状态走不走得通。序号对上了、转换却不合法（比如 CREATED 直接到 REFUNDED），说明上游有 bug：进死信并告警，<b>不暂存</b>，暂存了也永远等不到。</li>
+    <li><b>只有状态机不够</b>：PAID 之后可能是 SHIPPED 也可能是 REFUNDED，当前是 PAID 时来了 REFUNDED，分不清是“中间还缺一个 SHIPPED”还是“本来就直接退款”。</li>
+    <li><b>只有序号也不够</b>：上游编错了号、漏发了一种状态，序号照样连续，错的转换会被照单全收。</li>
+  </ul>
+  </div>
+
+  <h3 id="m-lock">机制 3：暂存和放行，必须排在同一把锁后面</h3>
+  <div class="design">
+    <div class="way" data-role="bad"><h4>只靠 CAS<small>提交时 WHERE last_seq = 旧值</small></h4>
+<svg class="sv" viewBox="0 0 440 250" role="img" aria-label="不加行锁：线程 A 读到 last_seq 等于 1，处理 2 号，查暂存没有 3 号，提交 last_seq 等于 2。线程 B 同时也读到 last_seq 等于 1，认为 3 号是跳号，在 A 查完暂存之后才把 3 号写进暂存。两个提交都成功，3 号卡在暂存里，没人放行。">
+  <text x="10" y="20" class="t-h">两个提交都成功，#3 没人放行</text>
+  <text x="110" y="44" text-anchor="middle" class="t-b">线程 A（#2）</text>
+  <text x="330" y="44" text-anchor="middle" class="t-b">线程 B（#3）</text>
+  <line x1="220" y1="52" x2="220" y2="206" class="e-axis"/>
+  <rect x="20" y="58" width="180" height="28" rx="6" class="f-card e-mut"/><text x="110" y="77" text-anchor="middle" class="t-s">读 last_seq = 1</text>
+  <rect x="240" y="72" width="180" height="28" rx="6" class="f-card e-mut"/><text x="330" y="91" text-anchor="middle" class="t-s">读 last_seq = 1</text>
+  <rect x="20" y="100" width="180" height="28" rx="6" class="f-card e-mut"/><text x="110" y="119" text-anchor="middle" class="t-s">+798，查暂存：没有 #3</text>
+  <rect x="240" y="128" width="180" height="28" rx="6" class="f-cgt e-cg"/><text x="330" y="147" text-anchor="middle" class="t-s">#3 跳号 → 写暂存</text>
+  <rect x="20" y="142" width="180" height="28" rx="6" class="f-card e-good"/><text x="110" y="161" text-anchor="middle" class="t-s">提交 last_seq = 2</text>
+  <rect x="240" y="170" width="180" height="28" rx="6" class="f-card e-good"/><text x="330" y="189" text-anchor="middle" class="t-s">提交（没改 last_seq）</text>
+  <text x="220" y="234" text-anchor="middle" class="t-bad">9527 停在 2 号，#3 一直躺在暂存里</text>
+</svg>
+      <p>CAS 只防住“两个人都改 last_seq”，防不住“一个改、一个往暂存里写”。B 读到的 1 是旧的，它的判断在 A 提交那一刻就过期了。</p>
+    </div>
+    <div class="way" data-role="g2"><h4>先锁这一单<small>SELECT … FOR UPDATE</small></h4>
+<svg class="sv" viewBox="0 0 440 250" role="img" aria-label="加行锁：线程 A 锁住 9527，读到 1，处理 2 号，提交并释放锁。线程 B 想锁 9527，一直等到 A 提交，再读到 last_seq 等于 2，3 号正好是下一号，直接生效。">
+  <text x="10" y="20" class="t-h">B 等 A 提交，再读就是新的</text>
+  <text x="110" y="44" text-anchor="middle" class="t-b">线程 A（#2）</text>
+  <text x="330" y="44" text-anchor="middle" class="t-b">线程 B（#3）</text>
+  <line x1="220" y1="52" x2="220" y2="206" class="e-axis"/>
+  <rect x="20" y="58" width="180" height="28" rx="6" class="f-g2t e-g2"/><text x="110" y="77" text-anchor="middle" class="t-s">锁 9527，读到 1</text>
+  <rect x="240" y="72" width="180" height="84" rx="6" class="f-card e-g2" stroke-dasharray="5 4"/><text x="330" y="110" text-anchor="middle" class="t-s">锁 9527 …… 等</text>
+  <rect x="20" y="100" width="180" height="28" rx="6" class="f-card e-mut"/><text x="110" y="119" text-anchor="middle" class="t-s">+798，查暂存：没有 #3</text>
+  <rect x="20" y="142" width="180" height="28" rx="6" class="f-card e-good"/><text x="110" y="161" text-anchor="middle" class="t-s">提交 last_seq = 2，放锁</text>
+  <rect x="240" y="170" width="180" height="28" rx="6" class="f-card e-good"/><text x="330" y="189" text-anchor="middle" class="t-s">读到 2，#3 是下一号：−798</text>
+  <text x="220" y="234" text-anchor="middle" class="t-good">9527 走到 3 号，积分 0</text>
+</svg>
+      <p>同一单的所有判断排成一列，判断用的 last_seq 永远是最新提交的那个。不同订单之间不互相等。</p>
+    </div>
+  </div>
+  <p class="verdict" data-role="g2">约束：<b>“该暂存还是该生效”取决于 last_seq，而 last_seq 随时会被别人改</b>。读和据此做的写之间不能让别人插进来，所以要锁。实测：只靠 CAS 每次有 3～6 单卡在暂存里，加了行锁一次都没有（⑤）。</p>
+
+  <h3 id="m-repair">机制 4：等不来的那一号，超时回查</h3>
+  <p>暂存只解决“来晚了”。要是 2 号永远不来（转发器那条卡住了、进了上游的死信），9527 就永远停在 1 号。所以暂存表每一行都要记进来的时间，后台定时扫：最老的暂存超过阈值（比如 5 分钟），就调订单服务 <code>GET /orders/9527/events?afterSeq=1</code>，把缺的那几条拿回来，<b>按同一套逻辑</b>处理一遍。重复的会被当成旧的确认掉，所以补多了也没事。</p>
+
+  <h3 id="m-stale">机制 5：发了收不回的事，在同一个事务里只“登记”</h3>
+  <ul class="pains">
+    <li class="ok"><b>先登记，后发送</b>：短信不在处理逻辑里直接调接口，而是往本库的 <code>sms_outbox</code> 写一行，和积分、last_seq 同一个事务提交；另一个线程再去真正发送。CAS 失败回滚，这一行也跟着没了，不会多发。</li>
+    <li class="ok"><b>放行时往后看一眼</b>：放行 2 号（PAID）时，暂存里已经躺着 3 号（REFUNDED），说明“付款成功”已经过期，就不登记这条短信，只发“退款成功”。⑤ 实测 1000 单里有 80～83 条因此没发。</li>
+    <li><b>看不到的就管不了</b>：2 号生效时 3 号还没来，“付款成功”照发；10 分钟后再发“退款成功”是正常的业务顺序，不算错。</li>
+  </ul>
+
+  <h3>为什么这样设计：序号只能在源头编</h3>
+  <div class="design">
+    <div class="way" data-role="bk"><h4>源头编号<small>本页</small></h4><p>订单服务改 9527 那一行时，<code>seq = seq + 1</code>，和 outbox 那行一起提交。数据库的行锁已经把同一单的修改排成一列，这个顺序就是真相。消费端只是照着号重排。</p></div>
+    <div class="way" data-role="other"><h4>消费端自己排<small>按事件时间戳或到达顺序</small></h4><p>两台订单服务实例的时钟差几毫秒，同一毫秒还有两条；到达顺序本身就是被打乱的那个东西。消费端拿不到真相，只能猜。</p></div>
+  </div>
+  <p class="verdict" data-role="bk">约束：<b>只有写订单那一行的事务知道真正的先后</b>。所以序号必须在那个事务里生成，而且每次状态变化都必须发一条事件（漏发一种，消费端就会永远等那一号，见 <a href="#p-gap">⑥ 坑 4</a>）。</p>
+
+  <div class="codebox"><div class="code-bar"><b>积分服务处理一条事件</b><code>一个本地事务；超时、监控和回查放到 ⑥</code></div>
+<pre><code><span class="cm">-- 1. 锁住这一单，拿到处理到第几号</span>
+SELECT status, last_seq FROM order_progress WHERE order_id = ? FOR UPDATE;
+<span class="cm">-- 2. 分三类</span>
+<span class="cm">--    n &lt;= last_seq      ：什么也不做</span>
+<span class="cm">--    n &gt;  last_seq + 1  ：INSERT INTO pending(order_id, seq, payload, arrived_at) …</span>
+<span class="cm">--    n =  last_seq + 1  ：状态机检查 → 生效 → 循环放行 pending 里的 last_seq + 1</span>
+UPDATE order_points SET points = points + ? WHERE order_id = ?;      <span class="cm">-- 有 CHECK (points &gt;= 0)</span>
+INSERT INTO sms_outbox(order_id, kind) VALUES (?, ?);                <span class="cm">-- 暂存里有更新的就不登记</span>
+DELETE FROM pending WHERE order_id = ? AND seq = ?;
+UPDATE order_progress SET status = ?, last_seq = ? WHERE order_id = ?;
+COMMIT;
+<span class="cm">-- 3. 然后才确认 Kafka 位点（或者位点也存这个库，见第一圈）</span></code></pre></div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：先推一单，再放大到 1000 单</h2>
+  </div>
+  <p class="lead">推演台只看 9527 一单。选一种到达顺序和一种写法，先猜最后积分是多少，再一条一条看积分服务做了什么。</p>
+
+  <div class="lab" id="lab">
+    <div class="rb-ctl"><span class="lbl">到达顺序</span>
+      <div class="seg" id="rb-arr" role="group" aria-label="到达顺序">
+        <button type="button" data-a="normal" aria-pressed="false">正常 1 2 3</button>
+        <button type="button" data-a="dup" aria-pressed="false">重复 1 2 2 3 3</button>
+        <button type="button" data-a="early" aria-pressed="true">退款先到 1 3 2</button>
+        <button type="button" data-a="reverse" aria-pressed="false">全倒过来 3 2 1</button>
+        <button type="button" data-a="lost" aria-pressed="false">丢了付款 1 3</button>
+      </div>
+    </div>
+    <div class="rb-ctl"><span class="lbl">写法</span>
+      <div class="seg" id="rb-way" role="group" aria-label="消费端写法">
+        <button type="button" data-w="s1" aria-pressed="false">S1 去重 + 覆盖</button>
+        <button type="button" data-w="s2" aria-pressed="true">S2 第一圈</button>
+        <button type="button" data-w="s4" aria-pressed="false">S4 本页</button>
+      </div>
+    </div>
+    <div class="arr" id="rb-seq" aria-label="这次的到达顺序"></div>
+    <div class="guess" id="rb-guess">
+      <p>先猜：处理完以后，9527 的积分是多少？（业务上应该是 0）</p>
+      <div class="opts" id="rb-opts">
+        <button type="button" data-g="0">0</button>
+        <button type="button" data-g="798">798（多给了）</button>
+        <button type="button" data-g="stuck">还卡着没处理完</button>
+        <button type="button" class="skip" data-g="skip">不猜，直接看</button>
+      </div>
+      <p class="res" id="rb-res" hidden></p>
+    </div>
+    <div id="rb-out" hidden>
+      <div class="stepper" tabindex="0" id="rb-step" aria-label="逐条推演，左右方向键切换">
+        <div class="run-row">
+          <button type="button" class="btn" id="rb-prev">← 上一条</button>
+          <button type="button" class="btn primary" id="rb-next">下一条 →</button>
+          <button type="button" class="btn" id="rb-all">全部展开</button>
+        </div>
+      </div>
+      <div class="tbl-wrap"><table class="t steps-t" id="rb-table"></table></div>
+      <div class="lab-res" data-role="of" id="rb-verdict" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <h3 id="e-chaos">实测：1000 单一起乱，四种写法 <span class="tag-real">实测</span></h3>
+<pre class="console"><b>$ mvn -q -pl kafka/kafka-reorder-statemachine compile exec:java -Dexec.mainClass=labs.kafka.kafka_reorder_statemachine.ReorderChaos</b>
+<span class="c">H2 2.4.240 内存库 · JDK 17 · 本机 2 核 ARM · 种子 42 · 跑了 4 次，下面是第 4 次，其余见文字</span>
+事件流：1000 单（其中退款 287 单），共 2864 条；单内乱序 300 单，重复 327 条，重平衡重投 260 条，丢了付款事件 10 单；两个线程并发处理
+[S1 去重表 + 直接覆盖] 状态错 <span class="r">179</span> 单，积分错 <span class="r">26</span> 单，先扣后加被放弃 <span class="r">56</span> 次，短信先退款后付款 0 单，已退款单收到付款短信 277 单（其中按暂存跳过了 0 条）
+[S2 第一圈：版本守卫 + 积分只去重] 状态错 <span class="r">35</span> 单，积分错 <span class="r">25</span> 单，先扣后加被放弃 <span class="r">54</span> 次，短信先退款后付款 0 单，已退款单收到付款短信 277 单（其中按暂存跳过了 0 条）
+[S3 状态机 + 连续序号 + 暂存，只靠 CAS] 状态错 0 单，积分错 0 单，先扣后加被放弃 0 次，短信先退款后付款 0 单，已退款单收到付款短信 204 单（其中按暂存跳过了 83 条）
+    暂存 309 次，CAS 冲突回滚 1 次，非法转换 0 次；处理完时暂存里卡着 <span class="r">13</span> 单（丢了付款事件 10 + 竞态 <span class="r">3</span>）；回查后还剩 0 单（其中序号早已处理过的孤儿 0 单）
+[S4 S3 + 先锁这一单的行] 状态错 <span class="w">0</span> 单，积分错 <span class="w">0</span> 单，先扣后加被放弃 <span class="w">0</span> 次，短信先退款后付款 0 单，已退款单收到付款短信 205 单（其中按暂存跳过了 82 条）
+    暂存 303 次，CAS 冲突回滚 0 次，非法转换 0 次；处理完时暂存里卡着 10 单（丢了付款事件 10 + 竞态 <span class="w">0</span>）；回查后还剩 0 单（其中序号早已处理过的孤儿 0 单）</pre>
+  <div class="facts">
+    <div class="fact" data-role="bad"><h4>S1、S2：先扣后加</h4><p>4 次里，S1 状态错 179～183 单，S2 35～37 单；两者积分都错 25～29 单。积分错的单数比“放弃”次数少，是因为重复的退款会各被放弃一次。</p></div>
+    <div class="fact" data-role="cg"><h4>S3：竞态卡住</h4><p>4 次里每次有 3～6 单卡在暂存里，原因不是丢事件，是机制 3 那个竞态。回查能把它们补齐，但那是靠兜底救回来的。第 2 次回查后还剩 1 单，后两次加了检查没再出现，没能确认原因。</p></div>
+    <div class="fact" data-role="g2"><h4>S4：只剩真丢的</h4><p>4 次都是 0 错；卡着的正好是丢了付款事件的那 10 单，回查后全部补齐。CAS 冲突也是 0：行锁让同一单的事务排队，没人会撞上。</p></div>
+    <div class="fact" data-role="rn"><h4>短信</h4><p>S4 有 80～83 条“付款成功”因为退款已在暂存里被跳过。“先退款后付款”四种写法都是 0：S1、S2 是因为先到的退款失败了，根本没发出短信。</p></div>
+  </div>
+  <p class="from">完整代码 → <a href="https://github.com/archeu/study-labs/tree/main/java/kafka/kafka-reorder-statemachine">study-labs/java/kafka/kafka-reorder-statemachine</a>。只用 H2 和两个线程模拟 Kafka 之后的那一段，乱序、重复、重投、丢失按比例造出来；Kafka 本身怎么打乱顺序，第一圈已经在真集群上测过。</p>
+  <div class="done-box"><b>到这里已经能交差了</b>积分服务在乱序、重复、并发、丢一条的情况下都算得对。已知还没处理的细节：暂存要有超时和监控（<a href="#p-forever">⑥ 坑 5</a>）、序号不连续时这套就失效（<a href="#p-gap">坑 4</a>）、热点订单排队（<a href="#d-hot">第三圈</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-retry"><b><em>1</em>早到的事件按“失败”重试，几次后扔进死信<a class="rootmark" href="#m-classify">← ④ 三种情况</a></b>
+      <dl><dt>现象</dt><dd>退款先到，扣成负数被拒，重试 3 次进死信；付款后到加上 798，积分多给了。<span class="seen">⑤ S1、S2 积分错 25～29 单</span></dd>
+      <dt>根源</dt><dd>早到不是错误，是跳号，应该暂存。</dd>
+      <dt>做法</dt><dd class="fix">按序号分三类；只有“序号对上了、转换不合法”才进死信。</dd></dl></div>
+    <div class="pit" id="p-rollback"><b><em>2</em>一条事件的几件事放在一个事务里，一件失败全回滚<a class="rootmark" href="#m-classify">← ④ 三种情况</a></b>
+      <dl><dt>现象</dt><dd>版本守卫写对了，状态还是停在 PAID。<span class="seen">⑤ S2 状态错 35～37 单</span></dd>
+      <dt>根源</dt><dd>扣积分违反 CHECK，把同一事务里“改成 REFUNDED”也回滚了。</dd>
+      <dt>做法</dt><dd class="fix">同一事务没问题，前提是不让合法事件失败：先分类，再生效。</dd></dl></div>
+    <div class="pit" id="p-race"><b><em>3</em>暂存和放行不在一把锁下<a class="rootmark" href="#m-lock">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>没有丢事件，也有单卡在暂存里，直到回查才动。<span class="seen">⑤ S3 每次 3～6 单</span></dd>
+      <dt>根源</dt><dd>判断“该不该暂存”用的 last_seq 被别的事务改了。</dd>
+      <dt>做法</dt><dd class="fix"><code>SELECT … FOR UPDATE</code> 锁住这一单再判断；或者保证同一单永远只在一个线程里处理。</dd></dl></div>
+    <div class="pit" id="p-gap"><b><em>4</em>序号不连续<a class="rootmark" href="#m-fsm">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>用 <code>updated_at</code> 或全库自增 id 当序号，消费端分不清是跳号还是本来就不连续；或者有人直接改库没发事件，这一单永远等那一号。</dd>
+      <dt>根源</dt><dd>看出“缺了一号”的前提，是每单从 1 开始、每次加 1、每次变化都发事件。</dd>
+      <dt>做法</dt><dd class="fix">序号在改订单的同一个事务里 +1 并写进 outbox；禁止绕过服务直接改订单表。</dd></dl></div>
+    <div class="pit" id="p-forever"><b><em>5</em>暂存没有超时<a class="rootmark" href="#m-repair">← ④ 机制 4</a></b>
+      <dl><dt>现象</dt><dd>丢了一条事件，这一单永远停着，用户的积分一直不到账；暂存表越来越大。<span class="seen">⑤ 丢的 10 单靠回查才补齐</span></dd>
+      <dt>根源</dt><dd>暂存只能等“晚到的”，等不到“不会来的”。</dd>
+      <dt>做法</dt><dd class="fix">暂存记进来的时间；最老一条超过阈值就回查订单服务补拉。</dd></dl></div>
+    <div class="pit" id="p-sms"><b><em>6</em>处理逻辑里直接调短信接口<a class="rootmark" href="#m-stale">← ④ 机制 5</a></b>
+      <dl><dt>现象</dt><dd>CAS 失败或锁等待超时，事务回滚重来，短信已经发出去了，重来一次又发一条。</dd>
+      <dt>根源</dt><dd>外部调用不跟着本地事务回滚。</dd>
+      <dt>做法</dt><dd class="fix">只往本库的 <code>sms_outbox</code> 登记，事务提交后另一个线程去发，发送端再按 (order_id, kind) 去重。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>事件里带 orderId 和每单连续的 seq</b><p>在订单服务改那一行的同一个事务里生成，和 outbox 一起提交。</p><p class="guard">防的是消费端只能猜先后（坑 4）。</p></div>
+    <div class="rl"><b>消费端三张表放同一个库</b><p><code>order_progress</code>（last_seq、状态）、<code>pending</code>（暂存）、业务表和 <code>sms_outbox</code>，一个事务里改。</p><p class="guard">防的是暂存了、进度却没跟上，或者反过来。</p></div>
+    <div class="rl"><b>先锁这一单，再判断</b><p>判断和写之间不让别人插进来。</p><p class="guard">防的是坑 3 的竞态。</p></div>
+    <div class="rl"><b>暂存要有三个监控</b><p>暂存总条数、最老一条的年龄、回查次数。最老年龄超过阈值就告警。</p><p class="guard">防的是悄悄卡住几千单没人知道。</p></div>
+    <div class="rl"><b>订单服务提供“按序号补拉”接口</b><p><code>GET /orders/{id}/events?afterSeq=n</code>，从 outbox 或事件表里查。</p><p class="guard">防的是丢了一条只能人工改数据。</p></div>
+    <div class="rl"><b>非法转换进死信并告警</b><p>序号对、转换不对，是上游的 bug，不是乱序。</p><p class="guard">防的是把 bug 当成早到，暂存到天荒地老。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：什么时候值得，代价在哪</h3></div>
+  <div class="deep">
+    <div class="dp" data-role="of" id="d-hot"><h4>行锁的代价：热点订单</h4><p>同一单的事件排队处理，不同订单互不影响。普通订单一单只有几条事件，排队几乎没有代价；一个大客户的“批量订单”如果共用一个聚合 id，所有事件都排在一把锁后面。按真正的业务聚合（一个订单）编号，别按客户编号。</p></div>
+    <div class="dp" data-role="cg"><h4>暂存放在哪</h4><p>放业务库最稳：和进度同一个事务。放内存：重平衡一来就丢了。放一个 Kafka 重试 topic：又回到了“重试 topic 打乱顺序”（第一圈坑 7），等于把问题挪了个地方。</p></div>
+    <div class="dp" data-role="bk"><h4>和 TCP 是同一个结构</h4><p>每单一个接收窗口：序号、重复丢弃、乱序缓冲、超时重传（这里是回查）。不同的是 TCP 的缓冲在内存里，丢了能让对方重发；这里的“对方”是订单服务，所以补拉接口是必需的。</p></div>
+    <div class="dp" data-role="rn"><h4>什么时候别用这一套</h4><p>只有覆盖型下游，版本守卫就够；积分允许暂时为负，可交换账本更简单；一单的事件一天就一两条，事件只当通知、回查最新状态最省事。这一套的价值在“累加 + 不许为负 + 有副作用”同时出现的地方，比如积分、余额、库存、券。</p></div>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li><b>J09 接口幂等</b>：支付回调、HTTP 重试里同样的唯一键和状态机，没有 Kafka 的分区帮忙。</li>
+    <li><b>Saga 和补偿</b>：退款要同时退钱、退积分、退券，一步失败怎么往回撤。</li>
+    <li><b>事件溯源</b>：直接把事件流当数据库，序号就是版本，重放出任何时刻的状态。</li>
+    <li><b>Flink 的乱序处理</b>：watermark 和 allowed lateness，等多久算“不会来了”。</li>
+    <li><b>CDC 编序号</b>：Debezium 读 binlog 时，用 binlog 位置给事件排序，替代业务里的 seq 列。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改积分服务</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="of"><h4>练习 1 · 把重试改成暂存</h4><p>在 <code>ReorderChaos</code> 里给 S2 加一条规则：扣积分违反 CHECK 时不重试，而是写进 <code>pending</code>，等付款生效后再放行。先猜：积分错还剩几单？状态错呢？</p><p class="uses">用到 ⑥ 坑 1、坑 2</p></div>
+    <div class="exc" data-role="cg"><h4>练习 2 · 让竞态更明显</h4><p>把线程数从 2 改成 8，再跑 S3 和 S4：S3 卡住的单数怎么变？S4 的耗时怎么变？</p><p class="uses">用到 ④ 机制 3、第三圈热点</p></div>
+    <div class="exc" data-role="bk"><h4>练习 3 · 给暂存加超时</h4><p>给 <code>pending</code> 加 <code>arrived_at</code>，处理过程中每 200 条扫一次：超过 50 ms 的就回查。看丢了付款事件的 10 单是不是在流还没跑完时就补齐了。</p><p class="uses">用到 ⑥ 坑 5、第二圈监控</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>订单服务给每单的事件编连续序号；消费端按“处理到第几号”分三类：旧的确认掉、下一号经状态机检查后生效并放行暂存、跳号的暂存且照常确认位点；暂存和放行锁住同一单再做，等不来的超时回查。</p></details>
+    <details><summary>2. 第一圈的版本守卫已经管住了状态，为什么积分还会错？</summary><p>版本守卫的做法是“旧的丢掉”，只对覆盖型成立。积分是累加型，每条都要算，退款先到时既不能丢也不能先扣（余额不许为负），只能等付款来了再做。</p></details>
+    <details><summary>3. S2 状态错 35～37 单，根源是哪条原理？</summary><p>④ 机制 1：早到的退款被当成失败处理。扣积分违反 CHECK，同一事务里的状态更新一起回滚，重试几次后放弃，状态就停在了 PAID。</p></details>
+    <details><summary>4. 预测：S4 去掉 FOR UPDATE，但保证同一个订单永远只在一个线程里处理（按 orderId 取模分线程），还会卡住吗？</summary><p>不会因为竞态卡住。机制 3 的竞态需要同一单的两条事件被两个事务同时判断；同一单只在一个线程里处理，判断天然排成一列，效果和行锁一样。但重平衡时新旧两个进程仍可能同时处理同一单（僵尸），所以跨进程时还是要锁。</p></details>
+    <details><summary>5. 预测：订单服务漏发了 SHIPPED（直接改库），9527 的序号变成 1、2、4（REFUNDED 是 4 号），积分服务会怎样？</summary><p>4 号到了，last_seq 是 2，判定为跳号，暂存。3 号永远不来，超时后回查订单服务：如果事件表里也没有 3 号，回查也补不上，只能告警人工处理。这就是坑 4：每次变化都必须发事件、序号必须连续。</p></details>
+    <details><summary>6. 预测：9527 的 2 号和 3 号被两个线程同时处理，S4 里谁先拿到锁会影响最终积分吗？</summary><p>不影响。2 号先拿到锁：生效，查暂存没有 3 号，提交；3 号接着拿到锁，读到 2，正好是下一号，生效。3 号先拿到锁：读到 1，暂存；2 号接着拿到锁，生效后放行暂存里的 3 号。两条路最后都是 last_seq = 3、积分 0。区别只在“付款成功”短信：后一条路会因为暂存里已有退款而不发。</p></details>
+    <details><summary>7. 放回全景：第 8 站前后各发生了什么？这一页的东西坏了，整条链路会怎样？</summary><p>第 8 站之前，第 7 站的消费组按位点从分区拉到这批消息；第 8 站之后，第 9 站提交位点。这一页让第 8 站对“乱序、重复、并发”免疫：位点可以照常往前提交，不会因为一条早到的事件卡住分区（第 10 站不涨 LAG）。如果暂存没有超时、序号不连续，第 9 站照样提交了位点，消息在 Kafka 里已经“处理完”，可业务状态卡在暂存里：Kafka 的监控一切正常，用户的积分却一直没到账，只有暂存表的监控能看出来。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。实测：H2 2.4.240 内存库代替 MySQL（唯一键、CHECK 约束、行锁、READ COMMITTED 语义一致），代码按 JDK 17 编译运行（H2 2.x 需要 Java 11，所以没有按 JDK 8 编译），本机 2 核 ARM。<code>ReorderChaos</code> 用固定种子 42 造事件流，两个线程并发处理，四种写法各跑 4 次；事件流每次相同，线程调度不同，页上给的是 4 次的范围。Kafka 本身怎么打乱顺序（加分区、重试 topic、线程池），见第一圈页面的 Kafka 4.x 真集群实测。</p>
+  <p>按文档和推理：Resequencer 出自 Hohpe 和 Woolf 的《企业集成模式》；<code>SELECT … FOR UPDATE</code> 的行锁语义在 MySQL InnoDB 和 H2 中一致；“僵尸”消费者的来由见 Kafka 文档 <code>max.poll.interval.ms</code> 一节。</p>
+  <p>相关：<a href="kafka-idempotent-ordering.html">积分加了两次，退款跑到了付款前面（第一圈）</a> · <a href="../java/pano-j08-order-event-life.html">全景：一条订单消息的一生</a> · <a href="../rocketmq/rocketmq-tx-delay-order.html">改库和发消息怎么一起成功</a> · <a href="kafka-backlog-drain.html">大促积压 100 万条</a> · <a href="mq-selection.html">交易靶场的五种消息怎么选</a> · <a href="../java/roadmap.html#j08">Java 地图 J08</a></p>
+</footer>
+</main>
+
+<script>
+/*SIM-START*/
+// 推演台：订单 9527 的三条事件（1 CREATED、2 PAID +798、3 REFUNDED −798），积分有 CHECK (points >= 0)。
+const EV = { 1: { t: "CREATED", d: 0 }, 2: { t: "PAID", d: 798 }, 3: { t: "REFUNDED", d: -798 } };
+const ARR = { normal: [1, 2, 3], dup: [1, 2, 2, 3, 3], early: [1, 3, 2], reverse: [3, 2, 1], lost: [1, 3] };
+const SMS = { PAID: "付款成功", REFUNDED: "退款成功" };
+function simulate(way, arrKey) {
+  const arr = ARR[arrKey];
+  const st = { status: "NONE", last: 0, points: 0, pending: [], sms: [], dedup: [] };
+  const steps = [];
+  const snap = (arrive, action, kind) => steps.push({ arrive, action, kind, status: st.status, last: st.last,
+    points: st.points, pending: st.pending.slice().sort(), sms: st.sms.slice() });
+  function s4apply(n, arrive) {
+    const did = [];
+    let cur = n;
+    while (cur) {
+      const e = EV[cur];
+      st.points += e.d;
+      if (cur > 1) {
+        if (cur === 2 && st.pending.indexOf(3) >= 0) did.push("#2 +798，暂存里已有退款，不发付款短信");
+        else { st.sms.push(SMS[e.t]); did.push("#" + cur + (e.d > 0 ? " +798" : " −798") + "，登记短信"); }
+      } else did.push("#1 建好进度");
+      st.status = e.t; st.last = cur;
+      st.pending = st.pending.filter(x => x !== cur);
+      cur = st.pending.indexOf(st.last + 1) >= 0 ? st.last + 1 : 0;
+      if (cur) did.push("放行暂存里的 #" + cur);
+    }
+    return did.join("；");
+  }
+  function handle(n, arrive) {
+    const e = EV[n];
+    if (way === "s4") {
+      if (n <= st.last) return snap(arrive, "旧的或重复，确认掉", "skip");
+      if (n > st.last + 1) { if (st.pending.indexOf(n) < 0) st.pending.push(n); return snap(arrive, "跳号（处理到 " + st.last + "），暂存，位点照常确认", "park"); }
+      return snap(arrive, s4apply(n, arrive), "ok");
+    }
+    if (st.dedup.indexOf(n) >= 0) return snap(arrive, "去重表里有，跳过", "skip");
+    if (st.points + e.d < 0) return snap(arrive, "0 − 798 违反 CHECK，整笔回滚；重试 3 次后放弃，进死信", "bad");
+    if (way === "s1") {
+      const back = st.status !== "NONE" && n < st.last;
+      st.status = e.t; st.last = n; st.points += e.d; st.dedup.push(n);
+      if (n > 1) st.sms.push(SMS[e.t]);
+      return snap(arrive, back ? "状态直接覆盖成 " + e.t + "（倒退了）" : "状态改成 " + e.t + (e.d ? (e.d > 0 ? "，+798" : "，−798") : ""), back ? "bad" : "ok");
+    }
+    // s2：状态只升不降，积分每条都算
+    const stale = n <= st.last;
+    st.points += e.d; st.dedup.push(n);
+    if (!stale) { st.status = e.t; st.last = n; if (n > 1) st.sms.push(SMS[e.t]); }
+    return snap(arrive, stale ? "版本旧了，状态不动" + (e.d ? "；积分照算 " + (e.d > 0 ? "+798" : "−798") : "") : "状态改成 " + e.t + (e.d ? (e.d > 0 ? "，+798" : "，−798") : ""), "ok");
+  }
+  arr.forEach(n => handle(n, "#" + n));
+  if (way === "s4" && st.pending.length) {
+    const before = st.last;
+    snap("回查", "暂存超时，向订单服务补拉 #" + (before + 1) + " 起的事件", "park");
+    [1, 2, 3].forEach(n => { if (n > st.last) handle(n, "补 #" + n); });
+  }
+  const stuck = st.pending.length > 0;
+  const ok = !stuck && st.points === 0 && st.status === "REFUNDED";
+  return { steps, final: { status: st.status, points: st.points, sms: st.sms, stuck }, ok,
+           answer: stuck ? "stuck" : String(st.points) };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const arrBox = $("#rb-arr"), wayBox = $("#rb-way");
+  if (!arrBox) return;
+  let arrKey = "early", way = "s2", res = null, shown = 0;
+  const kindCls = { ok: "act-ok", bad: "act-bad", park: "act-park", skip: "" };
+  function seqChips() {
+    $("#rb-seq").innerHTML = "到达：" + ARR[arrKey].map((n, i) =>
+      "<span class='" + (res && i < shown ? "done" : "") + "'>#" + n + " " + EV[n].t + "</span>").join("");
+  }
+  function reset() {
+    res = null; shown = 0;
+    $("#rb-out").hidden = true; $("#rb-res").hidden = true;
+    $$("#rb-opts button").forEach(b => { b.classList.remove("right", "wrong"); b.setAttribute("aria-pressed", "false"); });
+    seqChips();
+  }
+  function draw() {
+    const rows = res.steps.slice(0, shown);
+    $("#rb-table").innerHTML = "<thead><tr><th scope='col'>到达</th><th scope='col'>积分服务做了什么</th><th scope='col'>状态</th>" +
+      "<th scope='col' class='num'>last_seq</th><th scope='col' class='num'>积分</th><th scope='col'>暂存</th><th scope='col'>短信</th></tr></thead><tbody>" +
+      rows.map((s, i) => "<tr" + (i === rows.length - 1 ? " class='now'" : "") + "><th scope='row'>" + s.arrive + "</th><td class='" + kindCls[s.kind] + "'>" + s.action +
+        "</td><td>" + s.status + "</td><td class='num'>" + s.last + "</td><td class='num'>" + s.points + "</td><td>" +
+        (s.pending.length ? s.pending.map(x => "#" + x).join(" ") : "—") + "</td><td>" + (s.sms.join("、") || "—") + "</td></tr>").join("") + "</tbody>";
+    const done = shown >= res.steps.length;
+    $("#rb-prev").disabled = shown <= 1;
+    $("#rb-next").disabled = done;
+    const v = $("#rb-verdict");
+    if (!done) { v.textContent = "第 " + shown + " / " + res.steps.length + " 步。点“下一条”继续。"; return; }
+    const f = res.final;
+    const bad = [];
+    if (f.points !== 0) bad.push("积分是 " + f.points + "，应为 0：退款被放弃了，付款却加上了");
+    if (f.status !== "REFUNDED") bad.push("状态停在 " + f.status + "，应为 REFUNDED");
+    v.innerHTML = res.ok
+      ? "<b>结果对</b>：状态 REFUNDED，积分 0，短信：" + (f.sms.join(" → ") || "无") + "。"
+      : "<b>结果错</b>：" + bad.join("；") + "。短信：" + (f.sms.join(" → ") || "无") + "。";
+    v.dataset.role = res.ok ? "done" : "bad";
+  }
+  function pick(box, attr, cb) {
+    $$("button", box).forEach(b => b.addEventListener("click", () => {
+      $$("button", box).forEach(x => x.setAttribute("aria-pressed", x === b ? "true" : "false"));
+      cb(b.dataset[attr]); reset();
+    }));
+  }
+  pick(arrBox, "a", v => { arrKey = v; });
+  pick(wayBox, "w", v => { way = v; });
+  $$("#rb-opts button").forEach(b => b.addEventListener("click", () => {
+    res = simulate(way, arrKey);
+    shown = 1;
+    $("#rb-out").hidden = false;
+    $$("#rb-opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
+    const g = b.dataset.g, r = $("#rb-res");
+    if (g !== "skip") {
+      const right = g === res.answer;
+      b.classList.add(right ? "right" : "wrong");
+      r.hidden = false;
+      r.textContent = (right ? "猜对了。" : "猜错了。") + "处理完积分是 " + (res.answer === "stuck" ? "还卡着" : res.answer) + "，一条一条看是哪一步决定的。";
+    } else r.hidden = true;
+    draw(); seqChips();
+  }));
+  $("#rb-next").addEventListener("click", () => { if (res && shown < res.steps.length) { shown++; draw(); seqChips(); } });
+  $("#rb-prev").addEventListener("click", () => { if (res && shown > 1) { shown--; draw(); seqChips(); } });
+  $("#rb-all").addEventListener("click", () => { if (res) { shown = res.steps.length; draw(); seqChips(); } });
+  $("#rb-step").addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") { $("#rb-next").click(); e.preventDefault(); }
+    if (e.key === "ArrowLeft") { $("#rb-prev").click(); e.preventDefault(); }
+  });
+  seqChips();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
