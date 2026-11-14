@@ -1,0 +1,1260 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>积分服务停了 8 天，消息已经被删：Kafka 的分层存储、日志压缩与位点过期</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J08 knowledge point "storage" second round, station 11 of the J08 panorama, mechanism type. Roles: pd = broker local disk / segments, bk = remote object storage (tiered storage), cg = log compaction / cleaner, of = points-svc consumer, rn = order service producer, g2 = consumer offsets / group coordinator. Fixed: bad red = deleted, lost or stalled, good green = recovered, neutral grey = old ways. Interaction: one stepper "a segment's later life" (write, roll, upload, local delete, remote read, remote expiry) linked to the SVG. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Kafka</span><span aria-hidden="true">/</span><span class="tb-here">积分服务停了 8 天</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-of"/></marker>
+    <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bk"/></marker>
+    <marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--line-strong)"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">retention.ms · 分层存储 KIP-405 · local.retention.ms · RemoteLogManager · 日志压缩 cleanup.policy=compact · 墓碑 · __consumer_offsets · offsets.retention.minutes · Kafka 4.4.0</p>
+  <h1>积分服务停了 8 天，消息已经被删：Kafka 的分层存储、日志压缩与位点过期</h1>
+  <p class="lead">Kafka 里有<b>三样东西各自过期</b>：段按 <code>retention.ms</code> 整段删，位点在组变空 7 天后删，同一个 key 的旧值在压缩时删。要留得久又不占 broker 的盘，先看数据是哪一种：<b>事件</b>每一条都要处理（加积分），用<b>分层存储</b>，本地只留最近 1 天，老段搬到对象存储，一共留 30 天；<b>状态</b>只要最新值（订单现在是什么状态），用<b>日志压缩</b>，每个 key 只留最后一条。这两样不能开在同一个 topic 上。位点要单独处理：消息还在、位点没了的时候，按宕机的时间点把位置找回来。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j08-order-event-life.html#s-11">一条订单消息的一生 · 第 11 站</a></span><span>地图：<a href="../java/roadmap.html#j08">J08 · 存储与性能：分段、页缓存、零拷贝</a></span><span>第一圈：<a href="kafka-storage-zerocopy.html">Kafka 存储与零拷贝</a></span></p>
+  <p class="scene"><b>下一圈</b><span>第一圈讲了一个分区怎么切成段、怎么按 offset 找到一条消息、读新数据为什么快，以及追老数据为什么会把页缓存挤掉。全景第 11 站只说了“满 7 天整段删”，预测题 4 问：积分服务坏了 8 天会怎样。这一页接着往下问：要留得更久怎么办？只要最新值又怎么办？</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：积分服务回来时，三样东西都过期了</h2>
+  </div>
+  <p class="lead">在全景第 11 站，这一步要解决的是：<b>段到期就整段删，不管谁还没读</b>。11 月 3 日，积分服务的数据库盘坏了，一直到 11 月 11 日中午才修好重启，中间停了 8 天半。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="时间轴从 11 月 2 日到 11 月 12 日。积分服务 11 月 3 日宕机，11 月 11 日中午重启。消息保留 7 天：重启时 11 月 4 日以前的段已经整段删掉，其中 11 月 3 日那一天是宕机后还没处理的。位点在组变空 7 天后，也就是 11 月 10 日被删。重启时找不到位点，按默认的 latest 跳到末尾，宕机期间的消息全部没处理。">
+  <text x="20" y="22" class="t-h">order-events 和积分服务的位点，在 8 天半里各自过期</text>
+  <!-- axis -->
+  <line x1="150" y1="262" x2="940" y2="262" class="e-axis"/>
+  <g class="t-monos">
+    <text x="150" y="282" text-anchor="middle">11-02</text><text x="230" y="282" text-anchor="middle">11-03</text><text x="310" y="282" text-anchor="middle">11-04</text><text x="390" y="282" text-anchor="middle">11-05</text><text x="470" y="282" text-anchor="middle">11-06</text><text x="550" y="282" text-anchor="middle">11-07</text><text x="630" y="282" text-anchor="middle">11-08</text><text x="710" y="282" text-anchor="middle">11-09</text><text x="790" y="282" text-anchor="middle">11-10</text><text x="870" y="282" text-anchor="middle">11-11</text>
+  </g>
+  <g class="e-axis"><line x1="150" y1="258" x2="150" y2="266"/><line x1="230" y1="258" x2="230" y2="266"/><line x1="310" y1="258" x2="310" y2="266"/><line x1="390" y1="258" x2="390" y2="266"/><line x1="470" y1="258" x2="470" y2="266"/><line x1="550" y1="258" x2="550" y2="266"/><line x1="630" y1="258" x2="630" y2="266"/><line x1="710" y1="258" x2="710" y2="266"/><line x1="790" y1="258" x2="790" y2="266"/><line x1="870" y1="258" x2="870" y2="266"/></g>
+  <!-- row 1: points-svc -->
+  <text x="20" y="62" class="t-of">积分服务</text>
+  <rect x="150" y="46" width="80" height="24" rx="6" class="b-good"/>
+  <text x="190" y="63" class="t-xs" text-anchor="middle">在跑</text>
+  <rect x="230" y="46" width="680" height="24" rx="6" class="b-bad"/>
+  <text x="570" y="63" class="t-bad" text-anchor="middle">宕机 8 天半，组里没有成员</text>
+  <!-- row 2: messages -->
+  <text x="20" y="112" class="t-pd">消息</text>
+  <text x="20" y="128" class="t-xs">retention.ms = 7 天</text>
+  <rect x="150" y="96" width="80" height="24" rx="6" class="b-dash"/>
+  <rect x="230" y="96" width="80" height="24" rx="6" class="b-bad"/>
+  <text x="270" y="113" class="t-xs" text-anchor="middle">没处理就删了</text>
+  <rect x="310" y="96" width="600" height="24" rx="6" class="b-pd"/>
+  <text x="610" y="113" class="t-s" text-anchor="middle">11-04 以后的段还在</text>
+  <text x="190" y="140" class="t-xs" text-anchor="middle">已整段删</text>
+  <!-- row 3: offsets -->
+  <text x="20" y="172" class="t-g2">位点</text>
+  <text x="20" y="188" class="t-xs">组变空后保留 7 天</text>
+  <rect x="230" y="156" width="560" height="24" rx="6" class="b-g2"/>
+  <text x="510" y="173" class="t-s" text-anchor="middle">offsets.retention.minutes = 10080</text>
+  <path d="M782,152 L798,184 M798,152 L782,184" class="e-bad"/>
+  <text x="806" y="173" class="t-bad">11-10 删了</text>
+  <!-- row 4: restart -->
+  <text x="20" y="226" class="t-bad">重启时</text>
+  <path d="M230,214 L910,214" class="e-badd"/>
+  <path d="M230,206 L230,222 M910,206 L910,222" class="e-bad"/>
+  <text x="560" y="236" class="t-bad" text-anchor="middle">找不到位点 → auto.offset.reset=latest → 跳到末尾：这一段全部没处理</text>
+  <line x1="910" y1="40" x2="910" y2="256" class="e-of" style="stroke-dasharray:4 4"/>
+  <text x="914" y="36" class="t-of" text-anchor="end">11-11 12:00 重启</text>
+</svg>
+  </div>
+  <p class="cap">按默认配置：<code>retention.ms</code> 168 小时，<code>offsets.retention.minutes</code> 10080（7 天，从组变空时算起），<code>auto.offset.reset=latest</code>。段按天滚动是为了画图方便；默认要写满 1 GiB 或满 7 天才滚。</p>
+  </figure>
+  <div class="goals">
+    <div class="goal" data-role="of"><b>补齐宕机期间的每一笔积分</b>一条都不能少，重复的靠去重表挡住（<a href="kafka-idempotent-ordering.html">幂等消费那页</a>）。</div>
+    <div class="goal" data-role="pd"><b>broker 的盘只够放 7 天</b>三副本、本地 SSD。保留期每多一天，三台机器都要多买一天的盘。</div>
+    <div class="goal" data-role="cg"><b>新上线的“订单查询”服务要当前状态</b>它只关心每个订单现在是什么状态，不想把 30 天的事件从头重放一遍。</div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：保留时间和磁盘绑在一起</h2>
+  </div>
+  <div class="tries">
+    <div class="try"><h4>试 1 · 改成 earliest 再重启</h4>
+      <p>没有位点时从分区里最早的那条开始读。</p>
+      <p class="pain">宕机后头一天的段已经整段删了，读不到。⑤ 实测：丢 186 条，还要把宕机前已经处理过的 1266 条再过一遍。</p></div>
+    <div class="try"><h4>试 2 · retention.ms 改成 30 天</h4>
+      <p>消息留得够久，位点再调大，就都不会丢。</p>
+      <p class="pain">盘要买到 4 倍多，而且全是 broker 的本地盘。换一台 broker、加一台 broker 重新分配分区时，要把 30 天的数据整个复制过去。</p></div>
+    <div class="try"><h4>试 3 · 下游自己归档一份</h4>
+      <p>用 connector 把消息另存到对象存储或数据库。</p>
+      <p class="pain">能留住数据，但补数据时要另写一个回放程序，offset 对不上原来的位点，顺序和去重也得自己重新保证。</p></div>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 236" role="img" aria-label="估算：订单事件平均每秒 5 MB，一天 432 GB。三副本保留 7 天要 9.1 TB 本地盘；保留 30 天要 38.9 TB 本地盘；分层存储本地只留 1 天，三副本 1.3 TB，对象存储里放 30 天一份，13 TB。">
+  <text x="20" y="22" class="t-h">要放多少盘（估算：order-events 平均 5 MB/s，一天 432 GB）</text>
+  <text x="20" y="62" class="t-s">保留 7 天 · 本地 × 3 副本</text>
+  <rect x="230" y="46" width="163" height="26" rx="5" class="b-neu"/>
+  <text x="401" y="64" class="t-mono">9.1 TB 本地盘</text>
+  <text x="20" y="112" class="t-s">保留 30 天 · 本地 × 3 副本</text>
+  <rect x="230" y="96" width="700" height="26" rx="5" class="b-bad"/>
+  <text x="920" y="114" class="t-mono" text-anchor="end">38.9 TB 本地盘</text>
+  <text x="20" y="162" class="t-s">分层存储 · 本地 1 天 × 3</text>
+  <rect x="230" y="146" width="23" height="26" rx="5" class="b-pd"/>
+  <text x="261" y="164" class="t-mono">1.3 TB 本地盘</text>
+  <text x="20" y="200" class="t-s">　　　　+ 对象存储 30 天</text>
+  <rect x="230" y="184" width="233" height="26" rx="5" class="b-bk"/>
+  <text x="471" y="202" class="t-mono">13 TB 对象存储（一份，冗余由存储自己做）</text>
+</svg>
+  </div>
+  <p class="cap">5 MB/s 是假设的平均写入量，只用来比大小。对象存储按容量计费，比三份本地 SSD 便宜得多，读一次还要按请求付钱，⑥ 第三圈会讲到。</p>
+  </figure>
+  <p class="verdict" data-role="other">缺的那一块：<b>让 Kafka 自己把老段放到便宜的地方，消费者照常按 offset 读</b>。另一种需求也一样：状态类的 topic 只要每个 key 的最新值，其余的旧值都可以扔掉。<br>典型误用：把 order-events 设成 <code>cleanup.policy=compact</code>，以为这样就能“永久保存”。⑤ 实测，压缩后 9527 只剩 <code>REFUNDED</code> 这一条，积分服务从头读，根本见不到 <code>PAID</code>。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：先分清是事件还是状态</h2>
+  </div>
+  <div class="tbl-wrap"><table class="t">
+    <thead><tr><th scope="col">办法</th><th scope="col">留下什么</th><th scope="col">盘花在哪</th><th scope="col">补数据怎么读</th><th scope="col">适合</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">加大 <code>retention.ms</code></th><td>全部</td><td>broker 本地盘 × 副本数，和天数成正比</td><td>照常按 offset 读</td><td>量小、保留期短</td></tr>
+      <tr class="pick"><th scope="row">分层存储（本页）</th><td>全部</td><td>本地只放热的 1 天；老段在对象存储里放一份</td><td>照常按 offset 读，老数据由 broker 去远端取</td><td>事件流：order-events</td></tr>
+      <tr class="pick"><th scope="row">日志压缩（本页）</th><td>每个 key 的最新一条</td><td>和 key 的个数成正比，和时间无关</td><td>从头读一遍，就拿到所有 key 的当前值</td><td>状态：order-state、<code>__consumer_offsets</code></td></tr>
+      <tr><th scope="row">下游归档、落库</th><td>你存什么就有什么</td><td>另一套存储</td><td>另写回放程序</td><td>审计、离线分析</td></tr>
+    </tbody>
+  </table></div>
+  <p class="rule-box"><b>选择规则</b>：每一条都要处理的是<b>事件</b>，用 <code>cleanup.policy=delete</code>，要留得久就再开分层存储；只关心最新值的是<b>状态</b>，用 <code>compact</code>。两种需求都有，就建两个 topic（order-events 和 order-state），不要一个 topic 两用。<b>compact 的 topic 不能开分层存储</b>，原因见 ④。位点是另一回事：它的保留期由 broker 的 <code>offsets.retention.minutes</code> 管，和消息分开算。本页学分层存储和日志压缩，顺带把位点过期讲清楚。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：一个分区分两截存，一个 key 只留一条，位点也是一个 key</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>段和活跃段</b>：一个分区的日志切成很多段文件，只往最后一个段（活跃段）里追加；段满了（<code>segment.bytes</code>）或到时间了（<code>segment.ms</code>）就关掉，开一个新段。删除也是整段删。见<a href="kafka-storage-zerocopy.html">第一圈</a>。</li>
+      <li><b>log start offset</b>：这个分区里还能读到的最小 offset。段被删以后它往前挪。</li>
+      <li><b>高水位 HW 和 LSO</b>：HW 以下的消息已经复制到 ISR 里所有副本，消费者能读；LSO（last stable offset）是在 HW 基础上再排除还没提交的事务，没用事务时它就等于 HW。见<a href="kafka-reliability-group.html">可靠性那页</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-tier">机制 1：分层存储，一个分区的日志分成两截</h3>
+  <p>打开分层存储（KIP-405）以后，一个分区的日志在逻辑上还是从 0 排下去的一串 offset，物理上分成两截：<b>新的在 broker 本地盘</b>，<b>老的在对象存储</b>。broker 里多了一个 <b>RemoteLogManager</b>（RLM），负责搬运、删除和读远端。真正和 S3、GCS 打交道的是一个插件，接口叫 <b>RemoteStorageManager</b>（RSM）；每个段在远端的位置记在内部 topic <code>__remote_log_metadata</code> 里。点“下一步”，看一个段的晚年。</p>
+  <div class="stepper" id="tierSt" tabindex="0" data-role="bk" aria-label="分步动画：一个段的晚年。用左右方向键切换">
+    <div class="fig-box wide" style="border:0;padding:0">
+<svg class="sv" viewBox="0 0 960 400" role="img" aria-label="一个分区按天分段，11-02 到 11-09 共 8 个段。上面一行是 broker 本地盘，下面一行是对象存储。分 6 步：写入活跃段，段滚动，复制任务把非活跃段传到对象存储，本地超过 local.retention.ms 的段删除，积分服务读老数据时由 RemoteLogReader 从对象存储读，远端超过 retention.ms 的段删除。">
+  <text x="20" y="22" class="t-h">order-events 分区 3：本地一截，远端一截（按天分段）</text>
+  <!-- actors -->
+  <rect x="40" y="40" width="170" height="44" rx="10" class="b-of"/>
+  <text x="125" y="60" class="t-of" text-anchor="middle">积分服务</text>
+  <text x="125" y="76" class="t-xs" text-anchor="middle">按 offset 读，不知道在哪截</text>
+  <rect x="790" y="40" width="150" height="44" rx="10" class="b-rn"/>
+  <text x="865" y="60" class="t-rn" text-anchor="middle">订单服务</text>
+  <text x="865" y="76" class="t-xs" text-anchor="middle">一直在写</text>
+  <!-- row labels -->
+  <text x="40" y="144" class="t-pd">broker 本地盘</text>
+  <text x="40" y="160" class="t-xs">页缓存 + sendfile</text>
+  <rect x="40" y="200" width="130" height="40" rx="8" class="b-card"/>
+  <text x="105" y="217" class="t-xs" text-anchor="middle">RemoteLogReader</text>
+  <text x="105" y="232" class="t-xs" text-anchor="middle">线程池（默认 10）</text>
+  <text x="40" y="294" class="t-bk">对象存储</text>
+  <text x="40" y="310" class="t-xs">RSM 插件读写</text>
+  <!-- copy arrows (fx) -->
+  <g id="cpArrows" class="fx off">
+    <path d="M223,172 L223,272" style="stroke:var(--bk);stroke-width:2;stroke-dasharray:5 4;fill:none" marker-end="url(#ah-bk)"/>
+    <path d="M319,172 L319,272" style="stroke:var(--bk);stroke-width:2;stroke-dasharray:5 4;fill:none" marker-end="url(#ah-bk)"/>
+    <path d="M415,172 L415,272" style="stroke:var(--bk);stroke-width:2;stroke-dasharray:5 4;fill:none" marker-end="url(#ah-bk)"/>
+    <path d="M511,172 L511,272" style="stroke:var(--bk);stroke-width:2;stroke-dasharray:5 4;fill:none" marker-end="url(#ah-bk)"/>
+    <path d="M607,172 L607,272" style="stroke:var(--bk);stroke-width:2;stroke-dasharray:5 4;fill:none" marker-end="url(#ah-bk)"/>
+    <path d="M703,172 L703,272" style="stroke:var(--bk);stroke-width:2;stroke-dasharray:5 4;fill:none" marker-end="url(#ah-bk)"/>
+    <path d="M799,172 L799,272" style="stroke:var(--bk);stroke-width:2.5;fill:none" marker-end="url(#ah-bk)"/>
+    <text x="560" y="226" class="t-bk" text-anchor="middle" style="paint-order:stroke;stroke:var(--card);stroke-width:5px">RLM 复制任务：已滚动、在 LSO 以下的段 → RSM</text>
+  </g>
+  <!-- write arrows -->
+  <path id="wr6" class="fx" d="M820,84 L820,122" style="stroke:var(--rn);stroke-width:2.5;fill:none" marker-end="url(#ah-ink)"/>
+  <path id="wr7" class="fx off" d="M900,84 L900,122" style="stroke:var(--rn);stroke-width:2.5;fill:none" marker-end="url(#ah-ink)"/>
+  <!-- read path -->
+  <g id="rdPath" class="fx off">
+    <path d="M415,276 C415,246 260,220 174,220" class="e-of" marker-end="url(#ah-of)"/>
+    <path d="M40,220 H28 V62 H34" class="e-of" marker-end="url(#ah-of)"/>
+    <text x="286" y="262" class="t-of" text-anchor="middle" style="paint-order:stroke;stroke:var(--card);stroke-width:5px">offset 在本地最早之前 → 去远端读</text>
+  </g>
+  <!-- local slots -->
+  <g id="loc0" class="slot s-live"><rect x="180" y="126" width="86" height="44" rx="7"/><text x="223" y="153" class="t-mono" text-anchor="middle">11-02</text></g>
+  <g id="loc1" class="slot s-live"><rect x="276" y="126" width="86" height="44" rx="7"/><text x="319" y="153" class="t-mono" text-anchor="middle">11-03</text></g>
+  <g id="loc2" class="slot s-live"><rect x="372" y="126" width="86" height="44" rx="7"/><text x="415" y="153" class="t-mono" text-anchor="middle">11-04</text></g>
+  <g id="loc3" class="slot s-live"><rect x="468" y="126" width="86" height="44" rx="7"/><text x="511" y="153" class="t-mono" text-anchor="middle">11-05</text></g>
+  <g id="loc4" class="slot s-live"><rect x="564" y="126" width="86" height="44" rx="7"/><text x="607" y="153" class="t-mono" text-anchor="middle">11-06</text></g>
+  <g id="loc5" class="slot s-live"><rect x="660" y="126" width="86" height="44" rx="7"/><text x="703" y="153" class="t-mono" text-anchor="middle">11-07</text></g>
+  <g id="loc6" class="slot s-active"><rect x="756" y="126" width="86" height="44" rx="7"/><text x="799" y="153" class="t-mono" text-anchor="middle">11-08</text></g>
+  <g id="loc7" class="slot s-none"><rect x="852" y="126" width="86" height="44" rx="7"/><text x="895" y="153" class="t-mono" text-anchor="middle">11-09</text></g>
+  <!-- remote slots -->
+  <g id="rem0" class="slot s-none"><rect x="180" y="276" width="86" height="44" rx="7"/><text x="223" y="303" class="t-mono" text-anchor="middle">11-02</text></g>
+  <g id="rem1" class="slot s-none"><rect x="276" y="276" width="86" height="44" rx="7"/><text x="319" y="303" class="t-mono" text-anchor="middle">11-03</text></g>
+  <g id="rem2" class="slot s-none"><rect x="372" y="276" width="86" height="44" rx="7"/><text x="415" y="303" class="t-mono" text-anchor="middle">11-04</text></g>
+  <g id="rem3" class="slot s-none"><rect x="468" y="276" width="86" height="44" rx="7"/><text x="511" y="303" class="t-mono" text-anchor="middle">11-05</text></g>
+  <g id="rem4" class="slot s-none"><rect x="564" y="276" width="86" height="44" rx="7"/><text x="607" y="303" class="t-mono" text-anchor="middle">11-06</text></g>
+  <g id="rem5" class="slot s-none"><rect x="660" y="276" width="86" height="44" rx="7"/><text x="703" y="303" class="t-mono" text-anchor="middle">11-07</text></g>
+  <g id="rem6" class="slot s-none"><rect x="756" y="276" width="86" height="44" rx="7"/><text x="799" y="303" class="t-mono" text-anchor="middle">11-08</text></g>
+  <g id="rem7" class="slot s-none"><rect x="852" y="276" width="86" height="44" rx="7"/><text x="895" y="303" class="t-mono" text-anchor="middle">11-09</text></g>
+  <!-- pointers -->
+  <g id="pLocal" class="ptr"><path d="M223,120 l-6,-9 h12 z" class="f-pd"/><text x="214" y="113" class="t-pd" text-anchor="end">本地最早 offset</text></g>
+  <g id="pStart" class="ptr"><path d="M223,326 l-6,9 h12 z" class="f-bk"/><text x="230" y="340" class="t-bk">全部最早 offset（log start）</text></g>
+  <!-- metadata -->
+  <rect x="600" y="352" width="340" height="38" rx="8" class="b-card"/>
+  <text x="770" y="368" class="t-mono" text-anchor="middle">__remote_log_metadata</text>
+  <text x="770" y="383" class="t-xs" text-anchor="middle">每个远端段的起止 offset、时间、状态</text>
+</svg>
+    </div>
+    <p class="st-cap" id="tierCap" aria-live="polite"><b class="h">1 · 写入</b>订单服务的消息照常追加进本地的活跃段（11-08）。读新数据的消费者和第一圈讲的一样，走页缓存和 <code>sendfile</code>。这时还没有任何段在远端。</p>
+    <div class="st-ctl">
+      <button class="btn" id="tPrev" type="button">← 上一步</button>
+      <button class="btn primary" id="tNext" type="button">下一步 →</button>
+      <button class="btn" id="tAuto" type="button">自动播放</button>
+      <button class="btn" id="tReset" type="button">从头来</button>
+      <span class="pos" id="tPos">1 / 6</span>
+    </div>
+  </div>
+
+  <h3 id="design">为什么这样设计：读的次数，几乎都集中在最新的数据上</h3>
+  <div class="design three">
+    <div class="way" data-role="other">
+      <h4>全放本地<small>加大 retention.ms</small></h4>
+      <p>最简单，读哪里都快。</p>
+      <p>输在：盘和机器绑死。保留期每长一天，每个副本都要多一天的 SSD；扩容、换机器时要把整段历史复制一遍，30 天的数据要拷好几个小时。</p>
+    </div>
+    <div class="way" data-role="bk">
+      <h4>本地热、远端冷<small>Kafka 的选择</small></h4>
+<svg viewBox="0 0 300 120" role="img" aria-label="被读的次数随数据年龄迅速下降：几秒内的数据被所有组反复读，几天前的只在补数据时读。本地只放热的那一小段。">
+  <rect x="20" y="14" width="56" height="86" class="b-pd" rx="4"/>
+  <path d="M20,22 C60,30 70,82 120,90 S240,98 290,99" class="e-of"/>
+  <line x1="20" y1="100" x2="292" y2="100" class="e-axis"/>
+  <text x="48" y="114" class="t-xs" text-anchor="middle">本地</text>
+  <text x="200" y="114" class="t-xs" text-anchor="middle">远端：数据越老，读得越少</text>
+  <text x="84" y="30" class="t-xs">被读次数</text>
+</svg>
+      <p>追尾读（几秒内的数据）占了绝大部分读取，全在本地；补数据、回放这类少见的读才去远端，慢一点也能接受。本地盘只按“热的那几天”买。</p>
+    </div>
+    <div class="way" data-role="other">
+      <h4>全放对象存储<small>broker 不留历史</small></h4>
+      <p>盘最省，broker 没有状态，换机器最快。</p>
+      <p>输在：每次追尾读都要走对象存储，一次读几十毫秒起步，还按请求计费；页缓存和 <code>sendfile</code> 都用不上。这是另一种取舍，KIP-405 没有走这条路。</p>
+    </div>
+  </div>
+  <p class="verdict" data-role="bk">决定胜负的约束是<b>读的分布极不均匀</b>：几乎所有读都落在最新的数据上。所以热数据留在本地，冷数据交给按容量计费、自带冗余的对象存储，两边各取所长。</p>
+  <div class="deep">
+    <div class="dp" data-role="bk"><h4>为什么只上传“已滚动、在 LSO 以下”的段</h4><p>活跃段还在追加，传上去马上就过时了；LSO 以上的数据可能还没复制到所有 ISR，或者属于还没提交的事务，leader 换了以后可能被截断。远端的段一旦写好就不再修改，所以只能传这些不会再变的段。</p></div>
+    <div class="dp" data-role="cg"><h4>为什么 compact 的 topic 不能开分层存储</h4><p>压缩要反复重写老段，可远端段写好以后就不再改，要么整段留着，要么整段删。两者一结合，就得在对象存储里改写老段。4.4 直接拒绝这种配置（⑤ 里有报错原文）。这一条“为什么”是从设计推出来的；官方文档只写了“不支持 compacted topic”。</p></div>
+  </div>
+
+  <h3 id="m-compact">机制 2：日志压缩，每个 key 只留最后一条</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 340" role="img" aria-label="order-state 分区 0 的 9 条记录。压缩前：9527 有 CREATED、PAID、REFUNDED 三条，9528 有 CREATED、PAID，9001 有 CREATED、PAID 和一条墓碑，9529 在活跃段里。压缩后只剩 offset 4 的 9528 PAID、offset 6 的 9527 REFUNDED、offset 7 的 9001 墓碑和活跃段里的 offset 8，offset 不变，中间出现空洞。墓碑过了 delete.retention.ms 再清理一次后，offset 7 的墓碑也没了。">
+  <text x="20" y="22" class="t-h">order-state 分区 0：压缩只删旧值，offset 不变</text>
+  <g class="t-xs"><path d="M110,44 L456,44" class="e-mut"/><text x="283" y="40" text-anchor="middle">段 0（已滚动）</text><path d="M486,44 L832,44" class="e-mut"/><text x="659" y="40" text-anchor="middle">段 1（已滚动）</text><text x="905" y="40" text-anchor="middle">活跃段</text></g>
+  <text x="20" y="92" class="t-b">压缩前</text>
+  <g>
+    <rect x="110" y="56" width="86" height="56" rx="7" class="b-neu"/><text x="153" y="72" class="t-monos" text-anchor="middle">offset 0</text><text x="153" y="89" class="t-b" text-anchor="middle">9527</text><text x="153" y="104" class="t-xs" text-anchor="middle">CREATED</text>
+    <rect x="204" y="56" width="86" height="56" rx="7" class="b-neu"/><text x="247" y="72" class="t-monos" text-anchor="middle">offset 1</text><text x="247" y="89" class="t-b" text-anchor="middle">9528</text><text x="247" y="104" class="t-xs" text-anchor="middle">CREATED</text>
+    <rect x="298" y="56" width="86" height="56" rx="7" class="b-neu"/><text x="341" y="72" class="t-monos" text-anchor="middle">offset 2</text><text x="341" y="89" class="t-b" text-anchor="middle">9001</text><text x="341" y="104" class="t-xs" text-anchor="middle">CREATED</text>
+    <rect x="392" y="56" width="86" height="56" rx="7" class="b-neu"/><text x="435" y="72" class="t-monos" text-anchor="middle">offset 3</text><text x="435" y="89" class="t-b" text-anchor="middle">9527</text><text x="435" y="104" class="t-xs" text-anchor="middle">PAID</text>
+    <rect x="486" y="56" width="86" height="56" rx="7" class="b-cg"/><text x="529" y="72" class="t-monos" text-anchor="middle">offset 4</text><text x="529" y="89" class="t-b" text-anchor="middle">9528</text><text x="529" y="104" class="t-xs" text-anchor="middle">PAID</text>
+    <rect x="580" y="56" width="86" height="56" rx="7" class="b-neu"/><text x="623" y="72" class="t-monos" text-anchor="middle">offset 5</text><text x="623" y="89" class="t-b" text-anchor="middle">9001</text><text x="623" y="104" class="t-xs" text-anchor="middle">PAID</text>
+    <rect x="674" y="56" width="86" height="56" rx="7" class="b-cg"/><text x="717" y="72" class="t-monos" text-anchor="middle">offset 6</text><text x="717" y="89" class="t-b" text-anchor="middle">9527</text><text x="717" y="104" class="t-xs" text-anchor="middle">REFUNDED</text>
+    <rect x="768" y="56" width="86" height="56" rx="7" class="b-warn"/><text x="811" y="72" class="t-monos" text-anchor="middle">offset 7</text><text x="811" y="89" class="t-b" text-anchor="middle">9001</text><text x="811" y="104" class="t-xs" text-anchor="middle">null 墓碑</text>
+    <rect x="862" y="56" width="86" height="56" rx="7" class="b-pd"/><text x="905" y="72" class="t-monos" text-anchor="middle">offset 8</text><text x="905" y="89" class="t-b" text-anchor="middle">9529</text><text x="905" y="104" class="t-xs" text-anchor="middle">CREATED</text>
+  </g>
+  <path d="M60,118 L60,160" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text x="76" y="144" class="t-cg">Cleaner：先建一张“key → 最新 offset”的表，再把已滚动的段复制一遍，只留每个 key 的最新一条</text>
+  <text x="20" y="200" class="t-b">压缩后</text>
+  <g>
+    <rect x="110" y="166" width="86" height="56" rx="7" class="b-dash"/><text x="153" y="198" class="t-xs" text-anchor="middle">0 没了</text>
+    <rect x="204" y="166" width="86" height="56" rx="7" class="b-dash"/><text x="247" y="198" class="t-xs" text-anchor="middle">1 没了</text>
+    <rect x="298" y="166" width="86" height="56" rx="7" class="b-dash"/><text x="341" y="198" class="t-xs" text-anchor="middle">2 没了</text>
+    <rect x="392" y="166" width="86" height="56" rx="7" class="b-bad"/><text x="435" y="190" class="t-bad" text-anchor="middle">3 没了</text><text x="435" y="208" class="t-xs" text-anchor="middle">9527 的 PAID</text>
+    <rect x="486" y="166" width="86" height="56" rx="7" class="b-cg"/><text x="529" y="182" class="t-monos" text-anchor="middle">offset 4</text><text x="529" y="199" class="t-b" text-anchor="middle">9528</text><text x="529" y="214" class="t-xs" text-anchor="middle">PAID</text>
+    <rect x="580" y="166" width="86" height="56" rx="7" class="b-dash"/><text x="623" y="198" class="t-xs" text-anchor="middle">5 没了</text>
+    <rect x="674" y="166" width="86" height="56" rx="7" class="b-cg"/><text x="717" y="182" class="t-monos" text-anchor="middle">offset 6</text><text x="717" y="199" class="t-b" text-anchor="middle">9527</text><text x="717" y="214" class="t-xs" text-anchor="middle">REFUNDED</text>
+    <rect x="768" y="166" width="86" height="56" rx="7" class="b-warn"/><text x="811" y="182" class="t-monos" text-anchor="middle">offset 7</text><text x="811" y="199" class="t-b" text-anchor="middle">9001</text><text x="811" y="214" class="t-xs" text-anchor="middle">墓碑还在</text>
+    <rect x="862" y="166" width="86" height="56" rx="7" class="b-pd"/><text x="905" y="182" class="t-monos" text-anchor="middle">offset 8</text><text x="905" y="199" class="t-b" text-anchor="middle">9529</text><text x="905" y="214" class="t-xs" text-anchor="middle">活跃段不清</text>
+  </g>
+  <path d="M60,228 L60,262" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text x="76" y="250" class="t-cg">过了 delete.retention.ms（默认 24 小时），下一次清理连墓碑一起删</text>
+  <text x="20" y="300" class="t-b">再后来</text>
+  <g>
+    <rect x="486" y="268" width="86" height="56" rx="7" class="b-cg"/><text x="529" y="284" class="t-monos" text-anchor="middle">offset 4</text><text x="529" y="301" class="t-b" text-anchor="middle">9528</text><text x="529" y="316" class="t-xs" text-anchor="middle">PAID</text>
+    <rect x="674" y="268" width="86" height="56" rx="7" class="b-cg"/><text x="717" y="284" class="t-monos" text-anchor="middle">offset 6</text><text x="717" y="301" class="t-b" text-anchor="middle">9527</text><text x="717" y="316" class="t-xs" text-anchor="middle">REFUNDED</text>
+    <rect x="768" y="268" width="86" height="56" rx="7" class="b-dash"/><text x="811" y="300" class="t-xs" text-anchor="middle">9001 消失</text>
+    <rect x="862" y="268" width="86" height="56" rx="7" class="b-pd"/><text x="905" y="284" class="t-monos" text-anchor="middle">offset 8</text><text x="905" y="301" class="t-b" text-anchor="middle">9529</text><text x="905" y="316" class="t-xs" text-anchor="middle">CREATED</text>
+  </g>
+</svg>
+  </div>
+  </figure>
+  <ul class="steps-out">
+    <li data-role="cg"><b>谁来做</b><span>broker 里的 Cleaner 线程（<code>log.cleaner.threads</code> 默认 1）。分区里已经清理过的部分叫“干净的尾巴”，后来写进来的叫“脏的头”。脏的比例超过 <code>min.cleanable.dirty.ratio</code>（默认 0.5）才开始清。</span></li>
+    <li data-role="cg"><b>怎么清</b><span>先扫一遍脏的部分，在内存里建一张 key → 最新 offset 的表（放在 <code>log.cleaner.dedupe.buffer.size</code>，默认 128 MB 里）；再把老段逐个复制一遍，只留 offset 不小于表里那个值的记录，然后用新段换掉旧段。活跃段从来不清。</span></li>
+    <li data-role="warn"><b>怎么删一个 key</b><span>写一条 value 为 <code>null</code> 的记录，叫墓碑。它先留 <code>delete.retention.ms</code>（默认 24 小时），让正在读的消费者知道“这个 key 删了”，之后的清理连墓碑一起删掉。</span></li>
+    <li data-role="bad"><b>key 不能为空</b><span>compact 的 topic 靠 key 判断谁是旧值，空 key 的消息 broker 直接拒收。</span></li>
+  </ul>
+  <div class="design">
+    <div class="way" data-role="cg"><h4>后台复制改写<small>Kafka 的选择</small></h4><p>写入永远是追加，顺序写的速度不受影响；改写在后台批量做，换段只是换文件。offset 一个都不变，消费者的位点和 follower 的复制进度都还有效，只是中间多了空洞。</p></div>
+    <div class="way" data-role="other"><h4>原地更新<small>像数据库那样改一行</small></h4><p>每次更新都是随机写，追加写的吞吐就没了；被改的记录要么换 offset，要么在段的中间改长度，消费者的位点和副本按 offset 复制的方式都会乱。</p></div>
+  </div>
+  <p class="verdict" data-role="cg">约束：<b>写入只能追加，offset 不能变</b>。所以“只留最新值”不能靠改，只能靠事后整段复制、把旧值丢掉。代价是：旧值多久消失没有准确的时间，压缩之前，同一个 key 的好几个旧值都还读得到。</p>
+
+  <h3 id="m-offsets">机制 3：位点也是一个 key，<code>__consumer_offsets</code> 就是 compact topic</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 200" role="img" aria-label="积分服务提交位点，发给组协调器；协调器把位点写进 __consumer_offsets 的一个分区，key 是组、topic、分区，value 是位点。组变空 7 天后，协调器写一条墓碑，压缩以后这个 key 就没了，积分服务重启时找不到位点，只能按 auto.offset.reset 走。">
+  <rect x="20" y="64" width="150" height="56" rx="10" class="b-of"/>
+  <text x="95" y="88" class="t-of" text-anchor="middle">积分服务</text>
+  <text x="95" y="106" class="t-mono" text-anchor="middle">commitSync()</text>
+  <path d="M172,92 L222,92" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="226" y="64" width="200" height="56" rx="10" class="b-g2"/>
+  <text x="326" y="88" class="t-g2" text-anchor="middle">组协调器（某台 broker）</text>
+  <text x="326" y="106" class="t-xs" text-anchor="middle">按组名的 hash % 50 找分区</text>
+  <path d="M428,92 L478,92" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="482" y="20" width="458" height="166" rx="10" class="b-card"/>
+  <text x="496" y="42" class="t-b">__consumer_offsets 的一个分区（compact，默认 50 个分区）</text>
+  <text x="496" y="68" class="t-mono">key (points-svc, order-events, 3) → 1024</text>
+  <text x="496" y="90" class="t-mono">key (points-svc, order-events, 3) → 1180</text>
+  <text x="496" y="114" class="t-mono" style="fill:var(--bad)">key (points-svc, order-events, 3) → null 墓碑</text>
+  <text x="496" y="134" class="t-xs">↑ 组变空 7 天（offsets.retention.minutes）后协调器写的</text>
+  <text x="496" y="162" class="t-s">压缩以后这个 key 没了：重启时找不到位点，</text>
+  <text x="496" y="178" class="t-s">按 <tspan class="t-mono">auto.offset.reset</tspan> 走（默认 latest）</text>
+</svg>
+  </div>
+  <p class="cap">位点过期和消息过期是<b>两个各管各的计时器</b>：消息按段的时间删，位点按“组变空多久”删。分层存储能让消息留 30 天，位点照样 7 天后就没了。⑤ 里两个 topic 的位点都在第 9 天消失。按 4.4 的文档，手动 <code>assign</code> 的独立消费者从最后一次提交算起；删组、删 topic 时位点立即删除。</p>
+  </figure>
+
+  <h3>最少的写法</h3>
+  <div class="codebox"><div class="code-bar"><b>broker 一次，topic 两个，恢复一条命令</b><code>参数细节和版本差异放到 ⑥</code></div>
+<pre><code><span class="cm"># server.properties：打开分层存储（每台 broker）</span>
+remote.log.storage.system.enable=true
+remote.log.storage.manager.class.name=&lt;RSM 插件类&gt;   <span class="cm"># Kafka 不自带生产可用的，S3、GCS 用第三方插件</span>
+remote.log.storage.manager.class.path=&lt;插件 jar&gt;
+remote.log.metadata.manager.listener.name=PLAINTEXT
+
+<span class="cm"># 事件：本地 1 天，总共 30 天</span>
+kafka-topics.sh --create --topic order-events --partitions 6 \
+  --config remote.storage.enable=true \
+  --config local.retention.ms=86400000 --config retention.ms=2592000000
+
+<span class="cm"># 状态：每个订单只留最新状态，key 必须是订单号</span>
+kafka-topics.sh --create --topic order-state --config cleanup.policy=compact
+
+<span class="cm"># 恢复：位点没了，按宕机前一点的时间重置，重复的靠去重表</span>
+kafka-consumer-groups.sh --group points-svc --topic order-events \
+  --reset-offsets --to-datetime 2026-11-03T00:00:00.000 --execute</code></pre></div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：在本机把 8 天半演一遍</h2>
+  </div>
+  <p class="lead">交易靶场的缩小版：单节点 Kafka 4.4.0（KRaft），打开分层存储。远端用 Kafka 自带的测试插件 <code>LocalTieredStorage</code>，把“对象存储”模拟成本机的一个目录。时间按比例缩小，<b>1 天 = 60/7 秒 ≈ 8.6 秒</b>，这样“位点保留 7 天”正好等于 <code>offsets.retention.minutes</code> 能设的最小值 1 分钟。</p>
+  <div class="two">
+    <div class="codebox"><div class="code-bar"><b>怎么跑</b><code>java/kafka/kafka-tiered-compact</code></div>
+<pre><code><span class="cm"># JDK 17+、Maven；没有 Kafka 包会自动下载</span>
+./run.sh outage    <span class="cm"># 积分服务停 8 天半，两个 topic 对比</span>
+./run.sh compact   <span class="cm"># order-state 开日志压缩</span>
+./run.sh down      <span class="cm"># 远端存储不可用（先跑 outage）</span>
+./run.sh clean     <span class="cm"># 停 Kafka，删 data/</span>
+
+<span class="cm"># broker 里多出的几行（run.sh 生成）</span>
+remote.log.storage.system.enable=true
+remote.log.storage.manager.class.name=\
+  org.apache.kafka.server.log.remote.storage.LocalTieredStorage
+remote.log.storage.manager.class.path=\
+  data/plugin/kafka-storage-4.4.0-test-fixtures.jar
+rsm.config.dir=data/remote
+offsets.retention.minutes=1</code></pre></div>
+    <div class="codebox"><div class="code-bar"><b>积分服务回来以后</b><code>Retention.java · 按时间戳找回位置</code></div>
+<pre><code><span class="cm">// 位点没了，但消息还在（分层存储）：按宕机前 1 秒找 offset</span>
+consumer.assign(partitions);
+Map&lt;TopicPartition, Long&gt; q = new HashMap&lt;&gt;();
+for (TopicPartition tp : partitions) q.put(tp, stopAt - 1000);
+for (var e : consumer.offsetsForTimes(q).entrySet()) {
+    OffsetAndTimestamp o = e.getValue();
+    if (o != null) consumer.seek(e.getKey(), o.offset());
+    else consumer.seekToEnd(List.of(e.getKey()));
+}
+<span class="cm">// 之后照常 poll；多读的那 1 秒靠去重表挡住</span></code></pre></div>
+  </div>
+  <p class="tip"><a href="https://github.com/archeu/study-labs/tree/main/java/kafka/kafka-tiered-compact">完整代码 →</a> 一个类 <code>Retention</code>，三个子命令；外加 <code>run.sh</code>。</p>
+
+  <h3>outage：两个 topic 并排过 8 天半</h3>
+<pre class="console"><b>$ ./run.sh outage</b>   <span class="c">1 天 = 8571 ms；订单服务每 50 ms 发一条，同时写两个 topic（各 6 分区）</span>
+<span class="c">order-events：retention.ms = 7 天；order-events-tiered：local.retention.ms = 1 天，retention.ms = 30 天</span>
+第 1 天末：积分服务读了 165 / 166 条，提交位点后宕机（组里没人了）
+  天 | order-events 本地段 | 本地最早 | tiered 本地段 | 远端段 | 本地最早 / 全部最早 | 位点
+   2 |  12 个   33 KB |      0 |  12 个   33 KB |   6 个 |      0 / 0 | 在 / 在
+   3 |  18 个   50 KB |      0 |  12 个   32 KB |  12 个 |    179 / 0 | 在 / 在
+   5 |  30 个   83 KB |      0 |  12 个   31 KB |  24 个 |    528 / 0 | 在 / 在
+   8 |  48 个  134 KB |      0 |  12 个   29 KB |  42 个 |   1057 / 0 | 在 / 在
+   9 |  48 个  133 KB |  <span class="r">179</span> |  12 个   29 KB |  48 个 |   1228 / 0 | <span class="r">没了 / 没了</span>
+ 9.5 |  48 个  124 KB |  <span class="r">351</span> |  12 个   20 KB |  52 个 |   1409 / <span class="hi">0</span> | <span class="r">没了 / 没了</span>
+第 9.5 天：积分服务修好重启。宕机期间新增 1452 / 1451 条
+① order-events，auto.offset.reset=latest：补上 0 条，<span class="r">丢 1452 条</span>
+② order-events，auto.offset.reset=earliest：读了 1266 条（含宕机前已处理过的），<span class="r">宕机期间的丢 186 条</span>
+③ order-events-tiered，按宕机前 1 秒的时间戳 offsetsForTimes 找位点：<span class="hi">补上 1470 条</span>（宕机期间 1451 条），用时 652 ms</pre>
+  <div class="res-grid">
+    <div class="lab-res" data-role="pd"><b>看本地盘</b><ul><li>普通 topic 本地段一天涨 6 个，到第 8 天封顶（7 天的量）；分层的 topic 本地一直是 12 个（每个分区一个已滚动段 + 一个活跃段）。</li><li>分层的 topic 有两个“最早”：本地最早一路往前挪，全部最早一直是 0。</li></ul></div>
+    <div class="lab-res" data-role="g2"><b>看位点</b><ul><li>两个组的位点在同一天消失，和 topic 开没开分层无关。</li><li>第 ③ 种能找回来，是因为消息还在；多读的 19 条是宕机前 1 秒的，有去重表就无害。</li></ul></div>
+  </div>
+
+  <h3>compact：order-state 只留每个订单的最新状态</h3>
+<pre class="console"><b>$ ./run.sh compact</b>   <span class="c">1 个分区，segment.ms=2000，min.cleanable.dirty.ratio=0.01，delete.retention.ms=5000</span>
+一共写了 2301 条：1000 个订单 × CREATED、PAID，200 个 REFUNDED，100 个墓碑，1 条新订单
+   2.7 s：从头读到 <span class="hi">1001 条</span>（墓碑 100 条），本地段 2 个
+9527 现在只剩：[offset 2026 <span class="r">REFUNDED</span>]
+最前面 5 条的 offset：[1100:9101=PAID, 1101:9102=PAID, ...]      <span class="c">← 0～1099 都被清掉了，offset 不变</span>
+按状态数：{CREATED=1, PAID=700, REFUNDED=200, null=100}
+  墓碑过了 delete.retention.ms 以后又清理一轮：902 条，其中墓碑 0 条
+空 key：<span class="r">InvalidRecordException: Compacted topic cannot accept message without key in topic partition order-state-0</span>
+compact + remote.storage.enable：<span class="r">InvalidConfigurationException: Remote log storage only supports topics
+  with cleanup.policy=delete or cleanup.policy being an empty list.</span></pre>
+  <p class="verdict" data-role="done">到这里已经能交差了：事件 topic 开分层存储，本地只放 1 天；状态 topic 开压缩；积分服务回来时按时间戳找回位置。<br>已知还没处理的细节：远端存储挂了会怎样（<a href="#p-down">⑥ 坑 3、4</a>）、位点该留多久（<a href="#r-offsets">⑥ 规范</a>）、从远端读到底慢在哪（<a href="#d-read">⑥ 第三圈</a>）、怎么关掉分层存储（<a href="#p-off">⑥ 坑 8</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节 · 规范 · 优化</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就出事</h3></div>
+  <div class="pits">
+    <div class="pit"><b><em>1</em>给事件流开了 compact<a class="rootmark" href="#m-compact">← ④ 只留最新</a></b>
+      <dl><dt>现象</dt><dd>积分服务从头读 order-events，9527 只看到 <code>REFUNDED</code>，没加过积分却要扣积分。<span class="seen">⑤ 9527 只剩 offset 2026</span></dd>
+      <dt>根源</dt><dd>压缩按 key 只留最后一条，中间的事件全被清掉。</dd>
+      <dt>做法</dt><dd class="fix">每一条都要处理的 topic 用 <code>delete</code>，要留得久就开分层存储；状态另建一个 compact topic。</dd></dl></div>
+    <div class="pit"><b><em>2</em>分层存储救得了消息，救不了位点<a class="rootmark" href="#m-offsets">← ④ 两个计时器</a></b>
+      <dl><dt>现象</dt><dd>消息留了 30 天，积分服务停 8 天回来，照样按 <code>latest</code> 跳到末尾。<span class="seen">⑤ 第 9 天两个组的位点都没了</span></dd>
+      <dt>根源</dt><dd>位点按“组变空多久”过期，和消息保留各算各的。</dd>
+      <dt>做法</dt><dd class="fix">调大 <code>offsets.retention.minutes</code>；关键组用 <code>auto.offset.reset=none</code>，找不到位点就别启动，人工按时间重置。</dd></dl></div>
+    <div class="pit" id="p-down"><b><em>3</em>远端挂了，补数据的消费者不报错、也不前进<a class="rootmark" href="#m-tier">← ④ 第 5 步</a></b>
+      <dl><dt>现象</dt><dd>从 offset 0 读的消费者 15 秒读到 0 条，没有抛异常；broker 日志 15 秒刷了 9 万多行 <code>RemoteStorageException</code>。生产者和读本地新数据的消费者照常。<span class="seen">⑤ down 实测</span></dd>
+      <dt>根源</dt><dd>远端读失败只让这个分区这次 fetch 返回错误，消费者客户端把它当成可以重试的错误，一直重试。</dd>
+      <dt>做法</dt><dd class="fix">给补数据的组单独盯 LAG 是否在降；对象存储的可用性单独告警；broker 日志里这类错误要限流或聚合。</dd></dl></div>
+    <div class="pit"><b><em>4</em>远端挂了，本地盘会涨<a class="rootmark" href="#m-tier">← ④ 第 4 步</a></b>
+      <dl><dt>现象</dt><dd>远端断了 3 天，分层 topic 的本地段从 6 个涨到 18 个；恢复后补传上去，又回落到 12 个。<span class="seen">⑤ down 实测</span></dd>
+      <dt>根源</dt><dd>本地段要先传到远端，才能按 <code>local.retention.ms</code> 删；传不上去就一直留在本地。</dd>
+      <dt>做法</dt><dd class="fix">本地盘按“热数据 + 远端断开 N 小时”的量预留；盘的使用率要告警，满了以后那个日志目录会下线。</dd></dl></div>
+    <div class="pit"><b><em>5</em>往 compact topic 写了空 key<a class="rootmark" href="#m-compact">← ④ 靠 key 判断</a></b>
+      <dl><dt>现象</dt><dd><code>InvalidRecordException: Compacted topic cannot accept message without key …</code><span class="seen">⑤ 实测原文</span></dd>
+      <dt>根源</dt><dd>没有 key，就分不出哪条是旧值，broker 在写入时校验并拒收。</dd>
+      <dt>做法</dt><dd class="fix">生产端把订单号设为 key，发送回调里处理失败，别丢了不管。</dd></dl></div>
+    <div class="pit"><b><em>6</em>想给 compact topic 开分层存储<a class="rootmark" href="#design">← ④ 远端段不改</a></b>
+      <dl><dt>现象</dt><dd><code>InvalidConfigurationException: Remote log storage only supports topics with cleanup.policy=delete …</code><span class="seen">⑤ 实测原文</span></dd>
+      <dt>根源</dt><dd>远端的段写好以后不再修改，而压缩要反复改写老段。</dd>
+      <dt>做法</dt><dd class="fix">状态 topic 本来就和 key 的个数成正比，通常不大，不需要分层；要看历史就去读事件 topic。</dd></dl></div>
+    <div class="pit"><b><em>7</em>墓碑只留 24 小时<a class="rootmark" href="#m-compact">← ④ 墓碑</a></b>
+      <dl><dt>现象</dt><dd>订单查询服务停了 2 天，回来从头重建状态，9001 号订单已经归档删除了，它这里却还有。</dd>
+      <dt>根源</dt><dd>墓碑过了 <code>delete.retention.ms</code> 会被清掉，晚来的消费者根本看不到“删除”这件事。</dd>
+      <dt>做法</dt><dd class="fix">重建状态时先清空本地的状态表，再从头读；或者把 <code>delete.retention.ms</code> 调到比最长停机时间还长。</dd></dl></div>
+    <div class="pit" id="p-off"><b><em>8</em>想关掉分层存储，直接改成 false 被拒<a class="rootmark" href="#vers">版本限制</a></b>
+      <dl><dt>现象</dt><dd>3.9 以前根本不能关；4.4 里只改 <code>remote.storage.enable=false</code> 会报 <code>InvalidConfigurationException</code>。</dd>
+      <dt>根源</dt><dd>关掉以后远端数据要么删掉，要么只读，必须明说。这是 KIP-950 的设计，不是从 ④ 推出来的。</dd>
+      <dt>做法</dt><dd class="fix">要删远端数据：同时设 <code>remote.log.delete.on.disable=true</code>。只想停止上传、远端只读：保持 <code>remote.storage.enable=true</code>，加 <code>remote.log.copy.disable=true</code>。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3>使用规范：团队里怎么配</h3></div>
+  <div class="rules-list">
+    <div class="rl"><b>事件和状态分开建 topic</b><p><code>order-events</code> 用 delete，可以开分层；<code>order-state</code> 用 compact，key 必填。</p><p class="guard">一个 topic 两用，事件被压缩掉。</p></div>
+    <div class="rl"><b>本地留多久、一共留多久，分开定</b><p><code>local.retention.ms</code> 覆盖“正常追尾 + 一次小故障”，比如 1 天；<code>retention.ms</code> 按“下游最长能停多久 + 回放需要”，比如 30 天。</p><p class="guard">本地盘按 30 天买。</p></div>
+    <div class="rl" id="r-offsets"><b>位点至少和消息留得一样久</b><p><code>offsets.retention.minutes</code> 不小于事件 topic 的 <code>retention.ms</code>；关键组“变空超过 1 天”就告警。</p><p class="guard">消息还在，位点没了。</p></div>
+    <div class="rl"><b>关键组不让它自己猜起点</b><p><code>auto.offset.reset=none</code>：找不到位点时抛 <code>NoOffsetForPartitionException</code>，拒绝启动。</p><p class="guard">悄悄跳到末尾，丢了也没人知道。</p></div>
+    <div class="rl"><b>恢复步骤写进 runbook</b><p><code>kafka-consumer-groups.sh --reset-offsets --to-datetime &lt;宕机前一点&gt;</code>，再启动；多读的那一段靠去重表挡住。</p><p class="guard">少读，或者多读却重复加积分。</p></div>
+    <div class="rl"><b>compact topic 给中间状态留时间</b><p>设 <code>min.compaction.lag.ms</code>（比如 1 小时），保证新写的值至少这么久不被压掉。</p><p class="guard">读得慢的消费者错过 PAID 这样的中间状态。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">第三圈</span><h3>优化和深处</h3></div>
+  <div class="deep">
+    <div class="dp" id="d-read" data-role="bk"><h4>1 · 从远端读，慢在哪</h4>
+      <ul>
+        <li>不走 <code>sendfile</code>：<code>RemoteLogManager.read</code> 把数据从插件读进内存里的 buffer，再组装成响应发出去（源码）。</li>
+        <li>远端读在单独的线程池里排队：<code>remote.log.reader.threads</code> 默认 10；一次 fetch 最多等 <code>remote.fetch.max.wait.ms</code>，默认 500 ms。</li>
+        <li><b>4.2 以前</b>，一次 fetch 请求里只有一个分区能读远端，其他分区返回空，6 个分区只能轮流追；4.2 起可以一起读（KAFKA-14915）。</li>
+        <li>对象存储按请求收费：大规模回放时，要算一算 GET 次数和带宽的费用。</li>
+      </ul></div>
+    <div class="dp" data-role="bk"><h4>2 · 段什么时候上传</h4>
+      <ul>
+        <li>RLM 的复制任务每 <code>remote.log.manager.task.interval.ms</code>（默认 30 秒）跑一次，挑出已滚动、base offset 不超过 LSO 的段（源码 <code>candidateLogSegments</code>）。</li>
+        <li>4.4 新增 <code>remote.copy.lag.ms</code> 和 <code>remote.copy.lag.bytes</code>（KIP-1241），可以让段在本地多等一会儿再传。默认 0，也就是一滚动就传，和旧行为一样。</li>
+        <li>段越大，上传越少，但本地删除的粒度也越粗：<code>local.retention.ms</code> 到了，还要等整段都过期才删。</li>
+      </ul></div>
+    <div class="dp" data-role="cg"><h4>3 · Cleaner 一轮能清多少</h4>
+      <ul>
+        <li>key → offset 的表放在 <code>log.cleaner.dedupe.buffer.size</code>（默认 128 MB，多个 cleaner 线程平分）里；key 太多时，一轮只能清一部分，要多清几轮。</li>
+        <li><code>min.cleanable.dirty.ratio</code>=0.5 意味着最坏时，一半的空间是还没清的旧值。</li>
+        <li><code>max.compaction.lag.ms</code>（默认不限）可以给“最多多久不压缩”设个上限，适合有合规删除要求的 topic。</li>
+        <li><code>log.cleaner.enable</code> 在 4.1 被弃用（KIP-1148），5.0 删除：不要再把它关掉，<code>__consumer_offsets</code> 靠它。</li>
+      </ul></div>
+    <div class="dp" data-role="g2"><h4>4 · <code>__consumer_offsets</code> 自己</h4>
+      <ul>
+        <li>默认 50 个分区（<code>offsets.topic.num.partitions</code>）；组名的 hash 对 50 取余，决定这个组的位点在哪个分区，那个分区的 leader 就是这个组的协调器。</li>
+        <li>每次提交都是追加一条，靠压缩保持很小；位点过期就是协调器写一条墓碑。</li>
+        <li>检查过期的周期是 <code>offsets.retention.check.interval.ms</code>，默认 10 分钟，所以过期时间会晚上最多 10 分钟。</li>
+      </ul></div>
+  </div>
+
+  <h3 id="vers">版本差异</h3>
+  <div class="tbl-wrap"><table class="t vtab">
+    <thead><tr><th scope="col">版本</th><th scope="col">变化</th><th scope="col">出处</th></tr></thead>
+    <tbody>
+      <tr><td>3.6</td><td>分层存储进入 early access，只建议测试环境用</td><td>3.6.0 发布公告</td></tr>
+      <tr><td>3.9</td><td>分层存储标为 production-ready；可以对 topic 关掉分层存储（KIP-950）</td><td>3.9.0 发布公告</td></tr>
+      <tr><td>4.1</td><td><code>log.cleaner.enable</code> 弃用，5.0 删除（KIP-1148）</td><td>4.1 升级说明</td></tr>
+      <tr><td>4.2</td><td>一次 fetch 可以同时从远端读多个分区</td><td>KAFKA-14915</td></tr>
+      <tr><td>4.4</td><td>新增 <code>remote.copy.lag.ms</code> / <code>.bytes</code>（KIP-1241）；测试插件 <code>LocalTieredStorage</code> 挪到 <code>kafka-storage-4.4.0-test-fixtures.jar</code></td><td>4.4 升级说明、Maven Central</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li><b>生产用的 RSM 插件</b>：比如 Aiven 开源的 S3 / GCS 插件，分块、缓存、加密怎么配。</li>
+    <li><b>Kafka Streams 的 changelog</b>：状态存储靠 compact topic 恢复，重启要多久。</li>
+    <li><b>事务和压缩</b>：中止的事务、事务标记怎么被清掉，<code>.txnindex</code> 和 LSO。</li>
+    <li><b>RocketMQ 5 的分级存储</b>：CommitLog 怎么搬到对象存储，和 Kafka 对照着看。</li>
+    <li><b>按大小保留</b>：<code>retention.bytes</code>、<code>local.retention.bytes</code>，以及多副本下由谁来删远端段。</li>
+    <li><b>leader 切换和远端</b>：新 leader 怎么接手上传，Leader Epoch 怎么保证远端段不重不漏。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改造你的积分服务</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="of"><h4>练习 1 · 找不到位点就别启动</h4><p>把 <code>drainFrom</code> 的 <code>auto.offset.reset</code> 改成 <code>none</code>，重跑 outage 的 ①：应该抛 <code>NoOffsetForPartitionException</code>。再接上“按时间戳重置”，作为人工确认后的恢复步骤。</p><p class="uses">用到：坑 2、规范 3～5</p></div>
+    <div class="exc" data-role="cg"><h4>练习 2 · 别让 PAID 被压掉</h4><p>给 order-state 加 <code>min.compaction.lag.ms=60000</code> 再跑 compact：刚写完时 9527 的 CREATED、PAID 还在吗？过了 1 分钟呢？先猜，再看输出。</p><p class="uses">用到：坑 1、规范 6</p></div>
+    <div class="exc" data-role="bk"><h4>练习 3 · 不报错的卡住也要能发现</h4><p>在 down 那一场里，给读老数据的消费者加一个检查：30 秒内位置没有前进就告警。它不会抛异常，只能靠这个发现。</p><p class="uses">用到：坑 3、深处 1</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>段、位点、同一个 key 的旧值各自过期；事件要留得久就开分层存储（本地短、总共长），状态只要最新就开压缩（每个 key 一条），位点另算，丢了就按时间戳找回。</p></details>
+    <details><summary>2. 为什么不直接把 retention.ms 改成 30 天？</summary><p>保留期和 broker 本地盘绑在一起：每个副本都要多存 23 天，盘要买到 4 倍多；扩容、换机器时还要把 30 天的数据整段复制。分层存储把“保留多久”和“本地放多少”拆开了。</p><p class="from">从 ② 的估算和 ④ 的设计对比推出。</p></details>
+    <details><summary>3. 对 order-events 开 compact，为什么会让积分出错？</summary><p>压缩按 key 只留最后一条。9527 的 PAID 和 REFUNDED 是同一个 key，压缩后只剩 REFUNDED；从头读的积分服务没加过这笔积分，却要扣掉它。</p><p class="from">从 ④ 机制 2 推出。</p></details>
+    <details><summary>4. 预测：order-events 开了分层存储，本地留 1 天。积分服务这次只停了 6 小时，回来时从本地读还是从远端读？</summary><p>从本地读。位点还在（组变空才 6 小时），要读的 offset 都在本地最早之后，走本地的段；只是 6 小时前的数据可能已经不在页缓存里，要读磁盘，比追尾读慢一些，但不经过远端。</p><p class="from">从 ④ 第 4、5 步推出：只有 offset 小于本地最早，才会去远端。</p></details>
+    <details><summary>5. 预测：新上线的发票服务要在每个 PAID 时开发票，它订阅 order-state 会怎样？</summary><p>会漏开发票。order-state 是 compact 的，9527 先 PAID 再 REFUNDED，压缩前读得够快才能看到 PAID，压缩后只剩 REFUNDED。“每个 PAID 都要处理”是事件需求，应该订阅 order-events。</p><p class="from">从 ③ 的选择规则和 ④ 机制 2 推出。</p></details>
+    <details><summary>6. 预测：对象存储断了 2 天，本地只按“热数据 1 天 + 余量半天”留了盘，会发生什么？</summary><p>这 2 天里段传不上去，本地段一个都不能删，本地数据涨到 3 天的量，超过预留的 1.5 天，盘会写满。盘满以后那个日志目录下线，上面的分区不能读也不能写，订单服务开始发送失败。在这之前，补数据的消费者已经卡住了，但不报错。</p><p class="from">从 ④ 第 4 步（先上传、后删除）和 ⑤ down 的实测推出。</p></details>
+    <details><summary>7. 放回全景：第 11 站前后各发生了什么？这一页讲的东西坏了，整条链路会怎样？</summary><p>第 11 站在后台跑，不在消息的路上：它前面是第 4 站把消息追加进段、第 7 站各组按 offset 拉取，位点由第 9 站提交、第 10 站的协调器保管。远端存储挂了：第 4 站照常写，本地盘开始涨；第 7 站读新数据的组照常，补数据的组卡住、LAG 不降、不报错。compact 删掉了还没被消费的中间状态：第 8 站的下游少处理一次 PAID，积分或发票就错了。位点过期：第 9 站的记录没了，第 7 站重启时跳到末尾，整段消息没有被处理。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。Kafka 4.4.0 官方二进制包（KRaft 单节点，broker 和 controller 在同一个进程里，768 MB 堆），kafka-clients 4.4.0 跑在 JDK 17 上，本机 2 核 ARM。远端用 4.4.0 的测试插件 <code>LocalTieredStorage</code>（Maven Central 上的 <code>kafka-storage-4.4.0-test-fixtures.jar</code>），“对象存储”其实是本机的一个目录，所以从远端读的耗时没有参考价值。时间按 1 天 = 60/7 秒缩小。outage 跑了 2 次（第 1 次第 9 天就重启，只丢 18 条，因为宕机头一天那个段刚好还没到期，第 2 次改成第 9.5 天），compact 跑了 2 次，down 跑了 2 次（第 1 次把远端目录改名，broker 自己又建了一个新目录，改用权限 000 才模拟成功）。</p>
+  <p>按源码和文档（apache/kafka 4.4 分支，4.4.0 jar）：配置名和默认值来自 <code>RemoteLogManagerConfig</code>、<code>LogConfig</code>、<code>CleanerConfig</code>、<code>GroupCoordinatorConfig</code>；上传条件来自 <code>RemoteLogManager.candidateLogSegments</code>；本地删除要等上传完成，来自 <code>UnifiedLog.isSegmentEligibleForDeletion</code>；关闭分层存储的规则来自 <code>LogConfig</code> 的校验和 <code>TopicConfig</code> 的说明；空 key 被拒来自 <code>LogValidator</code>。版本信息来自 3.6.0、3.9.0 发布公告和 4.1、4.4 升级说明。“5 MB/s、一天 432 GB”是假设的写入量，只用来比大小。</p>
+  <p>相关：<a href="../java/pano-j08-order-event-life.html">全景：一条订单消息的一生</a> · <a href="kafka-storage-zerocopy.html">Kafka 存储与零拷贝（第一圈）</a> · <a href="kafka-reliability-group.html">Kafka 可靠性与消费组</a> · <a href="kafka-idempotent-ordering.html">幂等消费与顺序消息</a> · <a href="kafka-backlog-drain.html">大促积压 100 万条</a> · <a href="../java/roadmap.html#j08">Java 地图 J08</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 一个段的晚年：8 个按天分的段（0 = 11-02 … 7 = 11-09），6 步。
+// local[k]: none | live | active | roll | gone；remote[k]: none | copied | new | reading | gone
+const SLOTS = 8, STEPS = 6;
+function clampStep(i) { return Math.min(STEPS, Math.max(1, i | 0)); }
+function tierState(i) {
+  i = clampStep(i);
+  const local = [], remote = [];
+  for (let k = 0; k < SLOTS; k++) { local.push("none"); remote.push("none"); }
+  for (let k = 0; k <= 5; k++) local[k] = "live";
+  local[6] = "active";
+  let write = 6, localStart = 0, logStart = 0, copy = false, read = null;
+  if (i >= 2) { local[6] = i === 2 ? "roll" : "live"; local[7] = "active"; write = 7; }
+  if (i >= 3) { for (let k = 0; k <= 6; k++) remote[k] = i === 3 ? "new" : "copied"; copy = i === 3; }
+  if (i >= 4) { for (let k = 0; k <= 5; k++) local[k] = "gone"; localStart = 6; }
+  if (i === 5) { remote[2] = "reading"; read = 2; }
+  if (i >= 6) { remote[0] = "gone"; logStart = 1; }
+  return { step: i, local, remote, write, localStart, logStart, copy, read };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s) => document.getElementById(s);
+  const st = $("tierSt");
+  if (!st) return;
+  const CAPS = [
+    ["写入", "订单服务的消息照常追加进本地的活跃段（11-08）。读新数据的消费者和第一圈讲的一样，走页缓存和 <code>sendfile</code>。这时还没有任何段在远端。"],
+    ["滚动", "活跃段到了 <code>segment.ms</code>（这里按 1 天画）就关掉，开一个新的活跃段（11-09）。<b>只有关掉的段才可能被上传</b>，活跃段还在变。"],
+    ["上传", "RLM 的复制任务每 30 秒（<code>remote.log.manager.task.interval.ms</code>）检查一次，把已滚动、而且在 LSO 以下的段，连同索引、时间索引、生产者快照、leader epoch，一起交给 RSM 插件写进对象存储；每个段的元数据写进 <code>__remote_log_metadata</code>。本地的段这时还在。"],
+    ["本地删除", "段已经在远端、而且超过了 <code>local.retention.ms</code>（这里 1 天），本地才删。<b>本地最早 offset</b> 往前挪，<b>全部最早 offset</b> 不动。⑤ 实测：本地最早合计 1409，全部最早 0。"],
+    ["读老数据", "积分服务要的 offset 比本地最早还小，broker 不走页缓存和 <code>sendfile</code>，而是交给 RemoteLogReader 线程池（默认 10 个），从远端读进内存再发；一次 fetch 最多等 <code>remote.fetch.max.wait.ms</code>（500 ms）。积分服务这边照常按 offset 读，看不出区别。"],
+    ["远端过期", "段里最新的一条超过 <code>retention.ms</code>（总保留，这里 30 天）以后，leader 上的 RLM 删掉远端的段和它的元数据，<b>全部最早 offset</b> 这才往前挪。到这一步，这个段的一生才算结束。"]
+  ];
+  let cur = 1, timer = null;
+  const setCls = (el, base, state) => { el.setAttribute("class", base + " s-" + state); };
+  function render() {
+    const s = tierState(cur);
+    for (let k = 0; k < SLOTS; k++) { setCls($("loc" + k), "slot", s.local[k]); setCls($("rem" + k), "slot", s.remote[k]); }
+    $("wr6").classList.toggle("off", s.write !== 6);
+    $("wr7").classList.toggle("off", s.write !== 7);
+    $("cpArrows").classList.toggle("off", !s.copy);
+    $("rdPath").classList.toggle("off", s.read === null);
+    $("pLocal").style.transform = "translateX(" + (s.localStart * 96) + "px)";
+    $("pStart").style.transform = "translateX(" + (s.logStart * 96) + "px)";
+    const c = CAPS[cur - 1];
+    $("tierCap").innerHTML = '<b class="h">' + cur + " · " + c[0] + "</b>" + c[1];
+    $("tPos").textContent = cur + " / " + STEPS;
+    $("tPrev").disabled = cur === 1;
+    $("tNext").disabled = cur === STEPS;
+  }
+  function go(i) { cur = clampStep(i); render(); }
+  function stop() { if (timer) { clearInterval(timer); timer = null; $("tAuto").textContent = "自动播放"; } }
+  $("tPrev").addEventListener("click", () => { stop(); go(cur - 1); });
+  $("tNext").addEventListener("click", () => { stop(); go(cur + 1); });
+  $("tReset").addEventListener("click", () => { stop(); go(1); });
+  $("tAuto").addEventListener("click", () => {
+    if (timer) { stop(); return; }
+    if (cur === STEPS) go(1);
+    $("tAuto").textContent = "暂停";
+    timer = setInterval(() => { if (cur >= STEPS) { stop(); return; } go(cur + 1); }, 2600);
+  });
+  st.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowRight") { stop(); go(cur + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { stop(); go(cur - 1); e.preventDefault(); }
+  });
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

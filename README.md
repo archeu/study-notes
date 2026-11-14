@@ -129,6 +129,7 @@
 | 03 | [积分加了两次，退款跑到了付款前面：幂等消费与顺序消息](https://archeu.github.io/study-notes/kafka/kafka-idempotent-ordering.html) | J08 第 8、2 站下钻：结果和位点不在一个事务、去重表与位点存业务库、顺序在哪几处被打乱、覆盖型用版本号累加型用去重、交易靶场 dup / order 实测，1000 单乱序与重复实验台 |
 | 04 | [三台 broker 都倒了，谁能当 leader：Kafka 的 ISR、ELR 与 unclean 选举](https://archeu.github.io/study-notes/kafka/kafka-leader-election-elr.html) | 可靠性第二圈：机架断电后控制器的四张名单（Isr、Elr、LastKnownElr）、选举顺序、unclean 选举截掉已 ACK 消息和 offset 复用、kill -9 被移出 ELR、高水位冻结，Kafka 4.4.0 四个断电剧本实测，选主推演台 |
 | 05 | [大促积压 100 万条：消费组的扩容上限、重平衡风暴与共享组](https://archeu.github.io/study-notes/kafka/kafka-backlog-drain.html) | LAG 曲线三种形状、加机器加分区为什么没用、活锁式重平衡风暴（经典协议 vs KIP-848）、车道 / 搬家 / 共享组 / 跳过过期四条路的实测速度，消化时间计算台 |
+| 06 | [积分服务停了 8 天，消息已经被删：Kafka 的分层存储、日志压缩与位点过期](https://archeu.github.io/study-notes/kafka/kafka-tiered-compact.html) | 三样东西各自过期、分层存储的两截日志（上传、本地删除、远端读、远端过期）、日志压缩和墓碑、__consumer_offsets 与位点过期、按时间戳找回位置、远端挂了会怎样，一个段的晚年分步动画 |
 
 ## Java 并发
 
