@@ -1,0 +1,1365 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>双击下单只出一张单：幂等设计——唯一键、状态机、去重表</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J09 knowledge point 2 (idempotency: unique key, state machine, dedup table), stations 1, 6, 8 of the J09 panorama, design-thought type. Roles: of = the idempotency key / the request (page accent), pd = unique key, bk = state machine (conditional update), cg = dedup table, rn = retries / timeouts, g2 = time. Fixed: bad red, good green, other grey. Interactions: one lab (two POSTs with the same key: 4 ways x gap x fault, guess first). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>架构</span><span aria-hidden="true">/</span><span class="tb-here">幂等设计：唯一键、状态机、去重表</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+    <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-of"/></marker>
+    <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bk"/></marker>
+    <marker id="ah-rn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-rn"/></marker>
+    <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-cg"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">幂等键 · 唯一索引 · 1062 · 条件更新 · 状态机 · 去重表 · TCC fence · 409 / 422 · 结果重放 · MySQL 8.4 实测</p>
+  <h1>双击下单只出一张单：幂等设计——唯一键、状态机、去重表</h1>
+  <p class="lead">超时只说明“不知道”：请求可能丢了，也可能做完了只是回包丢了。发送方分不出来，只能重试，所以<b>每个会被重试的写操作，都要自己认出“这件事做过了”</b>。认出来靠一个身份（幂等键、单号、xid）；挡住第二次，靠业务数据所在的那个库里的一次原子操作（唯一键、条件更新），和业务在同一个本地事务里提交；第二次要拿到的，是第一次的结果。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j09-order-across-three-dbs.html#s-1">一次下单跨三个库 · 第 1 站（也管第 6、8 站）</a></span><span>地图：<a href="../java/roadmap.html#j09">J09 · 幂等设计：唯一键、状态机、去重表</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>J09 第 2 个下钻知识点。J08 已经学过消费端怎么去重（<a href="../kafka/kafka-idempotent-ordering.html">幂等消费与顺序消息</a>）；这一页把同一个想法推到接口入口（第 1 站）和状态流转（第 6、8 站），给下一页的分布式事务打底：TCC 的 Confirm、Cancel 要被重试，前提就是它们幂等。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：同一件事，在全景里到了两次</h2>
+  </div>
+  <p class="lead">在全景第 1 站，这一步要解决的是：App 双击，两次 <code>POST /orders</code> 带着同一个幂等键 <code>req-7f3a</code> 先后到达，订单服务要挡掉第二下，并且让第二下也拿到单号 9527。同样的问题在第 6、8 站又出现了两次。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="三个场景。左：第 1 站，App 双击，两次 POST 带同一个幂等键 req-7f3a，间隔 180 毫秒到达订单服务，要求只出一张单，两下都拿到 9527。中：第 6 站，券 MINUS20 状态 UNUSED，9527 和 9528 两单的 Try 同时来锁，之后还可能来一个迟到的 Cancel，要求状态只按合法顺序走、只走一次。右：第 8 站，TC 给券服务发 Confirm，券服务做完了但应答丢了，TC 一秒后再发一次，要求第二次什么都不改，但回成功。">
+  <text x="20" y="24" class="t-h">同一件事到了两次，三处</text>
+  <!-- col 1 -->
+  <rect x="20" y="40" width="290" height="270" rx="14" class="f-card e-of"/>
+  <text x="36" y="64" class="t-of">第 1 站 · 接口入口</text>
+  <rect x="40" y="84" width="70" height="110" rx="12" class="f-oft e-of"/>
+  <text x="75" y="134" text-anchor="middle" class="t-b">App</text>
+  <text x="75" y="152" text-anchor="middle" class="t-xs">双击提交</text>
+  <rect x="210" y="84" width="84" height="110" rx="12" class="f-card e-mut"/>
+  <text x="252" y="134" text-anchor="middle" class="t-b">订单服务</text>
+  <path d="M112,110 L206,110" class="e-of" marker-end="url(#ah-of)"/>
+  <text x="120" y="102" class="t-xs">0 ms · POST</text>
+  <path d="M112,168 L206,168" class="e-of" marker-end="url(#ah-of)"/>
+  <text x="120" y="160" class="t-xs">180 ms · POST</text>
+  <text x="40" y="222" class="t-mono">Idempotency-Key: req-7f3a</text>
+  <text x="40" y="240" class="t-xs">两次带的是同一个键</text>
+  <text x="36" y="282" class="t-good">要的：一张单，两下都拿到 9527</text>
+  <!-- col 2 -->
+  <rect x="335" y="40" width="290" height="270" rx="14" class="f-card e-bk"/>
+  <text x="351" y="64" class="t-bk">第 6 站 · 状态流转</text>
+  <rect x="420" y="110" width="120" height="50" rx="10" class="f-bkt e-bk"/>
+  <text x="480" y="132" text-anchor="middle" class="t-b">券 MINUS20</text>
+  <text x="480" y="150" text-anchor="middle" class="t-mono">UNUSED</text>
+  <path d="M362,96 L416,118" class="e-bk" marker-end="url(#ah-bk)"/>
+  <text x="352" y="90" class="t-xs">9527 Try 来锁</text>
+  <path d="M600,96 L544,118" class="e-bk" marker-end="url(#ah-bk)"/>
+  <text x="608" y="90" text-anchor="end" class="t-xs">9528 Try 来锁</text>
+  <path d="M480,214 L480,166" class="e-rn" stroke-dasharray="5 4" marker-end="url(#ah-rn)"/>
+  <text x="480" y="232" text-anchor="middle" class="t-xs">还可能来一个迟到的 Cancel</text>
+  <text x="351" y="282" class="t-good">要的：只有一单锁到，状态只走合法的一步</text>
+  <!-- col 3 -->
+  <rect x="650" y="40" width="290" height="270" rx="14" class="f-card e-rn"/>
+  <text x="666" y="64" class="t-rn">第 8 站 · 二阶段重试</text>
+  <line x1="700" y1="84" x2="700" y2="250" class="e-axis"/>
+  <line x1="880" y1="84" x2="880" y2="250" class="e-axis"/>
+  <text x="700" y="80" text-anchor="middle" class="t-b">TC</text>
+  <text x="880" y="80" text-anchor="middle" class="t-b">券服务</text>
+  <path d="M702,104 L876,118" class="e-rn" marker-end="url(#ah-rn)"/>
+  <text x="712" y="100" class="t-xs">Confirm</text>
+  <rect x="842" y="122" width="76" height="22" rx="5" class="f-goodt e-good"/>
+  <text x="880" y="137" text-anchor="middle" class="t-xs">LOCKED→USED</text>
+  <path d="M876,156 L800,166" class="e-bad" stroke-dasharray="5 4"/>
+  <path d="M786,160 L800,174 M800,160 L786,174" class="e-bad"/>
+  <text x="808" y="190" class="t-bad">应答丢了</text>
+  <path d="M702,214 L876,228" class="e-rn" marker-end="url(#ah-rn)"/>
+  <text x="712" y="210" class="t-xs">1 秒后 · 再发 Confirm</text>
+  <text x="666" y="282" class="t-good">要的：第二次什么都不改，但回成功</text>
+</svg>
+  </div>
+  </figure>
+  <p class="cap">三处的共同点：发送方不知道第一次的结果，只能再来一次。接收方要做的是：认出这是同一件事，只做一次，把第一次的结果交出去。这个性质叫<b>幂等</b>（idempotent）：同样的请求执行一次和执行多次，对服务端的效果一样。</p>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>不用它会怎样：先查有没有，再插，两下都查到“没有”</h2>
+  </div>
+  <p class="lead">最自然的写法是“先查 req-7f3a 有没有单，没有再插”。查和插之间隔着算价、调库存这些业务，第二下只要在这段时间里到，就也会查到“没有”。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="时间线。第一下在 0 毫秒查 req-7f3a 有没有单，结果没有，然后做 10 毫秒业务，在 11 毫秒插入订单。第二下晚到 5 毫秒，5 毫秒时查，第一下还没插，所以也是没有，16 毫秒插入第二张单。订单表里出现两行 req-7f3a。右侧：交易靶场实测，400 个键，第二下晚到 0 到 19 毫秒，279 个键出了两张单。">
+  <text x="20" y="24" class="t-h">先查后插：查和插之间有一个窗口</text>
+  <line x1="120" y1="230" x2="700" y2="230" class="e-axis" marker-end="url(#ah-ink)"/>
+  <text x="700" y="250" text-anchor="end" class="t-xs">时间（ms）</text>
+  <text x="140" y="250" text-anchor="middle" class="t-xs">0</text>
+  <text x="240" y="250" text-anchor="middle" class="t-xs">5</text>
+  <text x="360" y="250" text-anchor="middle" class="t-xs">11</text>
+  <text x="460" y="250" text-anchor="middle" class="t-xs">16</text>
+  <text x="20" y="84" class="t-b">第一下</text>
+  <text x="20" y="164" class="t-b">第二下</text>
+  <text x="20" y="180" class="t-xs">晚到 5 ms</text>
+  <rect x="130" y="64" width="80" height="30" rx="6" class="f-neut e-mut"/><text x="170" y="84" text-anchor="middle" class="t-xs">SELECT → 没有</text>
+  <rect x="212" y="64" width="138" height="30" rx="6" class="f-card e-mut" stroke-dasharray="4 3"/><text x="281" y="84" text-anchor="middle" class="t-xs">算价、调库存 10 ms</text>
+  <rect x="352" y="64" width="80" height="30" rx="6" class="f-neut e-mut"/><text x="392" y="84" text-anchor="middle" class="t-xs">INSERT 单</text>
+  <rect x="230" y="144" width="80" height="30" rx="6" class="f-badt e-bad"/><text x="270" y="164" text-anchor="middle" class="t-xs">SELECT → 没有</text>
+  <rect x="312" y="144" width="138" height="30" rx="6" class="f-card e-mut" stroke-dasharray="4 3"/><text x="381" y="164" text-anchor="middle" class="t-xs">算价、调库存 10 ms</text>
+  <rect x="452" y="144" width="80" height="30" rx="6" class="f-badt e-bad"/><text x="492" y="164" text-anchor="middle" class="t-xs">INSERT 单</text>
+  <rect x="130" y="104" width="222" height="26" rx="5" class="f-badt"/><text x="241" y="122" text-anchor="middle" class="t-bad">窗口：这段时间里来的都查到“没有”</text>
+  <!-- table -->
+  <rect x="560" y="44" width="380" height="110" rx="10" class="f-card e-bad"/>
+  <text x="576" y="68" class="t-b">orders</text>
+  <text x="576" y="96" class="t-mono">id 9527  req-7f3a  2 件  WAIT_PAY</text>
+  <text x="576" y="122" class="t-mono">id 9528  req-7f3a  2 件  WAIT_PAY</text>
+  <text x="576" y="144" class="t-bad">同一次下单，两张单，付两次钱</text>
+  <rect x="740" y="176" width="200" height="104" rx="10" class="f-badt e-bad"/>
+  <text x="756" y="198" class="t-b">交易靶场实测</text>
+  <text x="756" y="222" class="t-s">400 个键，第二下晚到 0～19 ms</text>
+  <text x="756" y="252" class="t-big t-bad">279 个键</text>
+  <text x="756" y="272" class="t-xs">出了两张单（两次跑 279、282）</text>
+</svg>
+  </div>
+  </figure>
+  <ul class="pains">
+    <li><b>前端把按钮置灰</b>：挡得住手指，挡不住网关超时重发、App 断网重连后重发、用户刷新页面再点。第 8 站的 TC 重试更是不经过前端。</li>
+    <li><b>加一把 Redis 锁</b>：两下不会同时进来了，可锁到期、第一下的应答丢了，第二下进来时还是“查不到结果”。锁只能排队，不能记住“做过了”。</li>
+    <li><b>先查后插</b>：查和插不是一个原子操作，窗口有多宽，取决于中间的业务有多慢。</li>
+  </ul>
+  <p class="rule-box"><b>缺的那一块</b>：“判断有没有做过”和“占住这个位置”必须是一次原子操作，并且发生在业务数据所在的库里、和业务一起提交。第二次来的时候，还要能把第一次的结果交出去。这就是幂等设计的精华。</p>
+  <div class="pit" id="p-misuse"><b><em>!</em>不懂精华时的典型误用</b>
+    <dl><dt>一种</dt><dd>幂等键由服务端按“用户 + 商品 + 1 分钟”拼出来。用户真想连买两单同样的东西，第二单被当成重复挡掉。</dd>
+    <dt>另一种</dt><dd>撞上重复就返回“请求重复”的错误。第一下的应答恰好丢了，App 只看到这个错，以为没下成，用户换个新键又下了一单。</dd></dl></div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种流派：挡重复的七种办法，各挡在哪一层</h2>
+  </div>
+  <p class="lead">比的是四件事：靠什么认出“同一件事”，原子的判断发生在哪，第二次拿到什么，挡不住什么。</p>
+  <div class="tbl-wrap"><table class="t">
+    <thead><tr><th scope="col">办法</th><th scope="col">认出同一件事靠</th><th scope="col">原子判断在哪</th><th scope="col">第二次拿到</th><th scope="col">挡不住</th></tr></thead>
+    <tbody>
+      <tr data-role="other"><td><b>按钮置灰、防抖</b></td><td>无</td><td>浏览器里</td><td>没有第二次</td><td>重发、刷新、服务间重试</td></tr>
+      <tr data-role="other"><td><b>Redis 锁</b><br><small><code>SET k NX PX</code></small></td><td>锁的 key</td><td>Redis，和业务库分开</td><td>“请稍后”或报错</td><td>锁过期后的重试；拿不到第一次的结果</td></tr>
+      <tr data-role="other"><td><b>防重令牌</b><br><small>先领 token，提交时 <code>DEL</code> 成功才处理</small></td><td>token</td><td>Redis 的 <code>DEL</code></td><td>“令牌已用”</td><td>删了令牌后业务失败，令牌回不来；拿不到结果</td></tr>
+      <tr data-role="pd"><td><b>唯一键</b><br><small>幂等键表、业务唯一索引</small></td><td>幂等键、单号</td><td>业务库的唯一索引（1062）</td><td><b>第一次的结果</b>（存在键那一行）</td><td>键选错了：每次点击都生成新键</td></tr>
+      <tr data-role="bk"><td><b>状态机</b><br><small>条件更新 <code>WHERE status=?</code></small></td><td>行的主键 + 当前状态</td><td>那一行的更新（行锁）</td><td>改了 0 行，查一下当前状态</td><td>状态里没带“是谁改的”时，分不出是我还是别人</td></tr>
+      <tr data-role="cg"><td><b>去重表</b><br><small>处理记录，Seata 的 fence</small></td><td>消息 ID、<code>(xid, branch_id)</code></td><td>去重表的主键，和业务同一个事务</td><td>“做过了”（直接回成功）</td><td>去重记录和业务分开提交</td></tr>
+      <tr data-role="other"><td><b>乐观锁</b><br><small><code>WHERE version=?</code></small></td><td>版本号</td><td>那一行的更新</td><td>版本冲突</td><td>它防的是并发覆盖，重试时版本已变，会被当冲突而不是“做过了”</td></tr>
+    </tbody>
+  </table></div>
+  <p class="pick-line"><b>选择规则</b>：判重记录要和业务结果<b>一起提交、一起回滚</b>，所以放在业务数据所在的那个库里。放不到一起的（Redis、前端）只能当第一道筛子，减少重复，不能当最终的判断。<b>本页学</b>后三种里的三件：入口用唯一键（第 1 站），状态流转用状态机（第 6 站），会被重试的动作用去重表（第 8 站）。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>核心取舍：重试躲不掉，就让接收方认出重复</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>幂等的原文定义</b>（RFC 9110 §9.2.2）：多次相同请求对服务端的预期效果，和一次请求相同。HTTP 方法里 PUT、DELETE 和 GET 这类安全方法是幂等的，POST 不在其中。下单正是 POST。</li>
+      <li><b>唯一索引冲突</b>：插入的值和已有记录重复，MySQL 报错 1062 <code>Duplicate entry</code>，Connector/J 抛 <code>SQLIntegrityConstraintViolationException</code>。</li>
+      <li><b>条件更新</b>：<code>UPDATE … WHERE id=? AND status='UNUSED'</code>，返回“改了几行”。两个会话同时改同一行，行锁让它们排队，后一个看到的是前一个提交后的状态。机制见<a href="../database/mysql-lock-wait-deadlock.html">两次付款同时到，第二次改了 0 行</a>。</li>
+      <li><b>至少一次</b>：发送方没收到确认就重发。消息队列、RPC 框架、Seata TC 默认都是这样，见 J08 <a href="../kafka/kafka-idempotent-ordering.html">幂等消费</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-why">机制 1：为什么必须由接收方去重</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 280" role="img" aria-label="三种情况，客户端看到的都是 3 秒超时。一：请求在路上丢了，服务端什么也没做。二：服务端落了单 9527，应答在路上丢了。三：服务端还在处理，3 秒还没做完。客户端分不出是哪一种，只能用同一个键重试，由服务端来判断。">
+  <text x="20" y="24" class="t-h">客户端只看到“3 秒超时”，背后有三种可能</text>
+  <!-- case 1 -->
+  <text x="40" y="58" class="t-b">一 · 请求丢了</text>
+  <line x1="60" y1="72" x2="60" y2="210" class="e-axis"/><line x1="250" y1="72" x2="250" y2="210" class="e-axis"/>
+  <text x="60" y="226" text-anchor="middle" class="t-xs">App</text><text x="250" y="226" text-anchor="middle" class="t-xs">订单服务</text>
+  <path d="M62,92 L150,108" class="e-of"/><path d="M150,100 L164,114 M164,100 L150,114" class="e-bad"/>
+  <text x="155" y="150" text-anchor="middle" class="t-s">什么也没做</text>
+  <text x="60" y="200" class="t-rn">3 s 超时</text>
+  <!-- case 2 -->
+  <text x="350" y="58" class="t-b">二 · 做完了，应答丢了</text>
+  <line x1="370" y1="72" x2="370" y2="210" class="e-axis"/><line x1="560" y1="72" x2="560" y2="210" class="e-axis"/>
+  <text x="370" y="226" text-anchor="middle" class="t-xs">App</text><text x="560" y="226" text-anchor="middle" class="t-xs">订单服务</text>
+  <path d="M372,92 L556,108" class="e-of" marker-end="url(#ah-of)"/>
+  <rect x="520" y="114" width="80" height="24" rx="5" class="f-goodt e-good"/><text x="560" y="130" text-anchor="middle" class="t-xs">落单 9527</text>
+  <path d="M556,148 L470,160" class="e-bad" stroke-dasharray="5 4"/><path d="M456,154 L470,168 M470,154 L456,168" class="e-bad"/>
+  <text x="370" y="200" class="t-rn">3 s 超时</text>
+  <!-- case 3 -->
+  <text x="660" y="58" class="t-b">三 · 还在做</text>
+  <line x1="680" y1="72" x2="680" y2="210" class="e-axis"/><line x1="870" y1="72" x2="870" y2="210" class="e-axis"/>
+  <text x="680" y="226" text-anchor="middle" class="t-xs">App</text><text x="870" y="226" text-anchor="middle" class="t-xs">订单服务</text>
+  <path d="M682,92 L866,108" class="e-of" marker-end="url(#ah-of)"/>
+  <rect x="830" y="114" width="80" height="80" rx="5" class="f-oft e-of" stroke-dasharray="4 3"/><text x="870" y="150" text-anchor="middle" class="t-xs">调库存、</text><text x="870" y="166" text-anchor="middle" class="t-xs">锁券…</text>
+  <text x="680" y="200" class="t-rn">3 s 超时</text>
+  <rect x="20" y="240" width="920" height="32" rx="8" class="f-rnt"/>
+  <text x="480" y="261" text-anchor="middle" class="t-b">三种情况在客户端看来一模一样，它只能用同一个键再发一次，由服务端判断是哪一种</text>
+</svg>
+  </div>
+  </figure>
+  <div class="design">
+    <div class="way" data-role="other"><h4>被放弃的设计：让发送方保证只发一次<small>“恰好一次投递”</small></h4>
+      <ul class="pains">
+        <li>要保证只发一次，发送方得知道第一次到没到。可确认消息本身也会丢，再确认那条确认又会丢，永远收不了尾（两将军问题）。</li>
+        <li>就算网络可靠，服务端在“落单”和“回包”之间崩溃，发送方照样不知道。</li>
+      </ul>
+    </div>
+    <div class="way" data-role="pd"><h4>选中的设计：发送方放心重试，接收方认出重复<small>至少一次 + 幂等 = 效果上恰好一次</small></h4>
+      <ul class="pains">
+        <li>重试只需要发送方带上同一个身份，不需要它知道任何结果。</li>
+        <li>判断放在接收方的数据库里，和业务结果一起提交，崩溃也不会出现“做了没记”或“记了没做”。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="rule-box"><b>决定胜负的约束</b>：发送方永远分不清“没做”和“做了但不知道”。所以 Kafka 的 exactly-once、Seata 的 Confirm 重试、Stripe 的 API，最后都落到同一个做法：接收方去重。</p>
+
+  <h3 id="m-three">机制 2：幂等要回答三个问题</h3>
+  <div class="trio">
+    <div class="fact" data-role="of"><h4>1 · 谁算“同一件事”</h4><p>一个<b>身份</b>，由发起这件事的一方在“打算做”的那一刻定下来，重试时原样带上。第 1 站是 App 打开结算页时生成的 <code>req-7f3a</code>；第 8 站是 <code>(xid, branch_id)</code>。</p></div>
+    <div class="fact" data-role="pd"><h4>2 · 原子地“判断 + 占位”</h4><p>“有没有做过”和“我来做”必须是同一个原子操作，<b>放在业务数据所在的库里</b>：唯一索引的插入、带条件的更新、去重表主键的插入。</p></div>
+    <div class="fact" data-role="good"><h4>3 · 第二次拿到什么</h4><p><b>第一次的结果</b>。做完了就重放同一个单号；还在做就说“处理中，稍后再问”；同一个键换了参数就拒绝。不能只回一句“重复请求”。</p></div>
+  </div>
+  <div class="tbl-wrap"><table class="t">
+    <thead><tr><th scope="col"></th><th scope="col">身份</th><th scope="col">原子操作</th><th scope="col">第二次怎么判断</th><th scope="col">全景</th></tr></thead>
+    <tbody>
+      <tr data-role="pd"><td><b>唯一键</b></td><td>幂等键 <code>req-7f3a</code></td><td><code>INSERT idem_key</code> 撞 1062</td><td>读键那一行：DONE 就重放结果，PROCESSING 就回“处理中”</td><td>第 1 站</td></tr>
+      <tr data-role="bk"><td><b>状态机</b></td><td>行主键 + 当前状态 + 归属</td><td><code>UPDATE … WHERE status='LOCKED' AND order_id=9527</code></td><td>改了 0 行就读当前状态：已在目标状态且归我，就是做过了</td><td>第 6、8 站</td></tr>
+      <tr data-role="cg"><td><b>去重表</b></td><td><code>(xid, branch_id)</code>、消息 ID</td><td><code>INSERT confirm_done</code>，和业务同一个事务</td><td>撞 1062 就是做过了，直接回成功</td><td>第 8 站</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3 id="m-key">机制 3：唯一键——第二下的 INSERT 会等第一下提交</h3>
+  <p class="lead">InnoDB 插入时要检查唯一索引。如果撞上的那条记录还没提交，第二个事务会在这条记录上<b>等锁</b>，等第一个事务结束：第一个提交了，第二个拿到 1062；第一个回滚了，第二个的插入成功。所以把“插键、落单、写结果”放进同一个事务，第二下撞上 1062 时，第一下的结果已经在那一行里了。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="时间线。事务 A（第一下）在 0 毫秒插入 idem_key req-7f3a，状态 PROCESSING，未提交；做 10 毫秒业务后插入订单 9527，把键改成 DONE，13 毫秒提交。事务 B（第二下）晚到 5 毫秒，插入同一个键，撞上 A 未提交的记录，在这条记录上等锁 8 毫秒；A 提交后，B 拿到 1062，读到 DONE 和 9527，把同一个单号返回。下方分支：如果 A 在中途崩溃回滚，B 的插入直接成功，由 B 来落单。实测：第二下平均等 13 毫秒，最多 36 毫秒。">
+  <text x="20" y="24" class="t-h">键、订单、结果在同一个事务里（交易靶场写法 2）</text>
+  <line x1="140" y1="200" x2="900" y2="200" class="e-axis" marker-end="url(#ah-ink)"/>
+  <text x="900" y="218" text-anchor="end" class="t-xs">时间（ms）</text>
+  <text x="160" y="218" text-anchor="middle" class="t-xs">0</text><text x="260" y="218" text-anchor="middle" class="t-xs">5</text><text x="420" y="218" text-anchor="middle" class="t-xs">13</text>
+  <text x="20" y="74" class="t-b">事务 A</text><text x="20" y="90" class="t-xs">第一下</text>
+  <rect x="150" y="56" width="104" height="30" rx="6" class="f-pdt e-pd"/><text x="202" y="75" text-anchor="middle" class="t-xs">INSERT 键 PROCESSING</text>
+  <rect x="256" y="56" width="104" height="30" rx="6" class="f-card e-mut" stroke-dasharray="4 3"/><text x="308" y="75" text-anchor="middle" class="t-xs">业务 10 ms</text>
+  <rect x="362" y="56" width="58" height="30" rx="6" class="f-pdt e-pd"/><text x="391" y="75" text-anchor="middle" class="t-xs">单+DONE</text>
+  <rect x="422" y="56" width="70" height="30" rx="6" class="f-goodt e-good"/><text x="457" y="75" text-anchor="middle" class="t-xs">COMMIT</text>
+  <text x="20" y="144" class="t-b">事务 B</text><text x="20" y="160" class="t-xs">第二下，晚 5 ms</text>
+  <rect x="250" y="126" width="170" height="30" rx="6" class="f-rnt e-rn"/><text x="335" y="145" text-anchor="middle" class="t-xs">INSERT 同一个键 → 等锁</text>
+  <path d="M424,92 L424,122" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="426" y="126" width="230" height="30" rx="6" class="f-goodt e-good"/><text x="541" y="145" text-anchor="middle" class="t-xs">1062 → 读到 DONE · 9527 → 重放</text>
+  <text x="250" y="180" class="t-rn">B 在 A 的记录上等了 8 ms</text>
+  <!-- right: rollback branch -->
+  <rect x="680" y="40" width="260" height="140" rx="12" class="f-card e-mut"/>
+  <text x="696" y="64" class="t-b">另一条路：A 中途崩了</text>
+  <text x="696" y="90" class="t-s">连接断开，A 回滚，键没了</text>
+  <text x="696" y="112" class="t-s">B 的 INSERT 直接成功</text>
+  <text x="696" y="134" class="t-s">由 B 落单：还是只有一张</text>
+  <text x="696" y="164" class="t-xs">实测：crash 段，重试拿到新单，再试重放</text>
+  <rect x="20" y="240" width="920" height="48" rx="8" class="f-pdt"/>
+  <text x="36" y="261" class="t-b">交易靶场实测（MySQL 8.4.13）：400 个键 → 400 张单，0 个重复</text>
+  <text x="36" y="280" class="t-s">第二下晚到不足 8 ms 的 156 次，INSERT 平均等 13 ms、最多 36 ms，然后撞上 1062，拿到的全是 9527 这类同一张单</text>
+</svg>
+  </div>
+  </figure>
+  <p class="lead" id="m-keyfirst">代价也在这张图里：第二下要<b>占着一个连接、等着第一下的事务</b>。第一下的事务如果包着几秒的远程调用，第二下就要等几秒，等到 <code>innodb_lock_wait_timeout</code>（默认 50 秒）还没等到就报 1205。所以有了第二种写法：先把键单独提交，再做业务。</p>
+  <div class="design">
+    <div class="way" data-role="pd"><h4>写法 2：键和业务同一个事务<small>适合：业务都在这一个库里，几十毫秒能做完</small></h4>
+      <ul class="pains">
+        <li>崩了自动回滚，键跟着消失，重试能接着做（实测 crash 段）。</li>
+        <li>第二下等第一下提交，能直接拿到结果，几乎不出现“处理中”。</li>
+        <li>不能用在“中间要调别的服务”的业务上：本地事务不能包住 RPC 和全局事务。</li>
+      </ul>
+    </div>
+    <div class="way" data-role="of"><h4>写法 3：先提交键（PROCESSING），做完回写 DONE<small>适合：第 1 站这种跨服务、可能要几十秒的入口</small></h4>
+      <ul class="pains">
+        <li>第二下立刻撞 1062，不占连接等：做完了重放，没做完回 409“处理中”（实测 400 次里 330 次是 409）。</li>
+        <li>崩在中间时键停在 PROCESSING，没人收尾就永远“处理中”（实测 crash 段）。必须配“处理中超时接管”或后台补偿，见 <a href="#p-stuck">⑥ 坑 3</a>。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="rule-box"><b>全景第 1 站选写法 3</b>：<code>placeOrder()</code> 里要开全局事务、调库存和券服务，最长能到 60 秒，不能用一个本地事务包住。所以全景里第二下拿到的是“这单已在处理”。这和 Stripe 的做法、IETF 的 Idempotency-Key 草案一致：处理中回 409，同一个键换了参数回 422。</p>
+
+  <h3 id="m-state">机制 4：状态机——每一步都写成“从哪个状态到哪个状态”</h3>
+  <p class="lead">状态机不需要额外的表：把状态转移写成条件更新，<code>WHERE</code> 里带上“从哪个状态来”和“归谁”。同一行的更新被行锁排成一队，只有一个能看到原来的状态。改了 0 行时不要直接当失败，读一下现在的状态，就知道是“做过了”还是“不该做”。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 320" role="img" aria-label="券的状态机。UNUSED 经 Try 到 LOCKED（带 order_id 9527），条件是 status 等于 UNUSED；LOCKED 经 Confirm 到 USED，条件是 status 等于 LOCKED 且 order_id 等于 9527；LOCKED 经 Cancel 回到 UNUSED。右侧是改了 0 行时的判断：已经在目标状态并且属于我，当成功返回；在别的状态，拒绝并报警；记录不存在，是空回滚。实测：Confirm 发 3 次，改了 1、0、0 行，后两次查到 USED 属于 9527，返回成功；迟到的 Cancel 改了 0 行，不动已用的券。">
+  <text x="20" y="24" class="t-h">券 MINUS20 的状态机（第 6、8 站）</text>
+  <rect x="30" y="120" width="130" height="56" rx="28" class="f-bkt e-bk"/><text x="95" y="153" text-anchor="middle" class="t-b">UNUSED</text>
+  <rect x="270" y="120" width="160" height="56" rx="28" class="f-bkt e-bk"/><text x="350" y="145" text-anchor="middle" class="t-b">LOCKED</text><text x="350" y="163" text-anchor="middle" class="t-xs">order_id = 9527</text>
+  <rect x="540" y="120" width="110" height="56" rx="28" class="f-goodt e-good"/><text x="595" y="153" text-anchor="middle" class="t-b">USED</text>
+  <path d="M162,138 L266,138" class="e-bk" marker-end="url(#ah-bk)"/>
+  <text x="214" y="74" text-anchor="middle" class="t-bk">Try</text>
+  <text x="214" y="92" text-anchor="middle" class="t-mono">WHERE status='UNUSED'</text>
+  <path d="M432,148 L536,148" class="e-bk" marker-end="url(#ah-bk)"/>
+  <text x="484" y="74" text-anchor="middle" class="t-bk">Confirm</text>
+  <text x="484" y="92" text-anchor="middle" class="t-mono">status='LOCKED'</text>
+  <text x="484" y="108" text-anchor="middle" class="t-mono">AND order_id=9527</text>
+  <path d="M300,180 C260,250 140,250 100,182" class="e-rn" marker-end="url(#ah-rn)"/>
+  <text x="200" y="262" text-anchor="middle" class="t-rn">Cancel：同样带 status='LOCKED' AND order_id=9527</text>
+  <text x="30" y="296" class="t-xs">USED 没有出去的边：哪个请求都不能把用掉的券改回去</text>
+  <!-- right panel -->
+  <rect x="680" y="40" width="260" height="250" rx="12" class="f-card e-bk"/>
+  <text x="696" y="64" class="t-b">改了 0 行，读一下现在的状态</text>
+  <rect x="696" y="78" width="228" height="48" rx="8" class="f-goodt"/>
+  <text x="706" y="98" class="t-s">已在目标状态，且归 9527</text>
+  <text x="706" y="116" class="t-good">→ 做过了，回成功（幂等）</text>
+  <rect x="696" y="134" width="228" height="48" rx="8" class="f-badt"/>
+  <text x="706" y="154" class="t-s">在别的状态，或归别的单</text>
+  <text x="706" y="172" class="t-bad">→ 不该做，拒绝、报警</text>
+  <rect x="696" y="190" width="228" height="48" rx="8" class="f-neut"/>
+  <text x="706" y="210" class="t-s">记录根本不存在</text>
+  <text x="706" y="228" class="t-s">→ Cancel 时是空回滚，见下页</text>
+  <text x="696" y="262" class="t-xs">实测：Confirm 发 3 次，改 1、0、0 行，</text>
+  <text x="696" y="278" class="t-xs">后两次都判成“做过了”</text>
+</svg>
+  </div>
+  </figure>
+  <p class="lead" id="m-owner">“归谁”这一条很容易漏。库存 Confirm 写成 <code>UPDATE stock SET frozen=frozen-2 WHERE sku_id=88 AND frozen&gt;=2</code>，看起来也是条件更新，可它的状态是“88 号商品一共冻结了几件”，不是“9527 冻结的那 2 件”。9527 和 9528 各冻结 2 件时，9527 的 Confirm 重试一次，就把 9528 的那 2 件吃掉了（实测：9527 三次成功、成功、失败，9528 的 Confirm 失败）。要幂等，就得给每单一行冻结记录 <code>stock_freeze(order_id, sku_id, status)</code>，状态机走在这一行上。J08 的<a href="../kafka/kafka-reorder-statemachine.html">退款比付款先到</a>讲过状态机的另一面：消息乱序时怎么暂存。</p>
+
+  <h3 id="m-dedup">机制 5：去重表——记录和业务，一起提交</h3>
+  <p class="lead">有些动作没有天然的状态可看，比如“库存已售 +2”。这时单独建一张表，主键就是这件事的身份 <code>(xid, branch_id)</code>，处理时先插一行占位，再做业务，<b>同一个本地事务</b>提交。撞上 1062 就说明做过了，直接回成功。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 290" role="img" aria-label="两种写法对比。左：去重记录单独提交。Confirm 先改库存并提交，再插去重记录；在两次提交之间崩溃，TC 重试时去重表里没有这一行，于是库存又改了一次。实测 300 个分支、三分之一在这里崩，多扣 200 件。右：同一个本地事务。先插去重记录占位，再改库存，一起提交；在提交前崩溃，两件事一起回滚，重试时从头做一遍。实测多扣 0 件；两个 Confirm 同时到 100 组，全部只扣一次。">
+  <text x="20" y="24" class="t-h">崩在两步之间：去重记录在不在同一个事务里</text>
+  <!-- left -->
+  <rect x="20" y="40" width="450" height="236" rx="14" class="f-card e-bad"/>
+  <text x="36" y="64" class="t-bad">分两次提交</text>
+  <rect x="40" y="80" width="180" height="34" rx="6" class="f-neut e-mut"/><text x="130" y="101" text-anchor="middle" class="t-xs">① 已售 +2 · COMMIT</text>
+  <path d="M232,90 L246,104 M246,90 L232,104" class="e-bad"/><text x="254" y="102" class="t-bad">崩在这里</text>
+  <rect x="40" y="124" width="180" height="34" rx="6" class="f-card e-mut" stroke-dasharray="4 3"/><text x="130" y="145" text-anchor="middle" class="t-xs">② 插去重记录（没执行）</text>
+  <rect x="40" y="172" width="410" height="34" rx="6" class="f-badt e-bad"/><text x="52" y="194" class="t-s">TC 重试：去重表里没有 → 已售再 +2</text>
+  <text x="40" y="236" class="t-mono">300 个分支、1/3 崩在这里</text>
+  <text x="40" y="258" class="t-bad">已售 800，应为 600 → 多扣 200 件</text>
+  <!-- right -->
+  <rect x="490" y="40" width="450" height="236" rx="14" class="f-card e-cg"/>
+  <text x="506" y="64" class="t-cg">同一个本地事务</text>
+  <rect x="510" y="80" width="190" height="34" rx="6" class="f-cgt e-cg"/><text x="605" y="101" text-anchor="middle" class="t-xs">① INSERT confirm_done 占位</text>
+  <rect x="510" y="124" width="190" height="34" rx="6" class="f-cgt e-cg"/><text x="605" y="145" text-anchor="middle" class="t-xs">② 已售 +2</text>
+  <path d="M712,134 L726,148 M726,134 L712,148" class="e-bad"/><text x="734" y="146" class="t-s">崩在这里 → 两件一起回滚</text>
+  <rect x="510" y="172" width="410" height="34" rx="6" class="f-goodt e-good"/><text x="522" y="194" class="t-s">TC 重试：从头做一遍，只扣一次；重复的撞 1062 回成功</text>
+  <text x="510" y="236" class="t-mono">同样的 300 个分支 + 100 组并发 Confirm</text>
+  <text x="510" y="258" class="t-good">已售 600 / 200，多扣 0 件</text>
+</svg>
+  </div>
+  </figure>
+  <p class="lead">先插去重记录、再做业务，还有一个好处：两个 Confirm 同时到时，后到的那个在去重表的主键上等锁，前一个提交后撞 1062 回成功，业务那一步根本不会执行两次。Seata 的 TCC fence 就是这张表加上状态：<code>tcc_fence_log</code> 主键 <code>(xid, branch_id)</code>，status 1 tried、2 committed、3 rollbacked、4 suspended。Try 时插 tried，Confirm 看到 committed 就直接回成功；它还多管两件事，空回滚和防悬挂，下一页分布式事务细讲。</p>
+
+  <h3>最少的写法</h3>
+  <div class="codebox" data-role="pd"><div class="code-bar"><b>三种办法的骨架</b><code>参数、过期、返回码放到 ⑥</code></div>
+<pre><code><span class="cm">-- 唯一键：幂等键表（第 1 站）</span>
+CREATE TABLE idem_key (k VARCHAR(64) PRIMARY KEY, req_hash CHAR(64), status VARCHAR(16), order_id BIGINT);
+INSERT INTO idem_key VALUES ('req-7f3a', ?, 'PROCESSING', NULL);   <span class="cm">-- 1062 → 读这一行，重放或回 409 / 422</span>
+
+<span class="cm">-- 状态机：条件更新（第 6、8 站）</span>
+UPDATE user_coupon SET status='USED' WHERE id=7 AND status='LOCKED' AND order_id=9527;  <span class="cm">-- 0 行 → 读当前状态再判断</span>
+
+<span class="cm">-- 去重表：和业务同一个事务，先占位（第 8 站）</span>
+BEGIN;
+INSERT INTO confirm_done VALUES ('xid-9527', 3);                   <span class="cm">-- 1062 → ROLLBACK，回成功</span>
+UPDATE stock_freeze SET status='CONFIRMED' WHERE order_id=9527 AND sku_id=88 AND status='FROZEN';
+COMMIT;</code></pre></div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>套进场景：在交易靶场里把三种写法都跑一遍</h2>
+  </div>
+  <p class="lead">一个 MySQL 8.4 容器，一个 <code>IdemLab</code> 类，五段：建表、入口（第 1 站）、崩溃（第 1 站）、状态机（第 6、8 站）、去重表（第 8 站）。按 JDK 8 写法，<code>--release 8</code> 编译，依赖只有 Connector/J。<a href="https://github.com/archeu/study-labs/tree/main/java/arch/idempotency-design">完整代码 →</a></p>
+  <div class="codebox" data-role="pd"><div class="code-bar"><b>入口写法 2：键、订单、结果同一个事务</b><code>IdemLab.java 节选，JDK 8 写法</code></div>
+<pre><code>static String keyInSameTx(Connection c, String key) throws Exception {
+    c.setAutoCommit(false);
+    try {
+        exec(c, "INSERT INTO idem_key(k,req_hash,status) VALUES('" + key + "','h','PROCESSING')");
+    } catch (SQLException e) {              <span class="cm">// 第二下：等第一下提交后撞上 1062</span>
+        c.rollback(); c.setAutoCommit(true);
+        if (e.getErrorCode() != 1062) throw e;
+        return replay(c, key);              <span class="cm">// 读键那一行：DONE → 同一张单；PROCESSING → 409</span>
+    }
+    Thread.sleep(WORK_MS);                  <span class="cm">// 算价、调库存……10 ms</span>
+    exec(c, "INSERT INTO orders(req_key,user_id,sku_id,qty,status) VALUES('" + key + "',1024,88,2,'WAIT_PAY')");
+    long id = one(c, "SELECT LAST_INSERT_ID()");
+    exec(c, "UPDATE idem_key SET status='DONE', order_id=" + id + " WHERE k='" + key + "'");
+    c.commit(); c.setAutoCommit(true);
+    return "新单";
+}</code></pre></div>
+<pre class="console"><b>$ cd java/arch/idempotency-design &amp;&amp; ./run.sh</b>
+<span class="w">[entry] 400 个幂等键，每个键来两下；第二下比第一下晚 0..19 ms（均匀），第一下从判断到落单要 10 ms</span>
+  写法 1 先查后插（无唯一约束）：679 张单，279 个键出了两张 | 第二下拿到：{新单=279, 重复，已挡=121}
+  写法 2 唯一键，键和订单同一个事务：400 张单，0 个键出了两张 | 第二下拿到：{新单=4, 重放同一单=396}
+      其中晚到不足 8 ms 的 156 次，第二下的 INSERT 在唯一键上等第一下提交，平均 13 ms、最多 36 ms，然后才撞上 1062
+  写法 3 唯一键，先单独提交键再落单：400 张单，0 个键出了两张 | 第二下拿到：{409 处理中=330, 新单=9, 重放同一单=61}
+<span class="w">[crash] 第一下插完幂等键、还没落单时实例被 kill -9（这里用 Connection.abort 掐断连接），用户再点一次，键还是 req-7f3a</span>
+  写法 2 键和订单同一个事务：重试拿到「新单」，再试一次「重放同一单」；orders 里 1 行，idem_key 状态 DONE
+  写法 3 先单独提交键：重试拿到「409 处理中」，再试一次「409 处理中」；orders 里 0 行，idem_key 状态 PROCESSING
+<span class="w">[state] 券 MINUS20（id 7）：Try 锁给 9527，然后 TC 把 Confirm 发了 3 次（第一次的应答丢了）</span>
+  Try 9527 改了 1 行；同时另一单 9528 也来锁，改了 0 行
+  第 1 次 Confirm：改了 1 行 → 成功
+  第 2 次 Confirm：改了 0 行 → 已经是 USED 且属于 9527，当成功返回（幂等）
+  第 3 次 Confirm：改了 0 行 → 已经是 USED 且属于 9527，当成功返回（幂等）
+  迟到的 Cancel（乱序）：改了 0 行 → 状态已不是 LOCKED，Cancel 不动它（记日志、报警）；券现在 USED / 9527
+<span class="w">[state] 库存 sku 88：9527 和 9528 各冻结 2 件，然后 9527 的 Confirm 被发了 3 次</span>
+  写法 A `frozen = frozen - 2 WHERE frozen &gt;= 2`：9527 三次 成功 成功 失败 | 9528 的 Confirm 失败（冻结量不够了） | stock 可售 46 冻结 0 已售 4
+  写法 B 冻结记录 FROZEN→CONFIRMED，改到 1 行才动 stock：9527 三次 成功 成功 成功 | 9528 的 Confirm 成功 | stock 可售 46 冻结 0 已售 4
+<span class="w">[dedup] 300 个分支的 Confirm；每 3 个里有 1 个在“业务改完”和“记去重表”之间崩溃，TC 一直重试到成功</span>
+  去重记录单独提交（业务先提交）：TC 调了 400 次，去重表 300 行，已售 800 件（应为 600）→ 多扣 200 件
+  去重记录和业务同一个本地事务：TC 调了 400 次，去重表 300 行，已售 600 件（应为 600）→ 多扣 0 件
+  两个 Confirm 同时到 × 100 个分支：两次都返回成功的 100 个，已售 200 件（应为 200）</pre>
+  <p class="cap">本机 2 核 ARM，JDK 17.0.21，Connector/J 9.7.0，Docker 里 MySQL 8.4.13。跑了两次：写法 1 重复 279～282 个键，写法 3 的 409 有 330～334 次，等待毫秒数会变，其余数字两次一样。写法 2、3 里少量“新单”是第二下反而先拿到线程，这时是第一下拿到重放，单还是只有一张。写法 A 的总数看起来对（已售 4），账却记错了单。</p>
+
+  <h3 id="lab-h">实验台：同一个键来两下，换一种写法会怎样</h3>
+  <p class="lead">时间按上面的实验取：第一下从“判断”到“落单”要 10 ms，每条 SQL 约 1 ms。先选写法、第二下晚到多久、出什么事，再猜结果。</p>
+  <div class="lab">
+    <div class="rb-ctl"><span class="lbl">写法</span>
+      <div class="seg" id="i-mode" role="group" aria-label="写法">
+        <button type="button" data-v="check" aria-pressed="false">先查后插</button>
+        <button type="button" data-v="redis" aria-pressed="false">Redis SET NX</button>
+        <button type="button" data-v="sametx" aria-pressed="true">唯一键 · 同事务</button>
+        <button type="button" data-v="keyfirst" aria-pressed="false">唯一键 · 先提交键</button>
+      </div>
+    </div>
+    <div class="rb-ctl"><span class="lbl">第二下晚到</span>
+      <div class="seg" id="i-gap" role="group" aria-label="第二下晚到多少毫秒">
+        <button type="button" data-v="0" aria-pressed="false">0 ms</button>
+        <button type="button" data-v="5" aria-pressed="true">5 ms</button>
+        <button type="button" data-v="15" aria-pressed="false">15 ms</button>
+        <button type="button" data-v="200" aria-pressed="false">200 ms</button>
+      </div>
+    </div>
+    <div class="rb-ctl"><span class="lbl">出什么事</span>
+      <div class="seg" id="i-fault" role="group" aria-label="故障">
+        <button type="button" data-v="none" aria-pressed="true">没事</button>
+        <button type="button" data-v="crash" aria-pressed="false">第一下在 6 ms 时死了</button>
+        <button type="button" data-v="diff" aria-pressed="false">第二下改成 3 件</button>
+      </div>
+    </div>
+    <div class="guess">
+      <p id="i-ask">先猜：最后有几张单，第二下拿到什么？</p>
+      <div class="opts" id="i-opts">
+        <button type="button" data-g="two">两张单</button>
+        <button type="button" data-g="replay">一张单，第二下拿到同一个单号</button>
+        <button type="button" data-g="other">一张单，第二下拿到别的（报错、处理中、422，或它自己落了单）</button>
+        <button type="button" data-g="zero">0 张单</button>
+        <button type="button" class="skip" data-g="skip">不猜，直接看</button>
+      </div>
+      <p class="res" id="i-res" hidden></p>
+    </div>
+    <div id="i-out" hidden>
+      <div class="tiles4">
+        <div class="tile" data-role="of"><small>订单张数</small><b id="i-orders">–</b><span>应为 1</span></div>
+        <div class="tile" data-role="rn"><small>第二下拿到</small><b id="i-second" style="font-size:15px;white-space:normal">–</b><span>&nbsp;</span></div>
+        <div class="tile" data-role="pd"><small>第二下在锁上等了</small><b id="i-wait">–</b><span>ms</span></div>
+        <div class="tile" data-role="other"><small>键最后的状态</small><b id="i-key" style="font-size:15px;white-space:normal">–</b><span>&nbsp;</span></div>
+      </div>
+      <ol class="steps-out" id="i-steps"></ol>
+      <div class="lab-res" data-role="of" id="i-verdict" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <div class="done-box"><b>到这里已经能交差了。</b>入口加一张幂等键表，状态流转都写成带“从哪来、归谁”的条件更新，会被重试的动作配一张和业务同事务的去重表。全景第 1、6、8 站的重复，这三样都能挡住。</div>
+  <p class="lead">已知还没处理的细节：键先提交时，PROCESSING 卡住了谁来接管（<a href="#p-stuck">⑥ 坑 3</a>）；同一个键换了参数（<a href="#p-diff">⑥ 坑 8</a>）；键和去重记录留多久、怎么清（<a href="#rules">⑥ 第二圈</a>）；三个事务同时插同一个键时的死锁（<a href="#d-deadlock">⑥ 第三圈</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="rn">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>反例和误用：挂着“幂等”的名字，没满足它的约束</h2>
+  </div>
+
+  <div class="round"><span class="rb">第一圈</span><h3>注意事项：不知道就会出事故</h3></div>
+  <div class="pits">
+    <div class="pit" id="p-check"><b><em>1</em>先查有没有，再插<a class="rootmark" href="#m-three">← ④ 原子占位</a></b>
+      <dl><dt>现象</dt><dd>压测时没事，上线后偶尔出现同一个键两张单。实测 400 个键里 279 个出了两张。</dd>
+      <dt>根源</dt><dd>“判断”和“占位”是两步，中间有窗口。窗口宽度等于中间业务的耗时。</dd>
+      <dt>做法</dt><dd class="fix">直接插，用唯一索引的 1062 当判断；或者用条件更新的“改了几行”当判断。</dd></dl></div>
+    <div class="pit" id="p-split"><b><em>2</em>去重记录和业务分开提交<a class="rootmark" href="#m-dedup">← ④ 去重表</a></b>
+      <dl><dt>现象</dt><dd>大部分时候不重复，一遇到发版、OOM 重启就多扣。实测 1/3 分支崩在两次提交之间，多扣 200 件。</dd>
+      <dt>根源</dt><dd>“做了没记”的窗口：业务提交了，去重记录还没写，重试时查不到。</dd>
+      <dt>做法</dt><dd class="fix">去重记录和业务放进同一个本地事务，先插去重记录占位。去重记录放 Redis 的，Redis 只当筛子，库里还要一道唯一约束。</dd></dl></div>
+    <div class="pit" id="p-stuck"><b><em>3</em>键先提交了，第一下死在中间<a class="rootmark" href="#m-keyfirst">← ④ 写法 3</a></b>
+      <dl><dt>现象</dt><dd>用户再点多少次都是“处理中”。实测 crash 段：0 张单，键一直是 PROCESSING。</dd>
+      <dt>根源</dt><dd>键单独提交后就不会随业务回滚；没人把 PROCESSING 改掉。</dd>
+      <dt>做法</dt><dd class="fix">键上记开始时间，“处理中超过 N 秒”允许别的请求用条件更新抢接管；N 要大于业务最长耗时（第 1 站是全局事务的 60 秒）。或者由后台按全局事务的结局回写 DONE / FAILED。</dd></dl></div>
+    <div class="pit" id="p-reply"><b><em>4</em>撞上重复就回“请求重复”<a class="rootmark" href="#m-three">← ④ 第三个问题</a></b>
+      <dl><dt>现象</dt><dd>用户投诉“提示失败，可订单里有一单”，或者换个键又下了一单。</dd>
+      <dt>根源</dt><dd>客户端重试，往往正是因为第一次的应答丢了。第二次不给结果，它就永远不知道第一次成没成。</dd>
+      <dt>做法</dt><dd class="fix">把第一次的结果（状态码、单号，或者整段响应）存在键那一行，重复时原样重放。Stripe 连 500 都重放。</dd></dl></div>
+    <div class="pit" id="p-who"><b><em>5</em>键在错的地方生成<a class="rootmark" href="#m-three">← ④ 第一个问题</a></b>
+      <dl><dt>现象</dt><dd>两种都见过：每次点击都生成新键，双击照样两单；服务端按“用户 + 商品 + 时间窗”拼键，真想买两单被挡。</dd>
+      <dt>根源</dt><dd>键代表的是“一次打算”，只有发起方知道两次请求是不是同一次打算。</dd>
+      <dt>做法</dt><dd class="fix">在打算开始的那一刻生成：App 打开结算页时生成 UUID，这一页上的提交和重试都带它；换一次结算页就换一个键。</dd></dl></div>
+    <div class="pit" id="p-owner"><b><em>6</em>状态里没有“归谁”<a class="rootmark" href="#m-owner">← ④ 状态机</a></b>
+      <dl><dt>现象</dt><dd>总数对得上，单对不上。实测：9527 的 Confirm 重试吃掉了 9528 冻结的 2 件，9528 的 Confirm 失败。</dd>
+      <dt>根源</dt><dd><code>frozen &gt;= 2</code> 判断的是这件商品的总量，不是这一单的那一份。</dd>
+      <dt>做法</dt><dd class="fix">每单一行冻结记录，状态机走在这一行上，改到 1 行才动总量。</dd></dl></div>
+    <div class="pit" id="p-zero"><b><em>7</em>改了 0 行，一律当失败（或一律当成功）<a class="rootmark" href="#m-state">← ④ 状态机</a></b>
+      <dl><dt>现象</dt><dd>当失败：Confirm 已经成功了，TC 却一直重试、一直报错。当成功：迟到的 Cancel 被当成“已退回”，券其实已经用掉了。</dd>
+      <dt>根源</dt><dd>0 行有三种含义：做过了、不该做、根本没有。</dd>
+      <dt>做法</dt><dd class="fix">0 行时读当前状态再分三种处理，见 ④ 机制 4 的右栏。实测：Confirm 后两次判成功，迟到的 Cancel 被拒绝。</dd></dl></div>
+    <div class="pit" id="p-diff"><b><em>8</em>同一个键、不同的参数，照样重放<a class="rootmark" href="#m-three">← ④ 第三个问题</a></b>
+      <dl><dt>现象</dt><dd>用户把数量从 2 改成 3 再提交，App 复用了旧键，拿到的还是 2 件的那单。</dd>
+      <dt>根源</dt><dd>键只说明“是同一次打算”，没说明内容没变。</dd>
+      <dt>做法</dt><dd class="fix">键那一行存请求摘要（比如请求体的 SHA-256），不一致就拒绝。IETF 草案建议回 422，Stripe 也会报错。</dd></dl></div>
+  </div>
+
+  <div class="round"><span class="rb">第二圈</span><h3 id="rules">使用规范：团队里怎么写</h3></div>
+  <ul class="pains">
+    <li class="ok"><b>键放请求头 <code>Idempotency-Key</code>，值用 UUID</b>。<b>防</b>：各个接口各起各的名字，网关和 SDK 没法统一重试。IETF 草案（draft-08，2026-10，还不是 RFC）就用这个头名。</li>
+    <li class="ok"><b>唯一约束带上用户：<code>UNIQUE(user_id, k)</code></b>。<b>防</b>：别的用户猜中或碰上同一个键，拿到不属于他的重放结果。</li>
+    <li class="ok"><b>返回码统一：缺键 400，处理中 409，参数不同 422，做完重放原响应</b>。<b>防</b>：客户端不知道该等、该改还是该放弃。这是 IETF 草案 2.7 节的建议，Stripe 的处理中也是 409。</li>
+    <li class="ok"><b>只缓存“开始执行之后”的结果</b>。<b>防</b>：参数校验失败、限流这类还没开始做的错误也被重放，用户改对了参数也过不去。Stripe 就是这样分的。</li>
+    <li class="ok"><b>键和去重记录的保留期 ≥ 最长重试窗口</b>。<b>防</b>：清得太早，迟到的重试被当成新请求。Stripe 的键至少留 24 小时；消费端的去重记录要比 MQ 的重试和回溯窗口长。按时间分区，整个分区删。</li>
+    <li class="ok"><b>每个状态转移都写成 <code>WHERE status=&lt;从&gt; AND 归属=?</code></b>。<b>防</b>：乱序和重复把状态往回拨，或改到别人的那一份。</li>
+    <li class="ok"><b>去重表的插入放在事务第一句</b>。<b>防</b>：两个并发重复都先做了业务，最后一个才撞 1062。先占位，后到的那个在主键上等，业务只做一次。</li>
+    <li class="ok"><b>Seata TCC 直接开 <code>useTCCFence = true</code></b>。<b>防</b>：自己写半套去重，漏掉空回滚和悬挂。它默认是 false。</li>
+  </ul>
+
+  <div class="round"><span class="rb">第三圈</span><h3>深处：锁、fence 和接管</h3></div>
+  <div class="deep">
+    <div class="dp" id="d-deadlock" data-role="pd"><h4>唯一键检查的 S 锁，和三个人插同一个键时的死锁</h4>
+      <p>MySQL 手册（Locks Set by Different SQL Statements）写明：插入遇到重复键时，InnoDB 在那条重复的索引记录上加<b>共享锁</b>，等持有排他锁的事务结束。这就是写法 2 的第二下会“等第一下提交”的原因。</p>
+      <p>手册接着给了一个例子：会话 1 插入一行未提交，会话 2、3 插同一个值都在等 S 锁；会话 1 回滚后，2 和 3 都拿到了 S 锁，又都要升级成插入用的 X 锁，互相等，死锁，回滚其中一个。所以写法 2 的错误处理要把 1213（死锁）也当成“稍后重试”，不能当失败返回。</p></div>
+    <div class="dp" data-role="cg"><h4>Seata TCC fence 的四个状态</h4>
+      <p><code>tcc_fence_log</code>：主键 <code>(xid, branch_id)</code>，列 <code>action_name</code>、<code>status</code>、<code>gmt_create</code>、<code>gmt_modified</code>。status：1 tried、2 committed、3 rollbacked、4 suspended。</p>
+      <p>Try 插 tried；Confirm 查到 committed 直接回 true（日志写 “idempotency rejected”）；Cancel 查不到记录就插一行 suspended 并回成功，这是<b>空回滚</b>；迟到的 Try 再插同一个主键会冲突而失败，这是<b>防悬挂</b>。清理任务的配置是 <code>seata.tcc.fence.clean-period</code>，代码默认 1 天，官方示例配置写的是 1h。（2.x 源码，类名已改成 <code>SpringFenceHandler</code> / <code>CommonFenceConfig</code>。）</p></div>
+    <div class="dp" data-role="of"><h4>“处理中”接管时，第一下其实没死</h4>
+      <p>写法 3 的接管靠超时判断第一下死了，可超时只说明“不知道”：第一下可能只是 Full GC 停了 40 秒。醒来后它接着落单、回写 DONE，接管者也在落单，又是两张。</p>
+      <p>办法和锁过期一样，给键加一个 fencing 版本：接管时 <code>UPDATE idem_key SET owner=?, ver=ver+1 WHERE k=? AND ver=?</code>，落单和回写都带上 <code>ver</code> 条件，旧的那个写不进去。见<a href="../redis/redis-lock-expire-fencing.html">锁过期与 fencing token</a>。下一页“时钟、超时与重试”会接着讲为什么超时不能当死亡证明。</p></div>
+    <div class="dp" data-role="bk"><h4>消费端和入口，是同一件事的两种身份</h4>
+      <p>消费端的身份是消息 ID 或业务主键（J08 <a href="../kafka/kafka-idempotent-ordering.html">幂等消费</a>），入口的身份是客户端给的键，二阶段的身份是 <code>(xid, branch_id)</code>。判断方式都是同一个：业务库里一次原子操作，和业务同事务提交。</p>
+      <p>区别在第二次返回什么：消费端没人等结果，“做过了”直接 ack；入口有人在等，要把第一次的结果交出去。</p></div>
+  </div>
+
+  <div class="round"><span class="rb">下一圈</span><h3>这一层没有尽头</h3></div>
+  <ul class="next">
+    <li><b>分布式事务</b>：TCC 的 Try、Confirm、Cancel 怎么写，空回滚和悬挂完整走一遍（J09 第 3 个）。</li>
+    <li><b>时钟、超时与重试</b>：重试的间隔、上限、退避，以及接管的超时怎么定（J09 第 4 个）。</li>
+    <li><b>网关层统一幂等</b>：在网关按 <code>Idempotency-Key</code> 存响应，业务服务就不用每个都写一遍；代价是网关要有存储，并且和业务库不在一个事务里。</li>
+    <li><b>Kafka 生产者幂等</b>：broker 用 producer id + 序号去重，是“接收方去重”在消息系统里的样子。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改交易靶场的入口</h2>
+  </div>
+  <div class="ex">
+    <div class="exc" data-role="of"><h4>练习 1 · 给写法 3 加上接管</h4><p>在 <code>idem_key</code> 上加一个“处理中超过 30 秒允许接管”的条件更新，再跑 <code>crash</code> 段：还卡住吗？再让第一下“慢 40 秒而不是死掉”，会出两张单吗？加上 <code>ver</code> 列以后呢？</p><p class="uses">用到 ⑥ 坑 3、第三圈接管</p></div>
+    <div class="exc" data-role="pd"><h4>练习 2 · 参数不同回 422</h4><p>给 <code>req_hash</code> 存上请求体的 SHA-256，第二下把 2 件改成 3 件，用同一个键提交，返回 422。先猜：第二下晚到 0 ms 时，它是先等锁再 422，还是立刻 422？</p><p class="uses">用到 ④ 机制 3、⑥ 坑 8</p></div>
+    <div class="exc" data-role="cg"><h4>练习 3 · 去重表换个顺序</h4><p><code>dedup</code> 段把“先插去重表、再改库存”换成“先改库存、再插去重表”，还在同一个事务里。两个 Confirm 同时到时结果一样吗？后到的那个在哪一行上等锁？</p><p class="uses">用到 ④ 机制 5、⑥ 第二圈</p></div>
+  </div>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>发送方分不清“没做”和“做了但不知道”，只能带着同一个身份重试；接收方在业务数据所在的库里，用一次原子操作（唯一键、条件更新、去重表主键）判断并占位，和业务一起提交，第二次把第一次的结果交出去。</p></details>
+    <details><summary>2. ② 里“先查后插”痛在哪？按钮置灰为什么不够？</summary><p>查和插不是一个原子操作，中间业务有多慢，窗口就有多宽，实测 400 个键里 279 个出了两张。按钮置灰只挡手指，挡不住网关重发、断网重连、刷新，第 8 站 TC 的重试根本不经过前端。</p></details>
+    <details><summary>3. ⑥ 坑 2（去重记录分开提交）的根源是 ④ 的哪条？</summary><p>机制 5：去重记录和业务必须一起提交、一起回滚。分两次提交，崩在中间就是“做了没记”，重试时查不到记录，业务又做一遍。</p></details>
+    <details><summary>4. 预测：写法 2 里，第一下要调一个外部风控，耗时 6 秒，<code>innodb_lock_wait_timeout</code> 是 5 秒。第二下晚到 1 秒，会怎样？</summary><p>第二下的 INSERT 在键上等第一下的事务，等满 5 秒报 1205（锁等待超时），而不是 1062。它既没拿到结果，也不知道第一下成没成，只能报错或再重试。这正是机制 3 说的写法 2 的代价：事务里包着慢调用时，要改用写法 3。</p></details>
+    <details><summary>5. 预测：券的 Confirm 写成 <code>UPDATE … SET status='USED' WHERE id=7</code>（不带 status 条件），TC 重试 3 次会出事吗？迟到的 Cancel 呢？</summary><p>Confirm 本身重复执行没事，结果都是 USED。可 Cancel 如果也不带条件，<code>SET status='UNUSED' WHERE id=7</code> 会把已经用掉的券改回去，用户白得一张券。状态机的价值不只是挡重复，还挡住乱序的非法转移（机制 4：USED 没有出去的边）。</p></details>
+    <details><summary>6. 放回全景：第 1 站前后各发生了什么？这一页的东西坏了，整条链路会怎样？</summary><p>第 1 站之前是 1024 在 App 上点“提交订单”；之后是第 2 站用号段发出单号 9527、第 3 站开全局事务。第 1 站挡不住，第二下也会拿到新单号、开第二个全局事务：两张单抢同一张券，第二单在第 6 站锁券失败、整单回滚，它在第 5 站冻结的库存要靠 Cancel 退回；如果券有两张，用户就真的付两次钱。第 6、8 站不幂等，TC 的重试会把库存多扣，或者把用掉的券退回去，第 11 站的对账就会报出来。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过：<code>IdemLab</code> 的五段，MySQL 8.4.13（Docker），JDK 17.0.21 按 <code>--release 8</code> 编译，Connector/J 9.7.0，2 核 ARM，跑了两次；页面上标“实测”的数字都来自这两次运行。实验台是按实验的时间（业务 10 ms、每条 SQL 约 1 ms）写的推演，不是真数据库。</p>
+  <p>按文档和源码：RFC 9110 §9.2.2（幂等的定义）；IETF draft-ietf-httpapi-idempotency-key-header-08（2026-10-22，Internet-Draft，2.7 节的 400 / 409 / 422）；Stripe API 文档 Idempotent requests（键最长 255 字符、至少保留 24 小时、参数不同报错、重放包括 500、并发处理中 409、执行前的错误不缓存）；MySQL 8.4 手册 Locks Set by Different SQL Statements in InnoDB（重复键时加 S 锁、三会话死锁的例子）；Apache Seata 2.x 源码 <code>script/client/tcc/db/mysql.sql</code>、<code>CommonFenceConstant</code>、<code>SpringFenceHandler</code>、<code>DefaultValues</code>（fence 表结构、四个状态、clean-period 默认 1 天）。</p>
+  <p>相关：<a href="../java/pano-j09-order-across-three-dbs.html">全景：一次下单跨三个库</a> · <a href="cap-base-consistency.html">CAP、BASE 与一致性模型</a> · <a href="../kafka/kafka-idempotent-ordering.html">幂等消费与顺序消息</a> · <a href="../kafka/kafka-reorder-statemachine.html">退款比付款先到：状态机</a> · <a href="../database/mysql-lock-wait-deadlock.html">事务、MVCC 与锁</a> · <a href="../redis/redis-lock-expire-fencing.html">锁过期与 fencing token</a> · <a href="../java/roadmap.html#j09">Java 地图 J09</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// Two POSTs with the same idempotency key req-7f3a. First starts at t=0, second at t=gap ms.
+// mode: check (SELECT then INSERT, no unique key) | sametx (insert key + order + result in one local txn)
+//       keyfirst (insert key autocommit, then order, then write result) | redis (SET NX EX 10, no result stored)
+// fault: none | crash (first instance killed at t=6, mid-work) | diff (second asks for 3 items instead of 2)
+// Times follow the lab: WORK=10 ms between "claim" and "order inserted", ~1 ms per statement.
+function idemSim(mode, gap, fault){
+  var W=10, ev=[], orders=0, second='', wait=0, keyState='', user='';
+  var crash=fault==='crash', diff=fault==='diff', CR=6;
+  function e(t,who,txt,cls){ev.push({t:t,who:who,txt:txt,cls:cls||''});}
+  if(mode==='check'){
+    e(0,'第一下','SELECT 9527 有没有 req-7f3a 的单 → 没有');
+    var firstCommit=crash?null:W+2;
+    if(crash) e(CR,'第一下','实例被 kill -9，单没落','bad');
+    else e(W+1,'第一下','INSERT 订单，提交（第 '+(W+2)+' ms 可见）');
+    if(!crash) orders++;
+    var seen=firstCommit!==null && gap>=firstCommit;
+    e(gap,'第二下','SELECT 有没有 req-7f3a 的单 → '+(seen?'有':'没有'),seen?'':'bad');
+    if(seen){second='“重复请求”，没有单号';user=diff?'想改成 3 件，被当成重复挡掉，也拿不到原单':'第二下报错；第一下的应答如果丢了，App 只看到这个错';keyState='（没有键表）';}
+    else{e(gap+W+1,'第二下','INSERT 订单 → 又一张单',crash?'':'bad');orders++;second=crash?'新单（第一下死了，它补上了）':'新单';
+      user=crash?'一张单，第二下自己落的':(diff?'两张单：2 件一张、3 件一张':'两张单，付两次钱');keyState='（没有键表）';}
+  } else if(mode==='sametx'){
+    e(0,'第一下','BEGIN；INSERT idem_key PROCESSING（键上加锁，未提交）');
+    if(crash){
+      e(CR,'第一下','实例被 kill -9，连接断开，服务端回滚：键没了','bad');
+      if(gap<CR){wait=CR-gap;e(gap,'第二下','INSERT idem_key → 撞上未提交的键，等锁');}
+      var t2=Math.max(gap,CR);
+      e(t2,'第二下','INSERT idem_key 成功（第一下回滚了）→ 自己落单','good');
+      e(t2+W+2,'第二下','INSERT 订单、写 DONE、COMMIT','good');
+      orders=1;second='新单（接替了死掉的第一下）';keyState='DONE';user='一张单，用户只看到一次成功';
+    } else {
+      e(W+1,'第一下','INSERT 订单 9527；UPDATE idem_key DONE');
+      e(W+3,'第一下','COMMIT：键和订单一起可见');
+      orders=1;keyState='DONE';
+      if(gap<W+3){wait=W+3-gap;e(gap,'第二下','INSERT idem_key → 撞上未提交的键，等第一下的事务');}
+      var t3=Math.max(gap,W+3);
+      e(t3,'第二下','1062 Duplicate entry → 查 idem_key：DONE，order 9527');
+      if(diff){e(t3,'第二下','请求摘要不一致（3 件 ≠ 2 件）→ 422','good');second='422 同一个键、参数不同';user='一张单；App 知道这个键不能改参数，提示用户';}
+      else{e(t3,'第二下','重放第一次的结果','good');second='同一张单 9527（重放）';user='一张单，两下拿到同一个单号';}
+    }
+  } else if(mode==='keyfirst'){
+    e(0,'第一下','INSERT idem_key PROCESSING，自动提交（第 1 ms 可见）');
+    var tg=Math.max(gap,1);
+    if(gap<1){wait=1-gap;}
+    if(crash){
+      e(CR,'第一下','实例被 kill -9：键已提交，停在 PROCESSING','bad');
+      e(tg,'第二下','INSERT idem_key → 1062，查到 PROCESSING');
+      e(tg,'第二下','返回 409 处理中','bad');
+      orders=0;second='409 处理中';keyState='PROCESSING（没人来改了）';user='0 张单；再点多少次都是“处理中”，直到有人接管';
+    } else {
+      e(W+2,'第一下','INSERT 订单 9527；UPDATE idem_key DONE（第 '+(W+2)+' ms 可见）');
+      orders=1;keyState='DONE';
+      var done=tg>=W+2;
+      e(tg,'第二下','INSERT idem_key → 1062，查到 '+(done?'DONE':'PROCESSING'));
+      if(diff){e(tg,'第二下','请求摘要不一致 → 422','good');second='422 同一个键、参数不同';user='一张单；App 提示不能改参数';}
+      else if(done){e(tg,'第二下','重放第一次的结果','good');second='同一张单 9527（重放）';user='一张单，两下拿到同一个单号';}
+      else{e(tg,'第二下','返回 409 处理中，App 稍后用同一个键再问','');second='409 处理中';user='一张单；App 过一会儿再问，拿到 9527';}
+    }
+  } else { // redis
+    e(0,'第一下','SET req-7f3a NX EX 10 → OK');
+    if(crash){e(CR,'第一下','实例被 kill -9，单没落；Redis 里的键 10 秒后才过期','bad');}
+    else{e(W+1,'第一下','INSERT 订单 9527（结果没存进 Redis）');orders=1;}
+    e(gap,'第二下','SET req-7f3a NX EX 10 → nil（已存在）');
+    e(gap,'第二下','返回“请求重复”',crash?'bad':'');
+    second='“请求重复”，没有单号';keyState='Redis 里一个 10 秒的键';
+    user=crash?'0 张单；10 秒内再点都报“重复”':(diff?'改成 3 件也被当重复':'一张单；如果第一下的应答丢了，用户只看到“重复”，以为没下成，换个新键再下');
+  }
+  ev.sort(function(a,b){return a.t-b.t;});
+  var cat = orders>=2?'two':(orders===0?'zero':(/重放/.test(second)?'replay':'other'));
+  return {events:ev, orders:orders, second:second, wait:wait, keyState:keyState, user:user, cat:cat};
+}
+/*SIM-END*/
+(function(){
+  var st={mode:'sametx',gap:5,fault:'none',guess:null};
+  function $(id){return document.getElementById(id);}
+  var MODE={check:'先查后插',redis:'Redis SET NX',sametx:'唯一键 · 同事务',keyfirst:'唯一键 · 先提交键'};
+  var FAULT={none:'没出事',crash:'第一下在 6 ms 时死了',diff:'第二下改成 3 件'};
+  function esc(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+  function segBind(id,key){var box=$(id);box.addEventListener('click',function(ev){var b=ev.target.closest('button');if(!b)return;
+    box.querySelectorAll('button').forEach(function(x){x.setAttribute('aria-pressed',x===b?'true':'false');});
+    st[key]=key==='gap'?+b.dataset.v:b.dataset.v;reset();});}
+  segBind('i-mode','mode');segBind('i-gap','gap');segBind('i-fault','fault');
+  function reset(){$('i-out').hidden=true;$('i-res').hidden=true;st.guess=null;
+    $('i-opts').querySelectorAll('button').forEach(function(x){x.classList.remove('right','wrong');x.setAttribute('aria-pressed','false');});
+    $('i-ask').textContent='先猜：'+MODE[st.mode]+'，第二下晚到 '+st.gap+' ms，'+FAULT[st.fault]+'。最后有几张单，第二下拿到什么？';}
+  function why(r){
+    if(st.mode==='check'&&st.fault==='crash')return '第一下死了没落单，第二下查不到，自己落了一张。只是碰巧：第一下没死时，晚到 12 ms 以内就是两张（④ 机制 2）。';
+    if(st.mode==='check')return r.orders>=2?'查和插之间有 10 多毫秒的窗口，第二下落在窗口里，也查到“没有”（④ 机制 2：判断和占位不是一个原子操作）。':'第二下来得晚，第一下的单已经提交、查得到；可它只能回一句“重复”，拿不到单号（④ 机制 2 第三个问题）。';
+    if(st.mode==='redis')return r.orders===0?'Redis 里的键挡住了重试，可单根本没落：键和业务不在一个库里，不会一起回滚（③ 选择规则）。':'SET NX 挡住了第二下，但 Redis 里没有存第一次的结果，第二下只能回“重复”（④ 机制 2 第三个问题）。';
+    if(st.mode==='sametx')return st.fault==='crash'?'第一下死了，它的事务回滚，键跟着没了，第二下的插入成功、自己落单（④ 机制 3 右栏）。':(r.wait>0?'第二下撞上未提交的键，在锁上等了 '+r.wait+' ms，第一下提交后拿到 1062，结果已经在那一行里（④ 机制 3）。':'第一下已经提交，第二下立刻撞上 1062，读到结果。')+(st.fault==='diff'?'请求摘要对不上，回 422（⑥ 坑 8）。':'');
+    return st.fault==='crash'?'键已经单独提交，不会随业务回滚，第一下死了以后没人把 PROCESSING 改掉（⑥ 坑 3）。':(st.fault==='diff'?'键那一行存着请求摘要，对不上就回 422（⑥ 坑 8）。':(/409/.test(r.second)?'键单独提交，第二下立刻撞 1062，可第一下还在做，只能回 409，App 稍后再问（④ 机制 3 写法 3）。':'第一下已经写回 DONE，第二下重放结果。'));}
+  function show(){var r=idemSim(st.mode,st.gap,st.fault);
+    $('i-orders').textContent=r.orders;$('i-second').textContent=r.second;$('i-wait').textContent=r.wait;$('i-key').textContent=r.keyState;
+    $('i-steps').innerHTML=r.events.map(function(e){var role=e.cls==='bad'?'bad':(e.cls==='good'?'done':(e.who==='第一下'?'of':'rn'));
+      return '<li data-role="'+role+'"><b>'+e.t+' ms · '+e.who+'</b><span>'+esc(e.txt)+'</span></li>';}).join('');
+    var good=r.orders===1&&(r.cat==='replay'||/422|409|接替/.test(r.second));
+    var v=$('i-verdict');v.setAttribute('data-role',good?'done':'bad');
+    v.innerHTML='<b>'+(good?'这样配是对的：':(/补上/.test(r.second)?'这次碰巧没出事：':'这样配会出事：'))+esc(r.user)+'</b><ul><li>'+esc(why(r))+'</li></ul>';
+    $('i-out').hidden=false;
+    var g=st.guess,res=$('i-res');
+    if(g&&g!=='skip'){var ok=g===r.cat;
+      $('i-opts').querySelector('[data-g="'+g+'"]').classList.add(ok?'right':'wrong');
+      if(!ok)$('i-opts').querySelector('[data-g="'+r.cat+'"]').classList.add('right');
+      res.textContent=(ok?'猜对了。':'没猜中。')+'决定结果的是：判断和占位是不是一个原子操作、和业务是不是一起提交、第二次有没有结果可交（④ 机制 2）。';
+      res.hidden=false;}else res.hidden=true;}
+  $('i-opts').addEventListener('click',function(ev){var b=ev.target.closest('button');if(!b)return;
+    $('i-opts').querySelectorAll('button').forEach(function(x){x.classList.remove('right','wrong');x.setAttribute('aria-pressed',x===b?'true':'false');});
+    st.guess=b.dataset.g;show();});
+  reset();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

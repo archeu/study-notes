@@ -169,6 +169,7 @@
 |---|------|------|
 | 01 | [三高知识地图](https://archeu.github.io/study-notes/arch/three-highs-map.html) | 高性能、高并发、高可用是同一本账：Little 定律算线程和连接、可用率串联相乘并联互补、超时舱壁降级为什么缺一不可、知识点挂在请求链路（含网络 IO、服务治理）和投产六关上、日常开发和投产两张清单、积分卡住时四种写法实测，线程账实验台 |
 | 02 | [3 台 TC 挂了 2 台，下单直接报错：CAP、BASE 与一致性模型](https://archeu.github.io/study-notes/arch/cap-base-consistency.html) | 分区时拒绝还是先答、PACELC、一致性模型五级尺子、多数派与 W+R>N、BASE 软状态的期限和收尾、七个误用，3 副本抢券实验台 |
+| 03 | [双击下单只出一张单：幂等设计——唯一键、状态机、去重表](https://archeu.github.io/study-notes/arch/idempotency-design.html) | 为什么必须由接收方去重、幂等的三个问题、唯一键的等锁与 1062、键同事务还是先提交、状态机的“从哪来归谁”、去重表与 Seata TCC fence、交易靶场 MySQL 实测，同一个键来两下实验台 |
 
 ## JDK
 
