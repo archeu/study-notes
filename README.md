@@ -34,6 +34,7 @@
 | 05 | [全景：一个请求穿过 Spring](https://archeu.github.io/study-notes/java/pano-j05-request-through-spring.html) | J05 场景全景：启动装配、Tomcat、Security 过滤器链、DispatcherServlet、参数解析、AOP 代理、事务拦截器、Mapper 代理、Executor 与插件、提交后事件、回程十一站，SQL 发出时 131 层调用栈和分段耗时实测（BCrypt 占 82 ms、自调用不回滚），分步演示 |
 | 06 | [全景：一条 UPDATE 从应用到磁盘](https://archeu.github.io/study-notes/java/pano-j06-update-to-disk.html) | J06 场景全景：借连接、发 SQL、连接线程、解析优化、B+ 树找页、行锁、undo、改页写 redo、两阶段提交、回 OK、从库回放、刷脏页十二站，MySQL 8.4 一主一从实测（冷读 3 页、提交等落盘 3 ms、提交 120 秒后页仍是脏的），分步演示 |
 | 07 | [全景：一次商品详情查询](https://archeu.github.io/study-notes/java/pano-j07-product-detail-cache.html) | J07 场景全景：查本地、发 GET、主线程查字典、布隆过滤器、重建锁、查库、回填加解锁、放本地、改价提交、删 Redis、广播失效、后台落盘淘汰十二站，Redis 8.10 + Caffeine + MySQL 8.4 实测（本地命中 4 µs、Redis 往返 279 µs 而服务端只要 2 µs、击穿时查库 1～26 次加锁后 1 次、改价后 11～26 ms 跟上），分步演示 |
+| 08 | [全景：一条订单消息的一生](https://archeu.github.io/study-notes/java/pano-j08-order-event-life.html) | J08 场景全景：写 outbox、选分区、攒批发出、追加写、副本复制、回 ACK、三组拉取、处理去重、提交位点、心跳重平衡、段与保留十一站，Kafka 4.4 三 broker 实测（ACK 12～19 ms、三组 12～20 ms 收到、停两个副本写入被拒、提交前崩溃重投一次靠去重表挡住），分步演示 |
 
 ## Spring
 
