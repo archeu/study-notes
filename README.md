@@ -126,6 +126,7 @@
 |---|------|------|
 | 01 | [Kafka 消息可靠性与消费组](https://archeu.github.io/study-notes/kafka/kafka-reliability-group.html) | 六步学习法：acks 和 ISR、min.insync.replicas、offset 提交时机、消费组和 rebalance、幂等与死信，故障实验台和消费组实验台（关键行为本机集群实测） |
 | 02 | [Kafka 存储：segment、索引、页缓存与零拷贝](https://archeu.github.io/study-notes/kafka/kafka-storage-zerocopy.html) | 分段和稀疏索引怎么查、页缓存为什么比 JVM 缓存好、sendfile 少了哪几次拷贝、retention 为什么不准、回放拖慢实时和 TLS 的代价，查找、零拷贝、页缓存三个实验台 |
+| 03 | [积分加了两次，退款跑到了付款前面：幂等消费与顺序消息](https://archeu.github.io/study-notes/kafka/kafka-idempotent-ordering.html) | J08 第 8、2 站下钻：结果和位点不在一个事务、去重表与位点存业务库、顺序在哪几处被打乱、覆盖型用版本号累加型用去重、交易靶场 dup / order 实测，1000 单乱序与重复实验台 |
 
 ## Java 并发
 

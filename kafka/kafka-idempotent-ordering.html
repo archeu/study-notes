@@ -1,0 +1,1302 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>积分加了两次，退款跑到了付款前面：幂等消费与顺序消息</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J08 knowledge point 4 "idempotent consumption & ordering" (first round), stations 8 and 2 of the J08 panorama. Roles: rn = order service / producer and its key, cg = Kafka partitions and offsets, of = consumers (points / order-view services), pd = business database (dedupe table, offsets, version column), g2 = ordering devices (key lanes, version guard); bad / good / neutral keep their global meaning. Interactions: one lab (1000 orders x 3 events; key, business type, consumer strategy, dedupe, crash) with guess-first. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Kafka</span><span aria-hidden="true">/</span><span class="tb-here">积分加了两次，退款跑到了付款前面</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g2"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">至少一次 · 去重表 · 业务唯一键 · 条件更新 · 位点存业务库 · 分区内有序 · 按 key 分车道 · 版本号守卫 · Share Group · Kafka 4.4.0</p>
+  <h1>积分加了两次，退款跑到了付款前面：幂等消费与顺序消息</h1>
+  <p class="lead">Kafka 对消费者只承诺两件事：每条消息<b>至少</b>送到一次；<b>同一个分区里</b>按写入的顺序送。“只生效一次”和“按业务发生的顺序生效”，都得消费端自己做到。前一件靠把“这条处理过了”和业务改动写进同一个本地事务；后一件靠让同一个订单的事件始终只有一条处理线。对“改状态”这类事件还有更省事的做法：事件自带版本号，消费端只认更新的版本，重复和乱序就都不怕了。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j08-order-event-life.html#s-8">一条订单消息的一生 · 第 8、2 站</a></span><span>地图：<a href="../java/roadmap.html#j08">J08 · 幂等消费与顺序消息</a></span></p>
+  <p class="scene"><b>接着全景</b><span>全景页已经给出三个结论，这里不再重讲：Kafka 的消费是“至少一次”；去重表要和业务改动放在同一个事务里；outbox 重发时换了 producerId，broker 认不出来。这一页往下再走一层，讲四件事：Kafka 为什么不替你去重；几种去重写法各适合哪类事件；顺序会在哪几处被打乱；有没有一个办法把两件事一起管住。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：同一条消息生效两次，三条消息生效的顺序不对</h2>
+    <p class="lead">在全景第 8 站，积分服务处理完 <code>evt-9527-paid</code>、还没提交位点就被杀了，同组的新实例又收到同一个 offset。在第 2 站，订单 9527 的“已支付”“已发货”“已退款”三条事件都用 <code>"9527"</code> 做 key，进了同一个分区，可是消费端要是并行处理，最后生效的顺序就不一定是这个了。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="上一行是重复：分区 3 的 offset 1 是 evt-9527-paid。实例 1 处理完，积分加 798，还没提交位点就被杀；同组的实例 2 从已提交的 offset 1 再读一次，又加 798，积分变成 1596。下一行是乱序：分区 3 里依次是 PAID 版本 1、SHIPPED 版本 2、REFUNDED 版本 3，消费者一次 poll 拿到三条，丢给 8 个线程的池子，完成的顺序变成 PAID、REFUNDED、SHIPPED，订单视图最后停在 SHIPPED，已经退款的单被当成已发货。">
+  <text x="20" y="26" class="t-h">第 8 站：同一条，生效两次</text>
+  <rect x="20" y="44" width="150" height="56" rx="8" class="b-cg"/>
+  <text x="95" y="66" text-anchor="middle" class="t-s">分区 3 · offset 1</text>
+  <text x="95" y="86" text-anchor="middle" class="t-xs t-mono">evt-9527-paid</text>
+  <path d="M170,72 L214,72" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="218" y="44" width="190" height="56" rx="8" class="b-of"/>
+  <text x="313" y="66" text-anchor="middle" class="t-s">实例 1：积分 +798</text>
+  <text x="313" y="86" text-anchor="middle" class="t-xs">本地事务已提交</text>
+  <path d="M408,72 L446,72" class="e-bad" marker-end="url(#ah-bad)"/>
+  <rect x="450" y="44" width="150" height="56" rx="8" class="b-bad"/>
+  <text x="525" y="66" text-anchor="middle" class="t-s">被杀</text>
+  <text x="525" y="86" text-anchor="middle" class="t-xs">位点还停在 1</text>
+  <path d="M600,72 L638,72" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="642" y="44" width="150" height="56" rx="8" class="b-of"/>
+  <text x="717" y="66" text-anchor="middle" class="t-s">实例 2：从 1 读</text>
+  <text x="717" y="86" text-anchor="middle" class="t-xs">积分又 +798</text>
+  <path d="M792,72 L826,72" class="e-bad" marker-end="url(#ah-bad)"/>
+  <text x="832" y="68" class="t-s t-bad t-b">积分 1596</text>
+  <text x="832" y="88" class="t-xs">应该是 798</text>
+
+  <text x="20" y="152" class="t-h">第 2 站：三条按顺序进来，没按顺序生效</text>
+  <rect x="20" y="170" width="300" height="56" rx="8" class="b-cg"/>
+  <text x="170" y="190" text-anchor="middle" class="t-s">分区 3（key "9527"）</text>
+  <rect x="30" y="198" width="90" height="22" rx="4" class="b-rn"/><text x="75" y="213" text-anchor="middle" class="t-xs">PAID v1</text>
+  <rect x="124" y="198" width="92" height="22" rx="4" class="b-rn"/><text x="170" y="213" text-anchor="middle" class="t-xs">SHIPPED v2</text>
+  <rect x="220" y="198" width="92" height="22" rx="4" class="b-rn"/><text x="266" y="213" text-anchor="middle" class="t-xs">REFUNDED v3</text>
+  <path d="M320,198 L366,198" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="370" y="170" width="180" height="56" rx="8" class="b-of"/>
+  <text x="460" y="192" text-anchor="middle" class="t-s">poll() 拿到三条</text>
+  <text x="460" y="212" text-anchor="middle" class="t-xs">丢给 8 个线程的池子</text>
+  <path d="M550,198 L596,198" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="600" y="170" width="190" height="56" rx="8" class="b-neu"/>
+  <text x="695" y="190" text-anchor="middle" class="t-xs">完成的先后：</text>
+  <text x="695" y="212" text-anchor="middle" class="t-xs t-mono">PAID → REFUNDED → SHIPPED</text>
+  <path d="M790,198 L826,198" class="e-bad" marker-end="url(#ah-bad)"/>
+  <text x="832" y="194" class="t-s t-bad t-b">停在 SHIPPED</text>
+  <text x="832" y="214" class="t-xs">退了款的单要去发货</text>
+
+  <rect x="20" y="256" width="920" height="56" rx="10" class="b-neu"/>
+  <text x="40" y="280" class="t-s">要的结果：每个事件<tspan class="t-b">只生效一次</tspan>；同一个订单的事件<tspan class="t-b">按发生的顺序生效</tspan>；</text>
+  <text x="40" y="300" class="t-s">而且不能为此放弃并行：大促时 1000 单一起来，一条条处理太慢。</text>
+</svg>
+  </div>
+  <figcaption>两件事都发生在“消息已经安全进了 Kafka”之后，生产端的 <code>acks=all</code>、幂等生产者都帮不上忙。它们是消费端的问题，所以这一页的主角是消费者。</figcaption>
+  </figure>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>不用它会怎样：在交易靶场里真跑一遍</h2>
+    <p class="lead">“它”指消费端的去重和保序。下面三个数都是本机 Kafka 4.4.0 上跑出来的，代码见 <a href="#s5">⑤</a>：1000 个订单，每单三条事件，交错着发。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="三个结局。不去重：投递两次，积分 1596，应为 798。消费端丢进线程池：1000 单里 487 单最终状态不是已退款，新状态被旧事件盖掉 751 到 760 次。发送时不填 key、消费端一条条处理：1000 单里 5 单错，两次运行都是 5 单。">
+  <rect x="20" y="20" width="290" height="210" rx="12" class="b-card"/>
+  <text x="40" y="50" class="t-s t-b">不去重</text>
+  <text x="40" y="72" class="t-xs">处理完、提交位点前被杀一次</text>
+  <text x="40" y="132" class="t-big">1596</text>
+  <text x="40" y="160" class="t-xs">积分（应为 798）</text>
+  <text x="40" y="206" class="t-xs">每次崩溃都会多生效一批：从上次</text>
+  <text x="40" y="222" class="t-xs">提交的位置到崩溃那一刻之间的所有消息</text>
+
+  <rect x="335" y="20" width="290" height="210" rx="12" class="b-card"/>
+  <text x="355" y="50" class="t-s t-b">key 对了，消费端丢进线程池</text>
+  <text x="355" y="72" class="t-xs">8 个线程，每条处理 0.2～1.5 ms</text>
+  <text x="355" y="132" class="t-big">487 / 1000</text>
+  <text x="355" y="160" class="t-xs">最终不是“已退款”的订单（两次都是 487）</text>
+  <text x="355" y="206" class="t-xs">快了约 5 倍（0.59 s 对 2.87 s），</text>
+  <text x="355" y="222" class="t-xs">但新状态被旧事件盖掉 751～760 次</text>
+
+  <rect x="650" y="20" width="290" height="210" rx="12" class="b-card"/>
+  <text x="670" y="50" class="t-s t-b">发送时不填 key</text>
+  <text x="670" y="72" class="t-xs">消费端规规矩矩一条条处理</text>
+  <text x="670" y="132" class="t-big">5 / 1000</text>
+  <text x="670" y="160" class="t-xs">最终状态错的订单（两次都是 5）</text>
+  <text x="670" y="206" class="t-xs">最难查的一种：千分之五，</text>
+  <text x="670" y="222" class="t-xs">测试环境里多半一次也碰不上</text>
+</svg>
+  </div>
+  <figcaption>第三种只错 5 单，原因在 <a href="#order">④ 顺序在哪几处被打乱</a>：不填 key 时，生产者把一批消息写进一个分区，写满了换下一个分区；一个订单的三条事件恰好跨在两批之间，就进了两个分区，两个分区之间没有顺序可言。</figcaption>
+  </figure>
+  <p class="misj"><b>不懂精华时的典型误用</b>“我们开了 <code>acks=all</code> 和幂等生产者，Kafka 4 还支持 exactly-once，所以不会重复。”幂等生产者只保证<b>同一个生产者</b>重发的批次不会在<b>日志里</b>写两份，管不到消费端“处理完了、位点还没提交”这一段。Kafka 的事务也只覆盖“读 Kafka、写 Kafka”。积分写的是 MySQL，重复只能在积分服务自己这里挡。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种流派：去重有四种写法，保序有四种做法</h2>
+    <p class="lead">两张表各回答一个问题。第一张：消费端怎么认出“这条处理过了”。第二张：同一个订单的事件，怎么保证按顺序生效。</p>
+  </div>
+  <h3>认出“处理过了”</h3>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>写法</th><th>怎么认出来</th><th>适合</th><th>代价和限制</th></tr></thead>
+    <tbody>
+      <tr><td><b>去重表</b>（消费记录表）</td><td><code>eventId</code> 做主键，和业务改动同一个事务里先插入；撞了唯一键就是处理过</td><td>任何事件，尤其是“加 798 分”这种累加型</td><td>每条多一次写；表会一直长，要按时间清理</td></tr>
+      <tr><td><b>业务唯一键</b></td><td>业务表本来就有“一单只能一次”的约束，比如积分流水表 <code>UNIQUE(source_event_id)</code></td><td>业务里天然有唯一性的地方</td><td>不用额外的表；前提是业务模型里真有这个约束</td></tr>
+      <tr><td><b>条件更新</b>（状态机）</td><td><code>UPDATE … SET status='DEDUCTED' WHERE id=? AND status='RESERVED'</code>，更新了 0 行就是处理过</td><td>改状态的事件，比如库存从“预占”转成“扣减”</td><td>只能表达“往前走一步”，表达不了“再加一次”</td></tr>
+      <tr><td><b>位点存业务库</b></td><td>不判断事件，而是把“读到哪了”和业务改动写进同一个事务，重启时从库里的位置 <code>seek</code></td><td>只写一个库、按分区成批处理，比如往 ES 或数仓同步</td><td>Kafka 自带的 LAG 工具看不到真实进度；一个分区的结果只能写在一个库里</td></tr>
+    </tbody>
+  </table></div>
+  <p class="cap">不在表里的两种：用 Redis <code>SETNX</code> 去重，它和 MySQL 里的业务改动不在一个事务，崩在两者之间就会丢消息，和 <a href="#s5">⑤ 里的 split</a> 是同一个坑；Kafka 事务只覆盖“读 Kafka、写 Kafka”的流处理，见 <a href="#deep">⑥ 第三圈</a>。</p>
+
+  <h3>同一个订单，按顺序生效</h3>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>做法</th><th>顺序怎么来的</th><th>并行度</th><th>适合</th></tr></thead>
+    <tbody>
+      <tr><td><b>只有一个分区</b></td><td>所有消息排成一队</td><td>1 个消费者在干活</td><td>量很小、又要全局顺序（比如对账流水）</td></tr>
+      <tr><td><b>按 key 分区</b>（Kafka 默认）</td><td>同一个订单进同一个分区，一个分区在组里只给一个实例，一条条处理</td><td>最多等于分区数</td><td>大多数场景的起点</td></tr>
+      <tr><td><b>按 key 分区 + 按 key 分车道</b></td><td>消费端再按订单号哈希到 N 条单线程车道，同一个订单永远走同一条</td><td>可以超过分区数</td><td>每条处理慢（调外部接口），分区又不想加</td></tr>
+      <tr><td><b>不依赖顺序：版本号</b></td><td>事件带上版本号，消费端只接受比当前更新的版本，旧的直接丢</td><td>随便并行</td><td>改状态、覆盖写的事件；累加型不行，见 <a href="#vguard">④</a></td></tr>
+    </tbody>
+  </table></div>
+  <p class="cap">两个对照：RocketMQ 的顺序消息是另一套机制，发送时指定队列、消费时锁住队列，放在 J08 下钻的下一页讲；Kafka 4.2 起正式可用的 Share Group（队列语义）走的是反方向，用顺序换并行，见 <a href="#deep">⑥ 第三圈</a>。</p>
+  <p class="pick-line"><b>选择规则</b>：先看事件是<b>覆盖型</b>（把状态改成 X）还是<b>累加型</b>（加 798 分、扣 2 件）。覆盖型：按 key 分区，加版本号守卫，消费端随便并行。累加型：用去重表或业务唯一键，和业务改动放进同一个事务；要并行，就按 key 分车道。<b>本页的交易靶场两样都做</b>：积分服务用“去重表，同一个事务”，订单视图服务比较“车道”和“版本号”两种做法。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>核心取舍：两个系统没有共同的事务；顺序只活在一条管子里</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>位点（offset）</b>：消费组在每个分区记一个“下一条该读第几条”，存在 Kafka 的内部 topic <code>__consumer_offsets</code> 里。实例重启或者分区换了人，都从这个位置接着读。见 <a href="kafka-reliability-group.html">Kafka 可靠性与消费组</a>。</li>
+      <li><b>本地事务和唯一键</b>：同一个 MySQL 事务里的几条写，要么都生效，要么都不生效；插入撞了唯一键会报错（MySQL 1062），整个事务可以回滚。见 <a href="../database/mysql-redo-undo-binlog.html">MySQL redo、undo 与 binlog</a>。</li>
+      <li><b>分区器</b>：有 key 时，<code>murmur2(key) % 分区数</code> 决定进哪个分区（全景第 2 站）；没有 key 时，一批写满就换一个分区（粘性分区）。</li>
+    </ul>
+  </div>
+
+  <h3 id="twosys">为什么 Kafka 不替你去重：结果和位点存在两个地方</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 400" role="img" aria-label="积分服务处理一条消息要写两个地方：积分写进 MySQL，位点写进 Kafka 的 __consumer_offsets。两者之间没有共同的事务。先提交位点再处理，崩在中间，这条就丢了，叫至多一次。先处理再提交位点，崩在中间，这条会再来一次，叫至少一次，Kafka 默认就是这种。要做到只生效一次，就把两件事搬到同一个地方：要么把“这条处理过了”写进 MySQL，也就是去重表；要么把“读到哪了”写进 MySQL，也就是位点存业务库。两种都是一个本地事务，崩在哪都对。">
+  <text x="20" y="26" class="t-h">一条消息，要写两个地方</text>
+  <rect x="20" y="44" width="200" height="50" rx="8" class="b-pd"/>
+  <text x="120" y="66" text-anchor="middle" class="t-s">MySQL：积分 +798</text>
+  <text x="120" y="84" text-anchor="middle" class="t-xs">业务结果</text>
+  <rect x="250" y="44" width="230" height="50" rx="8" class="b-cg"/>
+  <text x="365" y="66" text-anchor="middle" class="t-s">Kafka：位点 → 2</text>
+  <text x="365" y="84" text-anchor="middle" class="t-xs">__consumer_offsets</text>
+  <text x="500" y="66" class="t-s t-b">两个系统，没有共同的事务</text>
+  <text x="500" y="86" class="t-xs">所以总得有个先后，崩溃就可能落在两步之间</text>
+
+  <text x="20" y="134" class="t-s t-b">先提交位点，再处理</text>
+  <rect x="250" y="116" width="120" height="30" rx="5" class="b-cg"/><text x="310" y="136" text-anchor="middle" class="t-xs">位点 → 2</text>
+  <text x="388" y="136" class="t-s t-bad">✕ 崩</text>
+  <rect x="430" y="116" width="120" height="30" rx="5" class="b-neu"/><text x="490" y="136" text-anchor="middle" class="t-xs">积分 +798（没做）</text>
+  <text x="570" y="128" class="t-s t-bad">丢：至多一次</text>
+  <text x="570" y="144" class="t-xs">重启从 2 读，这条再也不会来</text>
+
+  <text x="20" y="188" class="t-s t-b">先处理，再提交位点</text>
+  <rect x="250" y="170" width="120" height="30" rx="5" class="b-pd"/><text x="310" y="190" text-anchor="middle" class="t-xs">积分 +798</text>
+  <text x="388" y="190" class="t-s t-bad">✕ 崩</text>
+  <rect x="430" y="170" width="120" height="30" rx="5" class="b-neu"/><text x="490" y="190" text-anchor="middle" class="t-xs">位点 → 2（没做）</text>
+  <text x="570" y="182" class="t-s t-bad">重：至少一次（Kafka 默认）</text>
+  <text x="570" y="198" class="t-xs">重启从 1 读，这条再来一次</text>
+
+  <path d="M20,222 L940,222" class="e-mut" stroke-dasharray="4 4"/>
+  <text x="20" y="250" class="t-s t-b">把两件事搬到同一个库，一个本地事务</text>
+  <rect x="20" y="266" width="440" height="110" rx="10" class="b-g2"/>
+  <text x="40" y="290" class="t-s t-b">去重表：把“处理过了”搬进来</text>
+  <text x="40" y="312" class="t-xs t-mono">BEGIN; INSERT consumed_event('evt-9527-paid');</text>
+  <text x="40" y="330" class="t-xs t-mono">       UPDATE points SET total=total+798; COMMIT;</text>
+  <text x="40" y="352" class="t-xs">位点照样提交给 Kafka；重来时撞唯一键 → 回滚 → 跳过</text>
+  <text x="40" y="368" class="t-xs t-good">⑤ 实测：投递 2 次，积分 798</text>
+  <rect x="500" y="266" width="440" height="110" rx="10" class="b-g2"/>
+  <text x="520" y="290" class="t-s t-b">位点存业务库：把“读到哪了”搬进来</text>
+  <text x="520" y="312" class="t-xs t-mono">BEGIN; UPDATE points SET total=total+798;</text>
+  <text x="520" y="330" class="t-xs t-mono">       MERGE consumer_offset(p3 → 2); COMMIT;</text>
+  <text x="520" y="352" class="t-xs">不提交给 Kafka；分到分区时从库里读位置 seek 过去</text>
+  <text x="520" y="368" class="t-xs t-good">⑤ 实测：重来时直接从 2 读，只投递 1 次</text>
+</svg>
+  </div>
+  <figcaption>Kafka 设计文档对写外部系统的建议，正是下面这一种：“让消费者把位点和输出存在同一个地方”（store its offset in the same place as its output），这样比两阶段提交更简单、也更通用，因为大多数输出系统不支持两阶段提交。去重表是同一个思路的另一面：搬的不是位点，是“处理过了”这个标记。</figcaption>
+  </figure>
+
+  <div class="design">
+    <div class="way" data-role="g2">
+      <h4>至少一次投递 + 消费端幂等<small>选中的设计</small></h4>
+<svg viewBox="0 0 460 170" role="img" aria-label="选中的设计：Kafka 只保证至少一次，重复在消费端用一次唯一键插入挡掉。下游是 MySQL、Redis、短信平台都能这么做，代价是每条多一次写。">
+  <rect x="20" y="20" width="120" height="40" rx="8" class="b-cg"/>
+  <text x="80" y="45" text-anchor="middle" class="t-xs">Kafka：至少一次</text>
+  <path d="M140,40 L180,40" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="184" y="20" width="256" height="40" rx="8" class="b-pd"/>
+  <text x="312" y="45" text-anchor="middle" class="t-xs">本地事务：唯一键插入 + 业务改动</text>
+  <text x="20" y="96" class="t-xs">MySQL、PostgreSQL：去重表 / 唯一键</text>
+  <text x="20" y="116" class="t-xs">Redis、ES：覆盖写 + 版本号</text>
+  <text x="20" y="136" class="t-xs">短信平台：把 eventId 带过去，让它去重</text>
+  <text x="20" y="160" class="t-xs t-good">每条多一次写，任何下游都能做</text>
+</svg>
+      <p>约束：下游是各式各样的系统，积分写 MySQL、通知调短信平台，它们大多不支持 XA 两阶段提交。“至少一次 + 幂等”只要求下游有一个唯一键，或者能带着 eventId 去重。</p>
+    </div>
+    <div class="way" data-role="other">
+      <h4>中间件保证“恰好一次投递”<small>放弃的设计</small></h4>
+<svg viewBox="0 0 460 170" role="img" aria-label="放弃的设计：消息队列和下游数据库做两阶段提交，协调者先让两边都准备好，再一起提交。要求下游支持 XA，每条消息多两次网络来回，协调者挂了两边都卡住。">
+  <rect x="20" y="20" width="120" height="40" rx="8" class="b-neu"/>
+  <text x="80" y="45" text-anchor="middle" class="t-xs">协调者</text>
+  <path d="M140,32 L200,24" class="e-ink" marker-end="url(#ah-ink)"/>
+  <path d="M140,48 L200,60" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="204" y="8" width="150" height="30" rx="6" class="b-neu"/>
+  <text x="279" y="28" text-anchor="middle" class="t-xs">MQ：prepare / commit</text>
+  <rect x="204" y="46" width="150" height="30" rx="6" class="b-neu"/>
+  <text x="279" y="66" text-anchor="middle" class="t-xs">DB：prepare / commit</text>
+  <text x="20" y="106" class="t-xs">下游必须支持 XA：短信平台、ES 不支持</text>
+  <text x="20" y="126" class="t-xs">每条消息多两轮来回，锁拿到第二阶段</text>
+  <text x="20" y="146" class="t-xs t-bad">协调者一挂，两边都卡在 prepare</text>
+</svg>
+      <p>输在哪：覆盖不了大多数下游，又把每条消息的延迟和锁的时间拉长。Kafka 的 exactly-once 走的是另一条路：它只在 Kafka 内部做事务，把“写结果”和“写位点”都变成写 Kafka，下游一出 Kafka 就不管了。</p>
+    </div>
+  </div>
+  <p class="misj"><b>这个设计带来的后果</b>重复不是小概率的异常，而是常规路径：每次重平衡、每次发布重启、每次处理超时被踢出组，都会把“上次提交之后处理过的那一批”再送一遍。所以幂等要当成每个消费者的默认写法，不能当成补丁。</p>
+
+  <h3 id="order">顺序在哪几处被打乱：它只在“一个分区 × 一条处理线”里成立</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="顺序经过五段：订单服务按 key 发送；分区器按 key 选分区；分区 3 的日志按 offset 追加；组里只有一个实例拿分区 3；poll 线程按 offset 交给处理线程。每一段下面写着会打乱顺序的事：不填 key 或给 topic 加分区；关了幂等又允许多个请求在途时的重试；日志本身不会乱；重平衡后从提交的位置重放，旧事件再来一遍；丢进线程池并行处理，或者把失败的消息放进重试 topic。">
+  <text x="20" y="26" class="t-h">9527 的三条事件，从发出到生效</text>
+  <rect x="20" y="44" width="160" height="56" rx="8" class="b-rn"/>
+  <text x="100" y="66" text-anchor="middle" class="t-s">① 按发生顺序 send</text>
+  <text x="100" y="86" text-anchor="middle" class="t-xs">key "9527"</text>
+  <path d="M180,72 L208,72" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="212" y="44" width="160" height="56" rx="8" class="b-rn"/>
+  <text x="292" y="66" text-anchor="middle" class="t-s">② 分区器</text>
+  <text x="292" y="86" text-anchor="middle" class="t-xs">murmur2 % 6 = 3</text>
+  <path d="M372,72 L400,72" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="404" y="44" width="160" height="56" rx="8" class="b-cg"/>
+  <text x="484" y="66" text-anchor="middle" class="t-s">③ 分区 3 的日志</text>
+  <text x="484" y="86" text-anchor="middle" class="t-xs">只追加，offset 递增</text>
+  <path d="M564,72 L592,72" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="596" y="44" width="160" height="56" rx="8" class="b-of"/>
+  <text x="676" y="66" text-anchor="middle" class="t-s">④ 组里一个实例</text>
+  <text x="676" y="86" text-anchor="middle" class="t-xs">独占分区 3</text>
+  <path d="M756,72 L784,72" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="788" y="44" width="152" height="56" rx="8" class="b-g2"/>
+  <text x="864" y="66" text-anchor="middle" class="t-s">⑤ 一条处理线</text>
+  <text x="864" y="86" text-anchor="middle" class="t-xs">按 offset 一条条做</text>
+
+  <text x="20" y="130" class="t-xs t-b">会打乱它的事</text>
+  <rect x="20" y="140" width="160" height="150" rx="8" class="b-card"/>
+  <text x="30" y="162" class="t-xs t-bad">· 不填 key</text>
+  <text x="30" y="180" class="t-xs">（② 实测 5/1000）</text>
+  <text x="30" y="202" class="t-xs t-bad">· key 选错</text>
+  <text x="30" y="220" class="t-xs">用户 ID、随机串</text>
+  <text x="30" y="242" class="t-xs t-bad">· 两个服务各发各的</text>
+  <text x="30" y="260" class="t-xs">支付服务发 PAID，</text>
+  <text x="30" y="278" class="t-xs">物流服务发 SHIPPED</text>
+  <rect x="212" y="140" width="160" height="150" rx="8" class="b-card"/>
+  <text x="222" y="162" class="t-xs t-bad">· 给 topic 加分区</text>
+  <text x="222" y="180" class="t-xs">% 6 变成 % 12，</text>
+  <text x="222" y="198" class="t-xs">在途订单换了分区</text>
+  <text x="222" y="222" class="t-xs t-bad">· 关了幂等 + 在途 &gt; 1</text>
+  <text x="222" y="240" class="t-xs">第一批失败重试，</text>
+  <text x="222" y="258" class="t-xs">第二批先写进去</text>
+  <text x="222" y="280" class="t-xs t-good">幂等开着时 ≤ 5 都保序</text>
+  <rect x="404" y="140" width="160" height="150" rx="8" class="b-card"/>
+  <text x="414" y="162" class="t-xs t-good">· 这一段不会乱</text>
+  <text x="414" y="180" class="t-xs">日志只往末尾追加，</text>
+  <text x="414" y="198" class="t-xs">offset 就是顺序</text>
+  <text x="414" y="222" class="t-xs">但只在一个分区内：</text>
+  <text x="414" y="240" class="t-xs">分区 3 和分区 4 之间</text>
+  <text x="414" y="258" class="t-xs">没有先后可言</text>
+  <rect x="596" y="140" width="160" height="150" rx="8" class="b-card"/>
+  <text x="606" y="162" class="t-xs t-bad">· 重平衡、重启</text>
+  <text x="606" y="180" class="t-xs">从提交的位置重放，</text>
+  <text x="606" y="198" class="t-xs">已经生效过的旧事件</text>
+  <text x="606" y="216" class="t-xs">排在新状态后面再来</text>
+  <text x="606" y="240" class="t-xs">重复本身就是一种乱序</text>
+  <rect x="788" y="140" width="152" height="150" rx="8" class="b-card"/>
+  <text x="798" y="162" class="t-xs t-bad">· 丢进线程池</text>
+  <text x="798" y="180" class="t-xs">（② 实测 487/1000）</text>
+  <text x="798" y="204" class="t-xs t-bad">· 失败的放进重试 topic</text>
+  <text x="798" y="222" class="t-xs">它排到了后面的</text>
+  <text x="798" y="240" class="t-xs">事件后头</text>
+  <text x="798" y="264" class="t-xs t-bad">· 异步回调里改状态</text>
+
+  <text x="20" y="318" class="t-xs">顺序要求五段全部满足；Kafka 只负责中间那一段，另外四段都在你的代码和配置里。</text>
+</svg>
+  </div>
+  <figcaption>为什么 Kafka 只给分区内的顺序：分区是并行的单位，一个分区在组里只给一个实例，所以分区内天然有序；要全局有序，就只能有一个分区、一个实例在干活，吞吐也就锁死在一台机器上。“同一个订单有序，不同订单并行”刚好对上“同一个 key 进同一个分区”。</figcaption>
+  </figure>
+
+  <h3 id="vguard">一个办法管住两件事：事件自带版本号</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="订单视图表里 9527 当前是 REFUNDED，版本 3。来了一条迟到的 SHIPPED 版本 2：条件更新 WHERE ver 小于 2 不成立，更新 0 行，当旧事件丢掉。又来了一条重复的 REFUNDED 版本 3：WHERE ver 小于 3 不成立，也是 0 行。所以覆盖型事件加了版本号，乱序和重复都不用管。但累加型不行：积分服务如果先收到 REFUNDED 减 798，再收到 PAID 加 798，用版本号会把 PAID 丢掉，积分就少了 798。">
+  <rect x="20" y="20" width="230" height="70" rx="10" class="b-pd"/>
+  <text x="135" y="44" text-anchor="middle" class="t-s">order_view：9527</text>
+  <text x="135" y="66" text-anchor="middle" class="t-s t-b">REFUNDED · ver 3</text>
+  <text x="135" y="82" text-anchor="middle" class="t-xs">（已经是最新）</text>
+  <rect x="300" y="20" width="200" height="30" rx="5" class="b-rn"/>
+  <text x="400" y="40" text-anchor="middle" class="t-xs">迟到：SHIPPED · ver 2</text>
+  <rect x="300" y="60" width="200" height="30" rx="5" class="b-rn"/>
+  <text x="400" y="80" text-anchor="middle" class="t-xs">重复：REFUNDED · ver 3</text>
+  <path d="M500,35 L540,35" class="e-g2" marker-end="url(#ah-g2)"/>
+  <path d="M500,75 L540,75" class="e-g2" marker-end="url(#ah-g2)"/>
+  <text x="550" y="40" class="t-xs t-mono">UPDATE … WHERE id=9527 AND ver &lt; 2  → 0 行</text>
+  <text x="550" y="80" class="t-xs t-mono">UPDATE … WHERE id=9527 AND ver &lt; 3  → 0 行</text>
+  <text x="550" y="104" class="t-xs t-good">两条都当旧事件丢掉，状态不倒退</text>
+
+  <path d="M20,130 L940,130" class="e-mut" stroke-dasharray="4 4"/>
+  <rect x="20" y="146" width="230" height="70" rx="10" class="b-pd"/>
+  <text x="135" y="170" text-anchor="middle" class="t-s">积分流水：订单 9527</text>
+  <text x="135" y="192" text-anchor="middle" class="t-s t-b">−798 · ver 3</text>
+  <text x="135" y="208" text-anchor="middle" class="t-xs">退款事件先到了</text>
+  <rect x="300" y="166" width="200" height="30" rx="5" class="b-rn"/>
+  <text x="400" y="186" text-anchor="middle" class="t-xs">后到：PAID +798 · ver 1</text>
+  <path d="M500,181 L540,181" class="e-bad" marker-end="url(#ah-bad)"/>
+  <text x="550" y="176" class="t-xs t-mono">ver 1 &lt; 3 → 当旧事件丢掉</text>
+  <text x="550" y="198" class="t-xs t-bad">积分净值 −798，应为 0：累加型丢一条就错一条</text>
+  <text x="20" y="240" class="t-xs">分界线：覆盖型事件“最后一条说了算”，丢掉旧的没损失；累加型事件每一条都要算上，只能去重，不能丢。</text>
+</svg>
+  </div>
+  <figcaption>版本号从哪来：订单表本来就有的 <code>version</code> 列（乐观锁），或者订单服务写 outbox 时按订单递增的事件序号。不要用消息的 offset 或者发送时间：offset 换了分区就不能比，各台机器的时钟也对不齐。</figcaption>
+  </figure>
+
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th></th><th>怕重复吗</th><th>怕乱序吗</th><th>怎么办</th></tr></thead>
+    <tbody>
+      <tr><td><b>覆盖型</b>：状态改成 X、库存改成 N、ES 文档整篇覆盖</td><td>重复的若是最新那条，不怕；重放出来的是旧的，就怕</td><td>怕</td><td>版本号守卫，一招两用；之后随便并行</td></tr>
+      <tr><td><b>累加型</b>：积分 +798、库存 −2、发一条短信</td><td>怕</td><td>多数不怕：加减可以交换先后（中途可能出现负数）</td><td>去重表或业务唯一键，和业务改动同一个事务；要保序就按 key 分车道</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>最少的写法</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">消费端三件套</span><span>MySQL 语法；⑤ 里用 H2 的 MySQL 模式跑</span></div>
+<pre><code><span class="cm">-- 累加型：去重表和加积分在同一个事务里，先插去重表</span>
+<span class="kw">CREATE TABLE</span> consumed_event(event_id <span class="kw">VARCHAR</span>(64) <span class="kw">PRIMARY KEY</span>, at <span class="kw">TIMESTAMP</span>);
+<span class="kw">BEGIN</span>;
+<span class="kw">INSERT INTO</span> consumed_event <span class="kw">VALUES</span>(<span class="s">'evt-9527-paid'</span>, NOW());   <span class="cm">-- 1062 撞键 → ROLLBACK，当处理过</span>
+<span class="kw">UPDATE</span> points <span class="kw">SET</span> total = total + 798 <span class="kw">WHERE</span> user_id = 1024;
+<span class="kw">COMMIT</span>;                                                        <span class="cm">-- 然后才 commitSync()</span>
+
+<span class="cm">-- 覆盖型：版本号守卫，0 行 = 旧事件或重复</span>
+<span class="kw">UPDATE</span> order_view <span class="kw">SET</span> status = <span class="s">'REFUNDED'</span>, ver = 3 <span class="kw">WHERE</span> id = 9527 <span class="kw">AND</span> ver &lt; 3;</code></pre>
+<pre><code><span class="cm">// 要并行又要按订单有序：按 key 分车道，同一个订单永远进同一条单线程车道</span>
+ExecutorService[] lanes = <span class="kw">new</span> ExecutorService[8];          <span class="cm">// 每条都是 newSingleThreadExecutor()</span>
+<span class="kw">for</span> (ConsumerRecord&lt;String, String&gt; r : consumer.poll(Duration.ofMillis(200)))
+    lanes[Math.floorMod(r.key().hashCode(), 8)].execute(() -&gt; handle(r));</code></pre>
+  </div>
+  <p class="cap">车道之后，位点怎么提交才不会把没处理完的也提交掉，放到 <a href="#deep">⑥ 第三圈</a>；去重表要留多久、怎么清，放到 <a href="#rules">⑥ 第二圈</a>。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>套进场景：交易靶场里的积分服务和订单视图服务</h2>
+    <p class="lead">两段实验。<code>dup</code> 是全景第 8 站的积分服务：处理完、提交位点前崩溃，四种写法各跑一次。<code>order</code> 是一个订单视图服务（把订单最新状态同步到查询库，相当于第 8 站的第四个下游）：1000 单 × 3 条事件，按第 <i>t</i> 轮发“订单 <i>t</i> 的 PAID、订单 <i>t</i>−1 的 SHIPPED、订单 <i>t</i>−2 的 REFUNDED”这样交错发出，五种消费写法各跑一次。</p>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">跑起来</span><span>Kafka 4.4.0 单节点（KRaft，broker 和 controller 同一进程）+ kafka-clients 4.4.0 + H2 2.4.240，JDK 17；<a href="https://github.com/archeu/study-labs/tree/main/java/kafka/kafka-idempotent-ordering">完整代码 →</a></span></div>
+<pre><code><span class="cm"># study-labs/java/kafka/kafka-idempotent-ordering</span>
+./run.sh                 <span class="cm"># 下载并起 Kafka，dup 四种 + order 五种全跑</span>
+./run.sh dup split       <span class="cm"># 只跑一种：dup none|split|same|offset，order seq|nokey|pool|lanes|guard</span>
+./run.sh clean           <span class="cm"># 停掉 Kafka，删 data/</span></code></pre>
+<pre><code><span class="cm">// dup 的骨架：实例 1 处理完就“崩溃”（关掉消费者、不提交位点），同组实例 2 接手</span>
+<span class="kw">for</span> (<span class="kw">int</span> inst = 1; inst &lt;= 2; inst++) {
+    KafkaConsumer&lt;String, String&gt; c = consumer(<span class="s">"points-svc"</span>);    <span class="cm">// enable.auto.commit=false</span>
+    ConsumerRecord&lt;String, String&gt; rec = pollOne(c);
+    handle(strategy, rec, <span class="cm">/*crash=*/</span> inst == 1);                  <span class="cm">// none / split / same / offset</span>
+    <span class="kw">if</span> (inst == 2 &amp;&amp; !strategy.equals(<span class="s">"offset"</span>)) c.commitSync();
+    c.close();
+}</code></pre>
+  </div>
+  <div class="codebox console" style="margin-top:12px">
+    <div class="code-bar"><span class="n">实测输出</span><span>本机 2 核 ARM，JDK 17.0.21，Kafka 和测试程序同机；order 段跑了两遍</span></div>
+<pre><code><b>== dup/none</b>
+   实例 1 收到 evt-9527-paid（分区 3 offset 0）：加 798 分，崩溃，积分 +798，去重表 0 行
+   实例 2 收到 evt-9527-paid（分区 3 offset 0）：又加 798 分，积分 <span class="r">+1596</span>
+<b>== dup/split</b>   <span class="w">去重表一个事务，加积分另一个事务</span>
+   实例 1 收到 …：去重表写好了，加积分前崩溃，积分 +0，去重表 1 行
+   实例 2 收到 …：去重表里已有，跳过，积分 <span class="r">+0</span>
+<b>== dup/same</b>    <span class="w">同一个事务</span>
+   实例 1 收到 …：去重 + 加 798 分一起提交，然后崩溃，积分 +798，去重表 1 行
+   实例 2 收到 …：撞唯一键，回滚，跳过，积分 <b>+798</b>
+<b>== dup/offset</b>  <span class="w">位点和积分存在同一个库</span>
+   实例 1 收到 …：加 798 分 + 位点 1 一起提交，然后崩溃，积分 +798
+   实例 2：8 秒内没收到消息（位点在库里，已经越过这条），积分 <b>+798</b>
+<b>== order/seq  </b> 用时 2878 / 2869 ms；新状态被旧事件盖掉    0 次；最终不是 REFUNDED   0 单
+<b>== order/nokey</b> 用时 2869 / 2877 ms；新状态被旧事件盖掉    5 次；最终不是 REFUNDED   <span class="r">5</span> 单
+<b>== order/pool </b> 用时  593 /  584 ms；新状态被旧事件盖掉 751/760 次；最终不是 REFUNDED <span class="r">487</span> 单
+<b>== order/lanes</b> 用时  588 /  598 ms；新状态被旧事件盖掉    0 次；最终不是 REFUNDED   <b>0</b> 单
+<b>== order/guard</b> 用时  577 /  571 ms；新状态被旧事件盖掉    0 次；最终不是 REFUNDED   <b>0</b> 单；当旧事件丢掉 851 / 845 条</code></pre>
+  </div>
+  <div class="tbl-wrap" style="margin-top:12px"><table class="cmp">
+    <thead><tr><th>看到了什么</th><th>对应的原理</th></tr></thead>
+    <tbody>
+      <tr><td><code>split</code> 比不去重还糟：一分都没加，而且不报错</td><td><a href="#twosys">④ 两个系统</a>：去重表和积分又成了“两个地方”，只是这回两个地方都在 MySQL 里</td></tr>
+      <tr><td><code>offset</code> 根本没有重投：实例 2 从库里读到位置 1，<code>seek</code> 过去，没东西可读</td><td><a href="#twosys">④ 位点存业务库</a>：Kafka 那边的位点一直没提交过，真实进度只在 MySQL 里</td></tr>
+      <tr><td><code>lanes</code> 和 <code>pool</code> 一样快（约 0.59 s，一条条处理的 1/5），却一单都没错</td><td><a href="#order">④ 一条处理线</a>：并行的单位从“每条消息”换成了“每个订单”</td></tr>
+      <tr><td><code>guard</code> 也全对，代价是 845～851 条事件被当成旧的丢掉</td><td><a href="#vguard">④ 版本号</a>：迟到的 SHIPPED 要是带着“发货短信”这种动作，这个动作就没了</td></tr>
+    </tbody>
+  </table></div>
+  <p class="done-box"><b>到这里已经能交差了</b>：积分服务用“去重表 + 同一个事务”，订单视图用“按 key 分区 + 版本号守卫”，处理完再 <code>commitSync()</code>。已知还没处理的细节：车道模式下位点怎么提交（<a href="#deep">⑥ 第三圈</a>）；去重表留多久（<a href="#rules">⑥ 第二圈</a>）；eventId 是谁生成的（<a href="#p4">⑥-4</a>）；加分区那一刻（<a href="#p5">⑥-5</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="g2">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>反例和误用</h2>
+  </div>
+
+  <h3 id="lab-h">实验台：1000 单，换一种写法会错几单</h3>
+  <p>前提和 ⑤ 一样：1000 单 × 3 条事件交错着发，6 个分区，消费端 8 个线程或 8 条车道，每条处理 0.2～1.5 ms。“处理到一半被杀”指处理完约 55% 时进程被杀，位点每处理完 500 条才提交一次，3 秒后同组新实例从提交的位置接着读。先猜，再看。</p>
+  <div class="lab" id="lab" data-role="g2">
+    <div class="ctl-grid">
+      <div class="ctl"><span class="lbl">发送端</span>
+        <select id="c-send"><option value="key" selected>key = 订单号</option><option value="nokey">不填 key</option><option value="grow">key = 订单号，发到一半分区 6 → 12</option></select></div>
+      <div class="ctl"><span class="lbl">业务</span>
+        <select id="c-biz"><option value="state" selected>改订单状态（覆盖型）</option><option value="points">记积分：PAID +798、REFUNDED −798（累加型）</option></select></div>
+      <div class="ctl"><span class="lbl">消费端</span>
+        <select id="c-cons"><option value="seq">一条条处理</option><option value="pool" selected>丢进 8 线程的池子</option><option value="lanes">按订单号分 8 条车道</option><option value="guard">池子 + 版本号守卫</option></select></div>
+      <div class="ctl"><span class="lbl">去重</span>
+        <select id="c-dd"><option value="none" selected>不去重</option><option value="split">去重表，和业务分两个事务</option><option value="same">去重表，和业务同一个事务</option></select></div>
+      <div class="ctl"><span class="lbl">故障</span>
+        <select id="c-crash"><option value="0" selected>不出事</option><option value="1">处理到一半，进程被杀</option></select></div>
+    </div>
+    <div class="guess" id="guess">
+      <p><b>先猜：</b>1000 单里，最后错几单？（改状态：最终不是“已退款”；记积分：某一笔多记或漏记）</p>
+      <div class="opts">
+        <button type="button" data-g="0">0 单</button>
+        <button type="button" data-g="few">个位数</button>
+        <button type="button" data-g="tens">几十单</button>
+        <button type="button" data-g="hundreds">几百单</button>
+        <button type="button" data-g="skip" class="skip">不猜了，直接看</button>
+      </div>
+      <p class="res" id="g-res" hidden></p>
+    </div>
+    <div id="out" hidden>
+      <div class="res-grid" id="tiles">
+        <div class="tile" data-role="bad"><small>错的订单</small><b id="t-wrong"></b></div>
+        <div class="tile" data-role="of"><small>同一条生效两次</small><b id="t-dup"></b></div>
+        <div class="tile" data-role="rn"><small>新状态被旧事件盖掉</small><b id="t-back"></b></div>
+        <div class="tile" data-role="g2"><small>当旧事件丢掉</small><b id="t-stale"></b></div>
+        <div class="tile" data-role="pd"><small>去重表有、业务没做</small><b id="t-lost"></b></div>
+        <div class="tile" data-role="cg"><small>处理用时（模拟）</small><b id="t-ms"></b></div>
+      </div>
+      <div class="lab-res" id="verdict" style="margin-top:12px"></div>
+    </div>
+  </div>
+  <p class="cap">模拟逻辑按 ⑤ 的发送顺序和处理时间来排程，不是真跑 Kafka。和实测对得上的几组：线程池 528 单错（实测 487）、车道 0 单、版本号 0 单（丢掉 906 条，实测 845～851）；不填 key 的模拟是 14 单，实测是 5 单，这个数取决于一批正好装多少条，只看数量级。</p>
+
+  <h3>第一圈 · 注意事项：不知道就会出事故</h3>
+  <div class="pits">
+    <div class="pit" id="p1"><b><em>1</em>以为生产端配好了，消费端就不会重复<a class="root" href="#twosys">← ④ 两个系统</a></b>
+      <dl><dt>现象</dt><dd>开了 <code>acks=all</code>、幂等生产者，代码评审时认为“Kafka 保证不重复”，消费端没做去重。一次发布滚动重启，积分多发了一批。</dd>
+      <dt>根源</dt><dd>幂等生产者只让 broker 丢掉同一个生产者会话重发的批次，管的是“日志里有几份”。消费端的重复来自“业务结果已经提交、位点还没提交”，发生在 Kafka 之外。</dd>
+      <dt>做法</dt><dd class="fix">把“消费端幂等”写进每个消费者的默认模板；评审时专门问一句：这里处理两次会怎样。</dd></dl></div>
+    <div class="pit" id="p2"><b><em>2</em>去重写成“先查有没有，没有再插”<a class="root" href="#twosys">← ④ 同一个事务</a></b>
+      <dl><dt>现象</dt><dd>平时没事，一到重平衡就偶尔重复：两个实例都查到“没处理过”，都处理了一遍。</dd>
+      <dt>根源</dt><dd>“查”和“插”之间有空档。重平衡时，旧实例可能还在处理（比如处理超时被踢出了组，但线程还在跑），新实例已经拿到了同一个分区，两边同时查。只有唯一键能把两者排成先后。</dd>
+      <dt>做法</dt><dd class="fix">直接 <code>INSERT</code>，靠唯一键冲突判断；和业务改动放在同一个事务里，而且先插去重表，后改业务，撞键时什么都还没做。</dd></dl></div>
+    <div class="pit" id="p3"><b><em>3</em>丢进线程池提速，顺序和位点一起坏<a class="root" href="#order">← ④ 一条处理线</a></b>
+      <dl><dt>现象</dt><dd>积压时给消费者加了线程池，LAG 降下来了，订单视图里却出现“已退款的单显示已发货”。<span class="seen">⑤ 实测 487/1000</span></dd>
+      <dt>根源</dt><dd>并行的单位成了“每条消息”，同一个订单的三条落到不同线程，谁先做完谁先生效。另外 <code>poll()</code> 线程会接着往前提交位点，还没处理完的也被提交了，进程一崩，这批就丢了（全景第 9 站讲过）。</dd>
+      <dt>做法</dt><dd class="fix">按 key 分车道；位点只提交“连续处理完”的那一段，见 <a href="#deep">第三圈</a>。覆盖型事件也可以改用版本号守卫。</dd></dl></div>
+    <div class="pit" id="p4"><b><em>4</em>eventId 在发送时才生成<a class="root" href="#twosys">← ④ 去重靠的那个键</a></b>
+      <dl><dt>现象</dt><dd>去重表一直在写，重复照样发生。</dd>
+      <dt>根源</dt><dd>eventId 是投递线程每次 <code>send()</code> 前 <code>UUID.randomUUID()</code> 出来的。outbox 重发同一行时生成了新 ID，下游看来就是两件不同的事。用 offset 当去重键也一样：同一个事件被重发，会落在新的 offset 上。</dd>
+      <dt>做法</dt><dd class="fix">eventId 在写 outbox 那一刻生成，和业务一起落库，之后原样带到底：消息体、header，再到下游调用的第三方。</dd></dl></div>
+    <div class="pit" id="p5"><b><em>5</em>给 topic 加分区，在途订单乱一阵<a class="root" href="#order">← ④ 分区器</a></b>
+      <dl><dt>现象</dt><dd>大促前把 <code>order-events</code> 从 6 个分区加到 12 个，当天少数订单的状态倒退了。</dd>
+      <dt>根源</dt><dd><code>murmur2(key) % 6</code> 变成了 <code>% 12</code>，加分区之后的事件可能进新分区；同一个订单前后两条分属两个分区，两个分区之间没有先后。只影响加分区那一刻正“在路上”的订单，所以数量少、很难复现。</dd>
+      <dt>做法</dt><dd class="fix">分区数一开始按峰值定；非加不可，就挑低峰、先停发或者等积压清零再加；覆盖型事件用版本号兜底。</dd></dl></div>
+    <div class="pit" id="p6"><b><em>6</em>版本号守卫用在累加型事件上<a class="root" href="#vguard">← ④ 覆盖型和累加型</a></b>
+      <dl><dt>现象</dt><dd>积分服务照搬订单视图的“只认更新的版本”，退款先到、付款后到的那些单，付款的 +798 被丢掉了。</dd>
+      <dt>根源</dt><dd>版本号守卫的前提是“最后一条说了算”。累加型每一条都要算，丢掉旧的就是少算一笔。实验台选“记积分 + 池子 + 版本号守卫”，约一半订单记错。</dd>
+      <dt>做法</dt><dd class="fix">累加型用去重表或业务唯一键；真要保序，按 key 分车道。</dd></dl></div>
+    <div class="pit" id="p7"><b><em>7</em>处理失败的消息丢进重试 topic<a class="root" href="#order">← ④ 一条处理线</a></b>
+      <dl><dt>现象</dt><dd>PAID 处理时数据库抖了一下，被转进重试 topic；SHIPPED、REFUNDED 照常处理完，几秒后 PAID 从重试 topic 回来，把状态改回“已支付”。</dd>
+      <dt>根源</dt><dd>重试 topic 是另一条管子，它里面的消息和原分区之间没有先后。反过来，原地阻塞重试能保住顺序，代价是整个分区都停下来等它。</dd>
+      <dt>做法</dt><dd class="fix">覆盖型：转去重试也没关系，靠版本号挡住迟到的旧事件。累加型、要保序：原地有限次重试；还不行就把这个订单的后续事件也暂存起来，或者人工处理。</dd></dl></div>
+    <div class="pit" id="p8"><b><em>8</em>外部调用放进了“同一个事务”<a class="root" href="#twosys">← ④ 两个系统</a></b>
+      <dl><dt>现象</dt><dd>通知服务把“插去重表 + 调短信接口”包在一个 <code>@Transactional</code> 里，短信接口超时，事务回滚，重投以后又发了一条，用户收到两条短信。</dd>
+      <dt>根源</dt><dd>短信平台是第三个系统，回滚不了已经发出去的短信。本地事务只管得住本地库里的东西。</dd>
+      <dt>做法</dt><dd class="fix">把 eventId 作为幂等键传给短信平台；平台不支持，就先在本地记“待发送”，由一个发送任务按 eventId 去重地发。</dd></dl></div>
+  </div>
+
+  <h3 id="rules">第二圈 · 使用规范</h3>
+  <div class="rules-list">
+    <div class="rl"><b>eventId 在写 outbox 时生成，一路带到底</b><p>消息体和 header 各放一份，下游调第三方时也带上。防的是 ⑥-4。</p></div>
+    <div class="rl"><b>去重靠唯一键插入，和业务同一个本地事务，先插后改</b><p>防的是 ⑤ 的 split 和 ⑥-2。</p></div>
+    <div class="rl"><b>去重表按天分区或定期删，保留期大于最长的重投窗口</b><p>重投最远能回到多久以前，取决于 topic 的保留期（默认 7 天）和你会不会手动重置位点回放。保留期内的记录不能删，删了，回放时就会重复生效。</p></div>
+    <div class="rl"><b>key 用“需要保序的那个东西”的 ID</b><p>订单事件用订单号，账户流水用账户号。用户 ID 能保序，但大客户会成为热点分区；不填 key 就不保序。防的是 ② 的第三种。</p></div>
+    <div class="rl"><b>同一个订单的事件，从同一个地方发出</b><p>支付服务和物流服务各发各的，就没有“发出顺序”可言。都经过订单服务的 outbox，或者每条带上订单版本号。</p></div>
+    <div class="rl"><b>覆盖型事件带版本号，消费端条件更新</b><p>版本号用订单表的 <code>version</code> 列或 outbox 里按订单递增的序号，不用 offset 和时间戳。防的是 ⑥-5、⑥-7。</p></div>
+    <div class="rl"><b>要并行，按 key 分车道，不按条丢进池子</b><p>车道数可以超过分区数。防的是 ⑥-3。</p></div>
+    <div class="rl"><b>“处理两次会怎样”写进消费者的评审清单</b><p>每个新消费者上线前，在测试环境里杀一次进程看结果，就是 ⑤ 的 dup 段。防的是 ⑥-1。</p></div>
+  </div>
+
+  <h3 id="deep">第三圈 · 深处：车道下的位点、位点存哪、Share Group、Kafka 事务</h3>
+  <div class="rules-list">
+    <div class="rl"><b>车道模式下，位点只能提交“连续完成”的前缀</b><p>分区 3 的 offset 10、11、12 分到三条车道，12 先做完，不能提交 13：要是 10 还没做完进程就崩了，10 就丢了。做法是每个分区记下已完成的 offset，只提交从头开始连续完成的最大 offset + 1。代价是崩溃后会重做 11、12 这些已经完成的，所以车道模式下去重仍然要做。Confluent 的开源库 Parallel Consumer 就是按这个思路实现的，支持按分区、按 key、不保序三种模式。</p></div>
+    <div class="rl"><b>位点存业务库，要接上重平衡</b><p>KafkaConsumer 的 javadoc 有专门一节“把位点存在 Kafka 之外”：订阅时传一个 <code>ConsumerRebalanceListener</code>，在 <code>onPartitionsAssigned</code> 里从库里读位置、<code>seek</code> 过去，<a href="#s5">⑤</a> 的 offset 写法就是这么做的。Kafka 那边看不到进度，<code>kafka-consumer-groups.sh</code> 里 LAG 会一直很大；想要监控，就在本地事务提交之后，再把同样的位点异步提交给 Kafka 一份，只给监控看。</p></div>
+    <div class="rl"><b>Share Group：用顺序换并行（Kafka 4.2 起正式可用）</b><p>KIP-932 的“Kafka 队列”：一个分区可以同时分给多个消费者，消费者数可以超过分区数，按条确认，broker 记着每条投递了几次。4.2 的升级说明原话是：用于“一条条处理，而不是作为有序的流”。它适合 notify-svc 这种每条独立、不在乎先后的下游，不适合订单视图。投递仍然是至少一次，幂等照样要做。</p></div>
+    <div class="rl"><b>Kafka 事务管到哪：只到 Kafka 为止</b><p>读 Kafka、写 Kafka 的流处理里，生产者开事务，用 <code>sendOffsetsToTransaction</code> 把“输出消息”和“消费位点”放进同一个事务，下游用 <code>isolation.level=read_committed</code> 只读已提交的。原理和 <a href="#twosys">④</a> 一样：把两件事搬到同一个地方，只不过这个地方是 Kafka。下游是 MySQL 时，这个事务就管不到了。</p></div>
+  </div>
+  <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>版本</th><th>和这一页有关的变化</th></tr></thead>
+      <tbody>
+        <tr><td>0.11</td><td>幂等生产者和事务（producerId + 序号）；设计文档从此区分至少一次和恰好一次</td></tr>
+        <tr><td>2.4</td><td>不填 key 时改成粘性分区（KIP-480）：一批写满再换分区，不再一条一个分区轮转；3.3 起改进为按 broker 负载自适应（KIP-794）</td></tr>
+        <tr><td>3.0</td><td>生产者默认 <code>acks=all</code>、<code>enable.idempotence=true</code>；幂等开着时，<code>max.in.flight.requests.per.connection</code> 取允许范围内的任何值（≤ 5）都保序</td></tr>
+        <tr><td>4.1 / 4.2</td><td>Share Group 在 4.1 预览，4.2 宣布可用于生产（KIP-932）；4.4 加了 Share Group 的死信队列（KIP-1191）</td></tr>
+        <tr><td>4.4.0</td><td>本页实测版本；分区内有序、组内一个分区一个实例的规则和以前一样</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <h3>这一层没有尽头</h3>
+  <ul class="next">
+    <li>RocketMQ 的顺序消息和事务消息：发送时选队列、消费时锁队列；半消息 + 回查（J08 下钻的下一页）</li>
+    <li>Parallel Consumer 源码：未完成的稀疏 offset 怎么记进提交的元数据</li>
+    <li>Kafka Streams 的 exactly-once：事务协调器、事务标记、<code>read_committed</code> 怎么跳过中止的消息</li>
+    <li>积压 100 万条时的重平衡：一次重平衡会重投多少条，怎么用协作式重平衡、新消费组协议（KIP-848）减少重投</li>
+    <li>J09 接口幂等：同样的唯一键、状态机、去重表，用在 HTTP 重试和支付回调上</li>
+    <li>Share Group 实测：把 notify-svc 改成队列语义，看并发度、投递次数和死信</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到第⑤步：改一改交易靶场</h2>
+  </div>
+  <ol class="ex">
+    <li><b>加分区（⑥-5）</b>：给 <code>order</code> 段加一个 <code>grow</code> 模式，发到一半用 <code>Admin.createPartitions</code> 把分区从 6 加到 12，消费端一条条处理。先猜错几单，再跑；然后加上版本号守卫再跑一次。</li>
+    <li><b>车道下的位点（⑥ 第三圈第一条）</b>：在 <code>lanes</code> 模式里实现“只提交连续完成的前缀”，处理到一半 <code>kill -9</code>，数一数新实例重做了多少条；再把积分换成去重表，确认重做的那些没有多加分。</li>
+    <li><b>版本号用错地方（⑥-6）</b>：把 <code>guard</code> 的逻辑搬到积分上（PAID +798、REFUNDED −798），猜积分净值不为 0 的订单有多少，再跑。</li>
+  </ol>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>Kafka 只给“至少一次”和“分区内有序”。只生效一次，靠把“处理过了”或“读到哪了”和业务结果写进同一个本地事务；按顺序生效，靠同一个 key 只有一条处理线；覆盖型事件带上版本号，两件事一起管住。</p></details>
+    <details><summary>2. 老办法（不去重、按条并行）疼在哪？</summary><p>不去重：每次重平衡、重启都会把上次提交之后的那一批再生效一遍，⑤ 实测积分 1596。按条并行：同一个订单的事件被不同线程处理，谁先做完谁先生效，⑤ 实测 1000 单错 487 单。根子都在 ④：结果和位点不在一个事务里；顺序只活在一条处理线上。</p></details>
+    <details><summary>3. 为什么 Kafka 自己不做消费端去重？</summary><p>④ 两个系统：消费的结果写在你的 MySQL 里，位点写在 Kafka 里，Kafka 看不到你的事务，没法把这两件事做成原子的。它能做的只有两种：把位点也存进你的库（Kafka 文档推荐的写法），或者两边都在 Kafka 里（Kafka 事务）。前者要你来做，后者只适合输出也是 Kafka 的场景。</p></details>
+    <details><summary>4. 预测：积分服务用了“去重表 + 同一个事务”，但把 commitSync 改成在处理之前调。进程在处理途中被杀，会怎样？</summary><p>这条丢了，去重表救不了。位点先提交，就是 ④ 图里的“先提交位点，再处理”，至多一次；新实例从下一条开始读，这条再也不会来。去重表只挡得住“来了两次”，挡不住“一次都没来”。</p></details>
+    <details><summary>5. 预测：订单视图用“按 key 分区 + 一条条处理”，没加版本号。消费者在处理到一半时被杀，从上次提交的位置重放。最终状态会错吗？中途呢？</summary><p>最终不会错：重放是按 offset 顺序把那一段从头再做一遍，最后一条还是 REFUNDED。但中途会倒退：已经是 REFUNDED 的单，重放到它的 PAID 时会短暂变回“已支付”，实验台里能看到“新状态被旧事件盖掉”有几十次。如果状态变化会触发动作（推送、发短信），这些动作会重来一遍。④ 里说的“重复本身就是一种乱序”就是这个意思；加上版本号，这些倒退就都被挡住了。</p></details>
+    <details><summary>6. 放回全景：第 8 站前后各发生了什么？这一页讲的东西坏了，整条链路会怎样？</summary><p>第 8 站之前：第 7 站三个组各自拉到这条消息，消息只有一份，三个组各有自己的位点。之后：第 9 站处理完才提交位点，第 10 站的心跳和重平衡决定这个分区接下来归谁。去重坏了：第 10 站每次重平衡、每次发布，都会让第 8 站多生效一批，积分多发、库存多扣、短信多发，而且 Kafka 这边一切正常，LAG 也是 0。顺序坏了，根子往往在第 2 站（key 不对、加了分区）或第 8 站自己（线程池、重试 topic）：已退款的单显示已发货，库存被重复扣减或释放。第 1 站 outbox 的重发、第 6 站 ACK 丢失后的重试，最终也都要靠第 8 站的去重来挡。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。Kafka 4.4.0 单节点（KRaft，broker 和 controller 同一进程，<code>group.initial.rebalance.delay.ms=0</code>），kafka-clients 4.4.0、H2 2.4.240（MySQL 模式），JDK 17.0.21，本机 2 核 ARM。Kafka 4 的客户端要求 Java 11 以上，所以这一页的代码按 JDK 17 编译，没有按 JDK 8 写。</p>
+  <p>标“实测”的都在本机跑过：<code>dup</code> 四种写法；<code>order</code> 五种写法各跑两遍。实验台是按 ⑤ 的发送顺序和处理时间写的模拟，在 node 里校过。“让消费者把位点和输出存在同一个地方”、恰好一次只覆盖 Kafka 到 Kafka，出自 4.4.0 发行包里的设计文档（Message Delivery Semantics 一节）；Share Group 的状态和原话出自 4.4.0 的升级说明；幂等生产者在途请求数和顺序的关系出自 4.4.0 的生产者配置文档。</p>
+  <p>相关：<a href="../java/pano-j08-order-event-life.html">全景：一条订单消息的一生</a> · <a href="kafka-reliability-group.html">Kafka 可靠性与消费组</a> · <a href="kafka-storage-zerocopy.html">Kafka 存储与零拷贝</a> · <a href="../redis/redis-stream-mq.html">Redis Stream 与消息队列选型</a> · <a href="../spring/spring-events.html">Spring 事件（事务提交后再发）</a> · <a href="../java/roadmap.html#j08">Java 地图 J08</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+function mkRng(seed){ var s = seed >>> 0; return function(){ s = (s + 0x6D2B79F5) >>> 0; var t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+// o: send 'key'|'nokey'|'grow'  biz 'state'|'points'  cons 'seq'|'pool'|'lanes'|'guard'  dedupe 'none'|'split'|'same'  crash bool
+function simulate(o){
+  var N = o.orders || 1000, W = 8, rnd = mkRng(o.seed || 42), BATCH = 500, CHUNK = 200, COMMIT = 500;
+  // 1. 发送顺序：第 t 轮发 订单 t 的 PAID(1)、t-1 的 SHIPPED(2)、t-2 的 REFUNDED(3)
+  var ev = [];
+  for (var t = 0; t < N + 2; t++) for (var v = 1; v <= 3; v++) { var id = t - (v - 1); if (id >= 0 && id < N) ev.push({id: id, v: v}); }
+  var M = ev.length;
+  // 2. 分区
+  function h(id, p){ return (Math.imul(id + 9527, 2654435761) >>> 0) % p; }
+  var parts = {};
+  ev.forEach(function(e, i){
+    var p;
+    if (o.send === 'nokey') p = Math.floor(i / BATCH) % 6;                 // 粘性分区：一批写满换下一个分区
+    else if (o.send === 'grow') p = i < M / 2 ? h(e.id, 6) : h(e.id, 12);  // 发到一半，分区从 6 加到 12
+    else p = h(e.id, 6);
+    (parts[p] = parts[p] || []).push(e);
+  });
+  // 3. 消费顺序：轮流从每个分区取一段（每段最多 CHUNK 条）
+  var keys = Object.keys(parts).map(Number).sort(function(a, b){ return a - b; });
+  var pos = {}, order = [], left = M;
+  keys.forEach(function(k){ pos[k] = 0; });
+  while (left > 0) keys.forEach(function(k){
+    var q = parts[k], n = Math.min(CHUNK, q.length - pos[k]);
+    for (var j = 0; j < n; j++) { order.push(q[pos[k] + j]); left--; }
+    pos[k] += n;
+  });
+  // 4. 排程：每条 0.2～1.5 ms
+  function schedule(recs, t0){
+    var free = [], out = [];
+    for (var w = 0; w < W; w++) free.push(t0);
+    var last = t0;
+    recs.forEach(function(e, idx){
+      var work = 0.2 + rnd() * 1.3, st;
+      if (o.cons === 'seq') { st = last; last = st + work; out.push({e: e, idx: idx, s: st, f: last}); return; }
+      var w;
+      if (o.cons === 'lanes') w = e.id % W;
+      else { w = 0; for (var k = 1; k < W; k++) if (free[k] < free[w]) w = k; }
+      st = free[w]; free[w] = st + work; out.push({e: e, idx: idx, s: st, f: free[w]});
+    });
+    return out;
+  }
+  var first = schedule(order, 0), runs = [], crashAt = Infinity, committed = M;
+  if (o.crash) {
+    var fs = first.map(function(r){ return r.f; }).sort(function(a, b){ return a - b; });
+    crashAt = fs[Math.floor(M * 0.55)];                                     // 处理到一半多一点，进程被杀
+    var prefix = 0; while (prefix < M && first[prefix].f <= crashAt) prefix++; // 连续处理完的前缀
+    committed = Math.floor(prefix / COMMIT) * COMMIT;                        // 每处理完 500 条提交一次位点
+  }
+  var pre = first.filter(function(r){ return r.f <= crashAt; });
+  var inflight = first.filter(function(r){ return r.s <= crashAt && r.f > crashAt; });
+  pre.sort(function(a, b){ return a.f - b.f; });
+  var post = [], endT = o.crash ? 0 : first.reduce(function(m, r){ return Math.max(m, r.f); }, 0);
+  if (o.crash) {
+    post = schedule(order.slice(committed), crashAt + 3000);                 // 3 s 后同组新实例从提交的位置接着读
+    post.sort(function(a, b){ return a.f - b.f; });
+    endT = post.reduce(function(m, r){ return Math.max(m, r.f); }, 0);
+  }
+  // 5. 生效
+  var cur = {}, seen = {}, applied = {}, r = {wrong: 0, dupApplied: 0, stale: 0, lost: 0, backwards: 0, replayed: o.crash ? M - committed : 0, inflight: inflight.length, ms: Math.round(endT)};
+  function apply(e){
+    var key = e.id + ':' + e.v;
+    if (o.dedupe !== 'none') { if (seen[key]) return; seen[key] = 1; }
+    var c = cur[e.id] || 0;
+    if (o.cons === 'guard' && e.v <= c) { r.stale++; return; }
+    if (applied[key]) r.dupApplied++;
+    applied[key] = (applied[key] || 0) + 1;
+    if (e.v < c) r.backwards++;
+    cur[e.id] = e.v;
+  }
+  pre.forEach(function(x){ apply(x.e); });
+  if (o.dedupe === 'split') inflight.forEach(function(x){ var k = x.e.id + ':' + x.e.v; if (!seen[k]) { seen[k] = 1; r.lost++; } });
+  post.forEach(function(x){ apply(x.e); });
+  for (var i = 0; i < N; i++) {
+    // 状态：最终不是 REFUNDED 就错；积分：PAID 的 +798、REFUNDED 的 -798 各该记一笔，多记、漏记都算错
+    if (o.biz === 'points' ? ((applied[i + ':1'] || 0) !== 1 || (applied[i + ':3'] || 0) !== 1) : cur[i] !== 3) r.wrong++;
+  }
+  return r;
+}
+/*SIM-END*/
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var guess = null;
+  function opts(){ return {send: $('c-send').value, biz: $('c-biz').value, cons: $('c-cons').value, dedupe: $('c-dd').value, crash: $('c-crash').value === '1'}; }
+  function bucket(n){ return n === 0 ? '0' : n < 10 ? 'few' : n < 100 ? 'tens' : 'hundreds'; }
+  var bucketName = {'0': '0 单', few: '个位数', tens: '几十单', hundreds: '几百单'};
+  function explain(o, r){
+    var why = [];
+    if (o.biz === 'state') {
+      if (o.cons === 'pool') why.push('同一个订单的三条被不同线程处理，谁先做完谁先生效（④ 一条处理线）。去重管不了这个：每条只生效了一次，只是顺序错了。');
+      if (o.send === 'nokey' && r.backwards) why.push('不填 key：一个订单的事件跨在两批之间，进了两个分区，分区之间没有先后（④ 分区器）。');
+      if (o.send === 'grow' && r.backwards) why.push('加分区那一刻在路上的订单，前后两条进了不同分区（⑥-5）；其余订单不受影响，所以只有零星几单。');
+      if (o.cons === 'guard') why.push('版本号守卫把 ' + r.stale + ' 条迟到或重复的旧事件挡在外面，状态不会倒退（④ 版本号）；代价是这些事件附带的动作也没做。');
+      if (o.cons !== 'guard' && o.cons !== 'pool' && r.backwards && r.wrong === 0) why.push('最终状态都对，但中途有 ' + r.backwards + ' 次倒退：重放的旧事件排在新状态后面又生效了一次（④ 重复本身就是一种乱序）。');
+    } else {
+      if (o.cons === 'guard') why.push('积分是累加型，版本号守卫把后到的旧事件（多半是 PAID +798）当成多余丢掉了，少算一笔就错一笔（⑥-6）。');
+      if (r.dupApplied && o.dedupe === 'none') why.push('崩溃前处理过、位点还没提交的那 ' + (r.dupApplied) + ' 条又生效了一次（④ 两个系统）。');
+      if (r.lost) why.push('去重表和加积分分了两个事务：崩溃时正在处理的 ' + r.lost + ' 条，去重表写了、积分没加，重投时被当成处理过跳掉（⑤ split）。');
+      if (o.cons === 'pool' && r.wrong === 0) why.push('积分的加减可以交换先后，所以池子打乱顺序也不影响积分；但中途余额可能出现负数。');
+    }
+    if (o.crash && o.dedupe === 'same' && r.wrong === 0) why.push('去重表和业务同一个事务：重投的 ' + r.replayed + ' 条里，处理过的都撞了唯一键，没有一条生效两次。');
+    if (!o.crash && o.dedupe !== 'none' && o.biz === 'points' && o.cons !== 'guard') why.push('没出事故时没有重复可挡，去重表只是多写了一次。');
+    if (why.length === 0) why.push(r.wrong === 0 ? '每个订单只有一条处理线，每条也只生效一次。' : '');
+    var head = r.wrong === 0 ? '1000 单全对' : '1000 单里错了 ' + r.wrong + ' 单';
+    head += '，模拟用时约 ' + (r.ms / 1000).toFixed(2) + ' s' + (o.crash ? '（含被杀后等 3 s 新实例接手）' : '') + '。';
+    return '<b>' + head + '</b><ul><li>' + why.filter(Boolean).join('</li><li>') + '</li></ul>';
+  }
+  function run(){
+    var o = opts(), r = simulate(o);
+    $('t-wrong').textContent = r.wrong;
+    $('t-dup').textContent = r.dupApplied;
+    $('t-back').textContent = r.backwards;
+    $('t-stale').textContent = r.stale;
+    $('t-lost').textContent = r.lost;
+    $('t-ms').textContent = (r.ms / 1000).toFixed(2) + ' s';
+    $('verdict').innerHTML = explain(o, r);
+    var gr = $('g-res'), b = bucket(r.wrong);
+    document.querySelectorAll('#guess .opts button').forEach(function(btn){
+      btn.classList.remove('right', 'wrong');
+      if (guess && guess !== 'skip' && btn.dataset.g === guess) btn.classList.add(guess === b ? 'right' : 'wrong');
+    });
+    if (guess && guess !== 'skip') { gr.hidden = false; gr.textContent = (guess === b ? '猜对了：' : '没猜中：') + '实际是 ' + bucketName[b] + '（' + r.wrong + ' 单）。原因见下面。'; }
+    else gr.hidden = true;
+    $('out').hidden = false;
+  }
+  document.querySelectorAll('#guess .opts button').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      guess = btn.dataset.g;
+      document.querySelectorAll('#guess .opts button').forEach(function(x){ x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'); });
+      run();
+    });
+  });
+  ['c-send', 'c-biz', 'c-cons', 'c-dd', 'c-crash'].forEach(function(id){
+    $(id).addEventListener('change', function(){
+      guess = null; $('out').hidden = true; $('g-res').hidden = true;
+      document.querySelectorAll('#guess .opts button').forEach(function(x){ x.setAttribute('aria-pressed', 'false'); x.classList.remove('right', 'wrong'); });
+    });
+  });
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
