@@ -1,0 +1,1233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>88 号的锁有了两个主人：Redis 重启、切主以后丢了什么</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J07 knowledge point 8 "persistence & HA" (second round), station 12 of the J07 panorama, touching 2, 5 and 7. Roles: cg = commands at the Redis entry (station 2-3, LOADING), rn = rebuild lock key (station 5), of = product cache keys (station 7 backfill), g2 = background AOF / RDB / replication (station 12), pd = replica and Sentinel, bk = database (station 6); bad / good / neutral fixed. Interaction: one failure lab (event x persistence x replication -> lock, cache, downtime; guess first). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Redis</span><span aria-hidden="true">/</span><span class="tb-here">88 号的锁有了两个主人</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g2"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">RDB · AOF everysec · 混合持久化 · LOADING · 异步复制 · WAIT · min-replicas-to-write · Sentinel · 主库自动重启 · Redis 8.10.3</p>
+  <h1>88 号的锁有了两个主人：Redis 重启、切主以后丢了什么</h1>
+  <p class="lead">Redis 回给你 <code>OK</code> 的那一刻，这条写只在主库内存里，最多再加上操作系统的页缓存。落盘要等后台线程每秒一次的 <code>fsync</code>，到从库要等异步复制。所以“Redis 挂了”要分三种情况看。进程挂了原地拉起：缓存还在，但要先挨一阵 <code>LOADING</code>。机器挂了切到从库：从库没收到的写就丢了，丢的要是一把锁，两个请求会同时以为自己拿着它。主库不持久化又被自动拉起：从库跟着它被清空。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j07-product-detail-cache.html#s-12">一次商品详情查询 · 第 12 站</a>（牵连第 2、5、7 站）</span><span>地图：<a href="../java/roadmap.html#j07">J07 · 持久化与高可用</a></span><span>第一圈：<a href="redis-persistence.html">RDB 与 AOF</a> · <a href="redis-ha-cluster.html">主从、哨兵与集群</a></span></p>
+  <p class="scene"><b>下一圈</b><span>第一圈讲过 RDB 怎么 fork 拍快照、AOF 的三种刷盘、AOF 重写、混合持久化，以及主从怎么全量和增量同步、哨兵怎么选新主、集群的 16384 个槽，这里都只一两句带过。这一圈只问一个问题：交易靶场的 Redis 挂了以后，第 5 站的锁和第 7 站的缓存还在不在，多久能再读写。数字都来自 Redis 8.10.3 上的实测：20 万个商品（<code>used_memory</code> 163 MB），一主一从。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="g2">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：内存里的东西，进程一停就没了</h2>
+    <p class="lead">全景第 12 站在后台做两件事：把每条写命令（第 5、7、10 站的 <code>SET</code>、<code>DEL</code>）追加进 AOF，每秒 <code>fsync</code> 一次；有从库的话，再把它异步发给从库。这一步要解决的是：Redis 进程或者整台机器没了以后，缓存和锁还能不能接着用，要等多久，以及数据库要多扛多少。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="Redis 挂了以后的三种情况。第一行，进程被杀、原地拉起：开了持久化的话缓存还在，但要先加载文件，163 MB 的实例实测要 0.67 到 1.04 秒，这期间所有 GET 都回 LOADING。第二行，机器宕机、哨兵切到从库：默认要 30 秒才判定主库挂了，这期间写全失败；从库没收到的写会丢，丢的如果是锁，另一个请求也能拿到锁。第三行，主库不持久化又被自动拉起：它带着空数据回来，从库全量同步以后也被清空，实测 5 到 6 秒。">
+  <text x="20" y="26" class="t-h">“Redis 挂了”，分三种</text>
+  <text x="240" y="56" class="t-xs">宕机</text>
+  <path d="M240,62 L240,282" class="e-bad" stroke-dasharray="4 4"/>
+  <text x="20" y="96" class="t-s t-b">进程被杀，原地拉起</text>
+  <rect x="244" y="76" width="64" height="30" rx="5" class="b-neu"/>
+  <text x="276" y="96" text-anchor="middle" class="t-xs">起进程</text>
+  <rect x="308" y="76" width="160" height="30" rx="5" class="b-warn"/>
+  <text x="388" y="96" text-anchor="middle" class="t-xs">LOADING：读写都被拒</text>
+  <rect x="468" y="76" width="200" height="30" rx="5" class="b-good"/>
+  <text x="568" y="96" text-anchor="middle" class="t-xs">缓存和锁都在（AOF）</text>
+  <text x="690" y="88" class="t-xs">163 MB：0.67～1.04 s 后能读</text>
+  <text x="690" y="104" class="t-xs">不持久化：0.26 s 能读，但全空</text>
+  <text x="20" y="166" class="t-s t-b">机器宕机，切到从库</text>
+  <rect x="244" y="146" width="330" height="30" rx="5" class="b-bad"/>
+  <text x="409" y="166" text-anchor="middle" class="t-xs">哨兵等 30 s 才认定主库挂了：写全失败</text>
+  <rect x="574" y="146" width="94" height="30" rx="5" class="b-pd"/>
+  <text x="621" y="166" text-anchor="middle" class="t-xs">从库当主库</text>
+  <text x="690" y="158" class="t-xs">从库没收到的写：丢</text>
+  <text x="690" y="174" class="t-xs t-bad">丢的是锁 → 两个请求都拿到</text>
+  <text x="20" y="236" class="t-s t-b">主库不持久化，被自动拉起</text>
+  <rect x="244" y="216" width="40" height="30" rx="5" class="b-neu"/>
+  <rect x="284" y="216" width="200" height="30" rx="5" class="b-pd"/>
+  <text x="384" y="236" text-anchor="middle" class="t-xs">从库还有数据，照常能读</text>
+  <rect x="484" y="216" width="184" height="30" rx="5" class="b-bad"/>
+  <text x="576" y="236" text-anchor="middle" class="t-xs">全量同步：从库被清空</text>
+  <text x="690" y="228" class="t-xs">实测拉起后 5～6 s</text>
+  <text x="690" y="244" class="t-xs t-bad">主从一起变空</text>
+  <text x="20" y="284" class="t-xs">横轴只示意先后，不按比例。“实测”是本机 Docker 里 Redis 8.10.3 的数字；30 s 是 Sentinel 的 down-after-milliseconds 默认值（按源码）。</text>
+</svg>
+  </div>
+  <figcaption>一个只做缓存的实例，丢数据其实不要紧，能从库里重建；要紧的是两件事：多久能恢复服务，恢复期间数据库要扛多少。和缓存放在一起的锁就不一样了，锁丢了不会报错，只会让两个请求同时去做同一件事。</figcaption>
+  </figure>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：不持久化，或者只有一台</h2>
+    <p class="lead">“它”指的是持久化加从库。两样各缺一样，交易靶场里就是下面两种结局。</p>
+  </div>
+  <div class="two">
+    <div class="card" data-role="bad">
+      <h3>不持久化（<code>save ""</code>、<code>appendonly no</code>）<span class="tag-real">实测</span></h3>
+      <p>20 万个商品，<code>docker stop</code> 再 <code>docker start</code>：0.26 s 后就能回复，<code>GET product:88</code> 回的是 nil，<code>dbsize</code> 是 0。</p>
+      <ul>
+        <li>每个热门商品都要走一遍第 5～7 站：抢锁、查库、回填。第 5 站的锁能保证同一个商品只查一次库，但 20 万个商品就是 20 万次。</li>
+        <li>大促前预热的那一批，要重新预热。</li>
+      </ul>
+      <p class="result">恢复得最快，代价全转给了数据库。</p>
+    </div>
+    <div class="card" data-role="other">
+      <h3>只有一台，没有从库</h3>
+      <p>进程挂了，有人拉起来还好，最多挨一阵 LOADING。整台机器挂了（宿主机宕机、磁盘坏、网络隔离），就没有别人能顶上：</p>
+      <ul>
+        <li>第 2 站 Lettuce 一直重连，商品详情要么报错，要么全部降级查库。</li>
+        <li>机器回来之前，开了 AOF 也用不上：文件在那台机器的盘上。</li>
+      </ul>
+      <p class="result">恢复时间取决于人和机器，按分钟算。</p>
+    </div>
+  </div>
+  <p class="misj"><b>不懂这一点时的典型误用</b>以为“开了 AOF、配了从库，数据就不会丢”，于是把重建锁、库存预扣、限流计数和缓存放在同一个 Redis 里。实际上，回 <code>OK</code> 的时候这条写还没到从库，切主时正好丢的就是最近的那几条。缓存丢了重建就行，锁丢了，两个请求就会一起去改同一份数据。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：四种持久化配置，各停一次再起来</h2>
+    <p class="lead">同一批 20 万个商品（648 字节的 JSON，带 30 分钟 TTL），每种配置写满后 <code>docker stop</code>（SIGTERM，正常关机）再 <code>docker start</code>。一个探针每 2 ms 发一次 <code>GET product:88</code>，记下回了几次 <code>LOADING</code>、什么时候第一次读到。</p>
+  </div>
+  <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>配置</th><th>停机用时</th><th>磁盘上的文件</th><th>加载（日志）</th><th>第一次读到 88 号</th><th>期间 LOADING</th></tr></thead>
+      <tbody>
+        <tr><td>不持久化</td><td>0.22 s</td><td>没有</td><td>—</td><td class="bad">0.26 s，nil</td><td>0 次</td></tr>
+        <tr><td>RDB（默认 <code>save</code>）</td><td class="bad">1.77 s</td><td><code>dump.rdb</code> 129 MB</td><td>0.41 s</td><td>0.67 s</td><td>126 次</td></tr>
+        <tr><td>AOF 纯命令</td><td>0.23 s</td><td><code>base.aof</code> 143 MB</td><td>0.81 s</td><td>1.04 s</td><td>220 次</td></tr>
+        <tr><td>AOF 混合（AOF 的默认）</td><td>0.20 s</td><td><code>base.rdb</code> 129 MB + 空的 <code>incr.aof</code></td><td>0.65 s</td><td>0.95 s</td><td>162 次</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap"><span class="tag-real">实测</span> Redis 8.10.3 容器，本机 2 核 ARM，同样的流程跑了两遍，两遍相差不到 10%。“第一次读到”从 <code>docker start</code> 算起，含容器启动和加载模块的约 0.25 s。三个 AOF 文件都是先 <code>BGREWRITEAOF</code> 合并过的；纯命令那一行要绕开镜像自带的 RediSearch，见 ⑥-6。</p>
+  <div class="two">
+    <div class="card" data-role="cg">
+      <h3>怎么读这张表</h3>
+      <ul>
+        <li><b>RDB 停机慢</b>：配了 <code>save</code>，正常关机时要先同步存一份快照，1.77 s。快照是“最近一次拍的照片”，进程被 <code>kill -9</code> 时，上次快照以后的写都没了。</li>
+        <li><b>AOF 纯命令加载最慢</b>：要把 20 万条 <code>SET</code> 重放一遍，文件也最大。</li>
+        <li><b>混合</b>：底子是 RDB 格式，后面接着追加命令，加载比纯命令快，数据又和 AOF 一样新。同样是 RDB 格式，它比单独的 <code>dump.rdb</code> 还多花 0.2 s 左右，原因这页没追。</li>
+        <li>不管哪种，加载期间读和写都被拒，不是“先返回 nil”。</li>
+      </ul>
+    </div>
+    <div class="card" data-role="done">
+      <h3>选择规则</h3>
+      <ul>
+        <li><b>纯缓存实例</b>：开混合 AOF（<code>appendonly yes</code>，其余默认），重启后不用从头预热；或者干脆不持久化，前提是数据库扛得住一次全量回源。</li>
+        <li><b>放锁、计数的实例</b>：持久化救不了它，切主时丢的是复制没跟上的那一段。能丢就接受，丢不起就别只靠 Redis（⑥-2）。</li>
+        <li>两种实例都要有从库加 Sentinel（或者用集群），否则整机宕机时只能等人。</li>
+      </ul>
+      <p class="result">本页往下讲：一条写回了 OK 以后到底在哪几处，重启时为什么只能回 LOADING，切主时丢的是哪一段。</p>
+    </div>
+  </div>
+</section>
+
+
+<!-- ④ -->
+<section id="s4" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：回了 OK 的写在哪，重启时在忙什么，切主时丢了哪一段</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>write 和 fsync</b>：<code>write()</code> 只是把数据交给操作系统的页缓存，进程死了它还在，机器断电就没了；<code>fsync()</code> 才等磁盘确认落下。一次 <code>fsync</code> 要几百微秒到几毫秒，比 Redis 执行一条命令慢上百倍。</li>
+      <li><b>复制偏移量</b>：主库把每条写命令按顺序追加进复制流，每个字节有一个编号（<code>master_repl_offset</code>）。从库每秒回一次 <code>REPLCONF ACK &lt;偏移量&gt;</code>，说自己收到哪儿了。</li>
+      <li><b>RDB 的 fork 和写时复制、AOF 重写、全量与增量同步、哨兵投票</b>：第一圈讲过，见 <a href="redis-persistence.html">RDB 与 AOF</a>、<a href="redis-ha-cluster.html">主从、哨兵与集群</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="path">一条 SET 回 OK 时，它在哪几处</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 360" role="img" aria-label="第 5 站请求 A 发出 SET lock:product:88 NX PX 30000。主线程执行，写进内存，同时追加到 AOF 缓冲和复制缓冲。进入下一轮事件循环之前，先把 AOF 缓冲 write 进页缓存，然后才把 OK 发回给 A。之后后台线程每秒 fsync 一次落盘；复制缓冲异步发给从库，实测正常时 0.2 到 0.4 毫秒内从库就确认了。下面一行说明：进程被杀时页缓存还在，不丢；机器断电丢最后不到 1 秒，fsync 卡住时最多 2 秒；切主时丢从库还没收到的那一段。">
+  <text x="20" y="26" class="t-h">SET lock:product:88 … NX PX 30000（第 5 站）</text>
+  <rect x="20" y="52" width="130" height="50" rx="8" class="b-rn"/>
+  <text x="85" y="74" text-anchor="middle" class="t-s">请求 A</text>
+  <text x="85" y="92" text-anchor="middle" class="t-xs">Lettuce</text>
+  <path d="M150,70 L200,70" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="204" y="44" width="200" height="66" rx="8" class="b-cg"/>
+  <text x="304" y="66" text-anchor="middle" class="t-s">① 主线程执行</text>
+  <text x="304" y="84" text-anchor="middle" class="t-xs">写进内存（字典）</text>
+  <text x="304" y="100" text-anchor="middle" class="t-xs">追加到 aof_buf、复制缓冲</text>
+  <path d="M404,77 L450,77" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="454" y="44" width="210" height="66" rx="8" class="b-g2"/>
+  <text x="559" y="66" text-anchor="middle" class="t-s">② beforeSleep：write()</text>
+  <text x="559" y="84" text-anchor="middle" class="t-xs">aof_buf → 操作系统页缓存</text>
+  <text x="559" y="100" text-anchor="middle" class="t-xs">源码注释：要在发回复之前做</text>
+  <path d="M664,77 L710,77" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="714" y="44" width="226" height="66" rx="8" class="b-good"/>
+  <text x="827" y="66" text-anchor="middle" class="t-s">③ 发 OK 给 A</text>
+  <text x="827" y="84" text-anchor="middle" class="t-xs">A 以为锁拿到了</text>
+  <text x="827" y="100" text-anchor="middle" class="t-xs">此刻：内存 ✓ 页缓存 ✓</text>
+  <path d="M559,110 L559,150" class="e-g2" marker-end="url(#ah-g2)"/>
+  <rect x="454" y="154" width="210" height="56" rx="8" class="b-g2"/>
+  <text x="559" y="176" text-anchor="middle" class="t-s">④ 后台线程 fsync</text>
+  <text x="559" y="194" text-anchor="middle" class="t-xs">everysec：每秒一次 → 磁盘 ✓</text>
+  <path d="M304,110 L304,150" class="e-pd" marker-end="url(#ah-pd)"/>
+  <rect x="204" y="154" width="200" height="56" rx="8" class="b-pd"/>
+  <text x="304" y="176" text-anchor="middle" class="t-s">⑤ 异步发给从库</text>
+  <text x="304" y="194" text-anchor="middle" class="t-xs">正常 0.2～0.4 ms 确认 → 从库 ✓</text>
+  <text x="20" y="246" class="t-s t-b">在 ③ 和 ④、⑤ 之间出事，丢不丢：</text>
+  <rect x="20" y="258" width="290" height="80" rx="8" class="b-good"/>
+  <text x="34" y="280" class="t-s">进程被 kill，原地拉起</text>
+  <text x="34" y="300" class="t-xs">页缓存属于操作系统，还在</text>
+  <text x="34" y="318" class="t-xs">AOF 加载回来：锁在</text>
+  <rect x="330" y="258" width="290" height="80" rx="8" class="b-warn"/>
+  <text x="344" y="280" class="t-s">机器断电，原地拉起</text>
+  <text x="344" y="300" class="t-xs">丢没 fsync 的：通常不到 1 秒</text>
+  <text x="344" y="318" class="t-xs">fsync 卡住时连 write 都推迟，最多 2 秒</text>
+  <rect x="640" y="258" width="300" height="80" rx="8" class="b-bad"/>
+  <text x="654" y="280" class="t-s">机器宕机，切到从库</text>
+  <text x="654" y="300" class="t-xs">丢从库没收到的：正常不到 2 ms</text>
+  <text x="654" y="318" class="t-xs">主从之间卡了几秒，就丢几秒</text>
+</svg>
+  </div>
+  <figcaption>Redis 8.10.3 <code>server.c</code> 的 <code>beforeSleep</code>：<code>flushAppendOnlyFile</code> 在 <code>handleClientsWithPendingWrites</code> 之前，注释写着 “must be done before handleClientsWithPendingWrites”。“0.2～0.4 ms”是 ⑤ 实测的 <code>WAIT 1</code> 中位数，p99 是 1.3～1.7 ms。</figcaption>
+  </figure>
+  <p>RDB 不在这条路上：它是每隔一段时间 fork 一个子进程，把整个内存拍一张照。默认 <code>save 3600 1 300 100 60 10000</code>：60 秒内改了 1 万次就拍，写得少时可能一小时才拍一次。只开 RDB 的实例，进程被 <code>kill -9</code> 后会回到上一张照片。</p>
+
+  <h3 id="loading">重启：先把文件读完，读完之前只回 LOADING</h3>
+  <div class="two">
+    <div class="card" data-role="warn">
+      <h3>加载期间被拒（回 <code>-LOADING</code>）</h3>
+      <div class="cmdchips"><code>GET</code><code>SET</code><code>EVAL</code><code>DEL</code><code>PING</code></div>
+      <p>命令表里没有 <code>LOADING</code> 标志的都被拒，错误串是 <code>LOADING Redis is loading the dataset in memory</code>。<b>连 PING 也被拒</b>，拿 PING 做健康检查的，这段时间会判它不健康。</p>
+    </div>
+    <div class="card" data-role="good">
+      <h3>加载期间照样执行</h3>
+      <div class="cmdchips"><code>INFO</code><code>HELLO</code><code>CLIENT</code><code>CONFIG GET</code></div>
+      <p><code>INFO persistence</code> 里能看到 <code>loading:1</code>、<code>loading_loaded_perc</code>、<code>loading_eta_seconds</code>。加载 RDB 时每读约 512 KB、重放 AOF 时每 1024 条，停下来处理一次网络事件，所以客户端拿到的是错误，而不是一直卡住。</p>
+    </div>
+  </div>
+  <p>为什么不边加载边服务？因为加载到一半时，内存里只有一部分 key。这时 <code>GET product:88</code> 回 nil，调用方会以为“没缓存”，去抢锁、查库、回填；可文件里后面还有一条旧的 <code>SET product:88</code>，加载到那里又会把新值盖掉。<code>SET NX</code> 抢锁更糟：锁其实在文件后半段，还没读到，这个请求就“抢到”了。所以 Redis 宁可整体拒绝。</p>
+
+  <h3 id="failover">切主：从“主库没了”到“新主库能写”，中间有多久，丢哪一段</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 290" role="img" aria-label="时间轴。主库宕机前，最后一段写还在复制缓冲里没发到从库，正常不到 2 毫秒，主从之间网络卡住时可以是几秒，这一段在切主后丢失。宕机后，哨兵每秒 PING 主库，连续 30 秒没有正确回复才主观下线，再经过投票达到 quorum 变成客观下线，选出领头的哨兵，挑一个从库发 REPLICAOF NO ONE，再让其他从库改跟新主库，并通知客户端。这整段时间，写主库都失败。">
+  <text x="20" y="26" class="t-h">Sentinel 切主的时间线（默认配置）</text>
+  <path d="M40,120 L920,120" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="100" y="90" width="120" height="30" rx="5" class="b-bad"/>
+  <text x="160" y="110" text-anchor="middle" class="t-xs">没复制过去的写</text>
+  <path d="M220,70 L220,140" class="e-bad"/>
+  <text x="220" y="62" text-anchor="middle" class="t-bad t-s">主库宕机</text>
+  <rect x="220" y="90" width="420" height="30" rx="5" class="b-warn"/>
+  <text x="430" y="110" text-anchor="middle" class="t-xs">哨兵每秒 PING，30 s 没回应 → 主观下线（sdown）</text>
+  <rect x="640" y="90" width="110" height="30" rx="5" class="b-pd"/>
+  <text x="695" y="110" text-anchor="middle" class="t-xs">投票 → odown</text>
+  <rect x="750" y="90" width="120" height="30" rx="5" class="b-pd"/>
+  <text x="810" y="110" text-anchor="middle" class="t-xs">选从库、提拔</text>
+  <path d="M870,70 L870,140" class="e-good"/>
+  <text x="870" y="62" text-anchor="middle" class="t-good t-s">新主库能写</text>
+  <path d="M220,160 L870,160" class="e-bad" stroke-dasharray="6 4"/>
+  <text x="545" y="180" text-anchor="middle" class="t-s t-bad">这一整段：写主库失败（Lettuce 重连 / 报错 / 降级查库）</text>
+  <text x="160" y="160" text-anchor="middle" class="t-xs">正常 &lt; 2 ms</text>
+  <text x="160" y="176" text-anchor="middle" class="t-xs">主从卡住时：几秒</text>
+  <text x="40" y="222" class="t-s">从库被提拔时，手里的数据就是它最后收到的那个偏移量。主库上比这个偏移量新的写，只存在于已经宕机的主库里：</text>
+  <text x="40" y="246" class="t-s">缓存回填丢了，下一个请求再查一次库；锁丢了，新主库上 <tspan class="t-mono">SET NX</tspan> 会成功，另一个请求也“拿到”锁。</text>
+  <text x="40" y="276" class="t-xs">30 s、quorum、failover-timeout 180 s 是 sentinel.c 的默认值（按源码，本页没实测 Sentinel）。图里各段长度只示意，不按比例。</text>
+</svg>
+  </div>
+  </figure>
+  <p>主库会不会自己发现“从库跟不上了”？会，但默认什么也不做。它记着每个从库最后一次 ACK 的时间，<code>INFO replication</code> 里的 <code>lag</code> 就是距今几秒。只有配了 <code>min-replicas-to-write N</code>，主库才在“lag 不超过 <code>min-replicas-max-lag</code> 秒的从库不足 N 个”时拒绝写命令，回 <code>NOREPLICAS</code>。它按秒算、靠每秒一次的 ACK，所以只能把丢失窗口压到几秒，压不到零（⑤ 实测 2.95 s 才开始拒）。</p>
+
+  <h3 id="design">为什么这样设计</h3>
+  <div class="design">
+    <div class="way" data-role="g2">
+      <h4>Redis：先回 OK，盘和从库随后跟上<small>选中的设计</small></h4>
+<svg viewBox="0 0 460 190" role="img" aria-label="Redis 的做法：执行一条命令约 2 微秒，write 进页缓存后就回 OK；fsync 每秒一次交给后台线程，复制异步发出。客户端等的只有内存和一次 write。">
+  <rect x="20" y="20" width="110" height="36" rx="8" class="b-cg"/>
+  <text x="75" y="43" text-anchor="middle" class="t-xs">执行 ≈ 2 µs</text>
+  <path d="M130,38 L160,38" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="164" y="20" width="110" height="36" rx="8" class="b-g2"/>
+  <text x="219" y="43" text-anchor="middle" class="t-xs">write 页缓存</text>
+  <path d="M274,38 L304,38" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="308" y="20" width="130" height="36" rx="8" class="b-good"/>
+  <text x="373" y="43" text-anchor="middle" class="t-xs">回 OK</text>
+  <path d="M219,56 L219,96" class="e-g2" stroke-dasharray="4 3"/>
+  <text x="230" y="84" class="t-xs">每秒 fsync（后台线程）</text>
+  <path d="M75,56 L75,136" class="e-pd" stroke-dasharray="4 3"/>
+  <text x="86" y="126" class="t-xs">异步发从库</text>
+  <text x="20" y="170" class="t-xs">客户端只等内存和一次 write</text>
+</svg>
+      <p>约束：Redis 一条命令执行只要 2 µs 左右（见 <a href="redis-event-loop-queueing.html">279 µs 里只有 2 µs 在 Redis</a>），一个线程顺序执行所有命令。每条写都等 <code>fsync</code> 或等从库确认，就是给每条写加几百微秒，吞吐掉一两个数量级。而它最常见的用法是缓存，数据的正本在数据库里。</p>
+      <p>想要更强的保证，按条单独要：<code>WAIT</code> 等从库确认，<code>WAITAOF</code>（7.2 起）等本机或从库 <code>fsync</code>，<code>appendfsync always</code> 每条都刷盘。</p>
+    </div>
+    <div class="way" data-role="other">
+      <h4>InnoDB：提交前先把 redo 刷盘<small>数据的正本</small></h4>
+<svg viewBox="0 0 460 190" role="img" aria-label="InnoDB 的做法：事务提交时先把 redo log fsync 到磁盘，再回提交成功；半同步复制还要等至少一个从库收到 binlog。客户端要等一次 fsync，半同步时再加一个网络来回。">
+  <rect x="20" y="20" width="110" height="36" rx="8" class="b-bk"/>
+  <text x="75" y="43" text-anchor="middle" class="t-xs">执行 UPDATE</text>
+  <path d="M130,38 L160,38" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="164" y="20" width="110" height="36" rx="8" class="b-g2"/>
+  <text x="219" y="43" text-anchor="middle" class="t-xs">fsync redo</text>
+  <path d="M274,38 L304,38" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="308" y="20" width="130" height="36" rx="8" class="b-pd"/>
+  <text x="373" y="43" text-anchor="middle" class="t-xs">（半同步）等从库</text>
+  <path d="M373,56 L373,96" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="308" y="100" width="130" height="36" rx="8" class="b-good"/>
+  <text x="373" y="123" text-anchor="middle" class="t-xs">回提交成功</text>
+  <text x="20" y="170" class="t-xs">客户端等 fsync，半同步再加一个来回</text>
+</svg>
+      <p><code>innodb_flush_log_at_trx_commit=1</code>（默认）每次提交都刷 redo：数据库存的是正本，丢一笔订单就是事故，所以宁可慢。全景第 6 站查的就是它（<a href="../java/pano-j06-update-to-disk.html">一条 UPDATE 从应用到磁盘</a>）。</p>
+      <p>Redis 要是也这样做，就没法再用一个线程扛十几万 QPS 了。</p>
+    </div>
+  </div>
+  <p class="misj"><b>这个设计带来的后果</b>“Redis 回了 OK”只等于“写进了主库内存”。缓存丢了能重建，这个设计对它刚好合适。锁、库存扣减这类丢一次就会出错的东西，要么不放 Redis，要么让它丢了也不出错：比如 fencing token、数据库唯一约束（⑥-2）。</p>
+
+  <h3 id="syntax">最少的配置和命令</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">redis.conf</span><span>缓存实例：混合 AOF + 一个从库 + 哨兵</span></div>
+<pre><code>appendonly yes                 <span class="cm"># 默认 no；开了以后默认 everysec + aof-use-rdb-preamble yes</span>
+appendfsync everysec           <span class="cm"># 默认值，写出来是为了让人看见</span>
+<span class="cm"># save 3600 1 300 100 60 10000 不写就是这个默认；只做缓存可以 save "" 关掉 RDB，停机快 1.5 s</span>
+min-replicas-to-write 0        <span class="cm"># 默认 0 = 不检查；放锁的实例可以设 1，配 min-replicas-max-lag（默认 10 秒）</span></code></pre>
+<pre><code><span class="cm"># 运行时</span>
+INFO persistence               <span class="cm"># loading、aof_last_write_status、aof_delayed_fsync、rdb_last_bgsave_status</span>
+INFO replication               <span class="cm"># slave0:…,offset=…,lag=秒；master_repl_offset</span>
+WAIT 1 100                     <span class="cm"># 等至少 1 个从库确认刚才的写，最多 100 ms；返回确认的个数</span>
+WAITAOF 1 0 100                <span class="cm"># 7.2 起：等本机 fsync 完（numlocal=1），不等从库</span></code></pre>
+  </div>
+  <p class="cap">AOF 重写的触发条件、<code>fork</code> 的代价、RDB 和 AOF 文件的格式，放到 ⑥ 第三圈；集群的槽和故障转移，第一圈讲过，这页不展开。</p>
+</section>
+
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：在交易靶场里重启、切主、自动拉起</h2>
+    <p class="lead">三段实验，Lab 自己用 docker 命令起停容器：一个主库 <code>rf-m</code>（63791）、一个从库 <code>rf-r</code>（63792）。主从复制单独走一个 Docker 网络，好在不影响客户端的情况下把主从之间的线拔掉。全程约 2 分钟。</p>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">跑起来</span><span>Redis 8.10.3 容器 + Lettuce 6.8.2，代码按 JDK 8 写；<a href="https://github.com/archeu/study-labs/tree/main/java/redis/redis-restart-failover">完整代码 →</a></span></div>
+<pre><code><span class="cm"># study-labs/java/redis/redis-restart-failover</span>
+./run.sh              <span class="cm"># restart → failover → wipe，跑完自动删容器和网络</span>
+./run.sh failover     <span class="cm"># 只跑一段</span>
+DOCKER="sudo docker" ./run.sh   <span class="cm"># 不在 docker 组里时</span></code></pre>
+<pre><code><span class="cm">// failover 段的骨架：主从之间断网 → A 在主库拿锁 → 主库宕机 → 提拔从库 → B 再拿锁</span>
+docker(<span class="s">"network"</span>, <span class="s">"disconnect"</span>, REP, R);                       <span class="cm">// docker pause 不行，见下面的注</span>
+m.set(<span class="s">"lock:product:88"</span>, tokenA, nx().px(30000));             <span class="cm">// 第 5 站：OK</span>
+m.set(<span class="s">"product:88"</span>, json(88), px(1800000));                    <span class="cm">// 第 7 站：OK</span>
+m.waitForReplication(1, 500);                                   <span class="cm">// WAIT 1 500 → 0</span>
+docker(<span class="s">"kill"</span>, M);
+r.replicaofNoOne();                                             <span class="cm">// Sentinel 选中从库后做的就是这一步</span>
+r.set(<span class="s">"lock:product:88"</span>, tokenB, nx().px(30000));             <span class="cm">// 请求 B：？</span></code></pre>
+  </div>
+
+  <h3>第一段 restart：四种配置各停一次</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="从 docker start 算起的时间轴，0 到 1.2 秒。不持久化：0.26 秒就能回复，但回的是 nil，缓存全空。RDB：0.25 秒起开始回 LOADING，到 0.67 秒第一次读到 88 号。AOF 纯命令：0.23 秒起 LOADING，到 1.04 秒才读到。AOF 混合：0.31 秒起 LOADING，到 0.95 秒读到。">
+  <text x="20" y="24" class="t-h">从 docker start 起，什么时候能读到 88 号</text>
+  <g class="t-xs">
+    <text x="20" y="66">不持久化</text>
+    <text x="20" y="106">RDB</text>
+    <text x="20" y="146">AOF 纯命令</text>
+    <text x="20" y="186">AOF 混合</text>
+  </g>
+  <rect x="120" y="50" width="172" height="24" rx="4" class="b-neu"/>
+  <rect x="292" y="50" width="588" height="24" rx="4" class="b-bad"/>
+  <text x="586" y="67" text-anchor="middle" class="t-xs">能回复了，可 GET 全是 nil：20 万个商品要回源</text>
+  <rect x="120" y="90" width="167" height="24" rx="4" class="b-neu"/>
+  <rect x="287" y="90" width="277" height="24" rx="4" class="b-warn"/>
+  <text x="425" y="107" text-anchor="middle" class="t-xs">LOADING × 126</text>
+  <rect x="564" y="90" width="316" height="24" rx="4" class="b-good"/>
+  <text x="572" y="107" class="t-xs">0.67 s 读到</text>
+  <rect x="120" y="130" width="152" height="24" rx="4" class="b-neu"/>
+  <rect x="272" y="130" width="542" height="24" rx="4" class="b-warn"/>
+  <text x="543" y="147" text-anchor="middle" class="t-xs">LOADING × 220</text>
+  <rect x="814" y="130" width="66" height="24" rx="4" class="b-good"/>
+  <text x="818" y="147" class="t-xs">1.04 s</text>
+  <rect x="120" y="170" width="206" height="24" rx="4" class="b-neu"/>
+  <rect x="326" y="170" width="428" height="24" rx="4" class="b-warn"/>
+  <text x="540" y="187" text-anchor="middle" class="t-xs">LOADING × 162</text>
+  <rect x="754" y="170" width="126" height="24" rx="4" class="b-good"/>
+  <text x="762" y="187" class="t-xs">0.95 s 读到</text>
+  <path d="M120,206 L880,206" class="e-axis"/>
+  <g class="t-xs" text-anchor="middle">
+    <text x="120" y="224">0</text><text x="287" y="224">0.25</text><text x="453" y="224">0.5</text><text x="620" y="224">0.75</text><text x="787" y="224">1.0 s</text>
+  </g>
+  <text x="120" y="244" class="t-xs">灰色：容器启动、加载 bf / search / timeseries / json 四个模块，这时连接还被拒</text>
+</svg>
+  </div>
+  <figcaption><span class="tag-real">实测</span> 20 万个商品，<code>used_memory</code> 163 MB。按加载速度粗算，本机每 GB 约 2.5 s，一个 10 GB 的缓存实例重启时要回 25 s 左右的 LOADING（估算，没有实测，CPU 和磁盘不同差别会很大）。</figcaption>
+  </figure>
+<pre class="console"><code>[restart] 每种配置写 200000 个商品，docker stop 再 docker start，探针每 2 ms 发一次 GET product:88
+  默认 save = "3600 1 300 100 60 10000"，appendonly = no
+  RDB（默认 save）   used_memory 163.2 MB，dbsize 200000，fork 2.703 ms
+  RDB（默认 save）   停机 1770 ms；文件 132120 KB dump.rdb       <span class="cm"># 关机前同步存快照</span>
+                     日志：DB loaded from disk: 0.410 seconds
+  AOF 纯命令         停机 227 ms；文件 146664 KB appendonlydir/appendonly.aof.3.base.aof
+                     日志：DB loaded from base file appendonly.aof.3.base.aof: 0.809 seconds
+  AOF 混合（默认）   停机 199 ms；文件 132124 KB appendonlydir/appendonly.aof.3.base.rdb  0 KB …incr.aof
+                     日志：DB loaded from base file appendonly.aof.3.base.rdb: 0.648 seconds</code></pre>
+
+  <h3>第二段 failover：主从断网时拿的锁，切主以后还在吗</h3>
+<pre class="console"><code>[failover] 一主（63791）一从（63792），都是默认配置
+  正常：SET 后 WAIT 1 等到从库确认，p50 378 µs，p99 1658 µs，最慢 3517 µs
+  主从之间断网后，请求 A 在主库上：
+    SET lock:product:88 A-… NX PX 30000  → OK
+    SET product:88 …（回填）             → OK
+    WAIT 1 500                           → 0（548 ms 后返回，0 = 没有从库确认）
+    主库看从库：slave0:…,state=online,offset=728949,lag=3      <span class="cm"># 还是 online，只是 3 秒没 ACK</span>
+  kill 主库，提拔从库（REPLICAOF NO ONE，1 ms）。新主库上：
+    GET product:88                       → null      <span class="cm"># 回填丢了，下一个请求要再查一次库</span>
+    请求 B：SET lock:product:88 B-… NX PX 30000 → <b>OK</b>
+    A 以为自己还拿着锁，B 也拿到了锁：两个请求同时在重建 88 号
+    A 查完库用 Lua 解锁（比对 token）    → 0（没误删 B 的锁）；GET lock → B-…
+
+  主库加 min-replicas-to-write 1、min-replicas-max-lag 2（默认 0 和 10）：
+    从库正常：SET → OK
+    主从断网后 2952 ms 第一次被拒：NOREPLICAS Not enough good replicas to write.
+    在那之前主库又收了 143 次写（每 20 ms 一次），这些写从库都没有
+    读照常：GET product:1 → 命中
+    网络恢复后 892 ms 写入恢复</code></pre>
+  <p class="cap"><span class="tag-real">实测</span> 正常复制那一行两遍分别是 p50 210 / 378 µs。第一版用 <code>docker pause</code> 冻住从库来模拟“从库没跟上”，结果锁没丢：进程冻住了，内核照样把主库发来的数据收进 socket 缓冲区，解冻后从库先读完缓冲区才发现主库没了。改成断开复制网络才复现出来。真实环境里对应的是网络分区或者丢包，而不是从库进程慢。</p>
+
+  <h3>第三段 wipe：主库不持久化，被自动拉起</h3>
+<pre class="console"><code>[wipe] 主库 --save "" --appendonly no（不持久化），从库默认；主库被 kill 后马上拉起
+  主库 dbsize 10000，从库 dbsize 10000
+  主库被 kill，300 ms 后：从库 dbsize 10000，还能读 product:88 → 命中     <span class="cm"># replica-serve-stale-data yes</span>
+    主库拉起后 272 ms：从库 dbsize 10000
+    主库拉起后 6326 ms：从库 dbsize 0                                     <span class="cm"># 另一遍是 5.3 s</span>
+  从库日志：
+    MASTER &lt;-&gt; REPLICA sync: Loading DB in memory
+    MASTER &lt;-&gt; REPLICA sync: Flushing old data</code></pre>
+  <p class="cap"><span class="tag-real">实测</span> 主库重启后换了一个新的复制 ID，从库没法增量续上，只能全量同步：先清掉自己的数据，再加载主库发来的空快照。主库要是被 Sentinel 监控着，这么快就拉起来了，Sentinel 根本来不及判定它下线。官方复制文档专门有一节讲这件事，建议这种情况下关掉自动重启。</p>
+
+  <p class="done-box"><b>到这里已经能交差了</b>能说清缓存实例该开哪种持久化、重启时 LOADING 要多久，知道切主会丢掉还没复制过去的写，知道主库不持久化时不能配自动重启。<br><b>还没处理的细节</b>锁丢了以后怎么不出错（<a href="#p2">⑥-2</a>）；健康检查被 LOADING 骗（<a href="#p1">⑥-1</a>）；everysec 为什么可能丢 2 秒（<a href="#p4">⑥-4</a>）；fork 会不会卡（<a href="#deep">⑥ 第三圈</a>）。</p>
+</section>
+
+
+<!-- ⑥ -->
+<section id="s6" data-role="g2">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+
+  <h3 id="lab-h">实验台：88 号的锁刚拿到，Redis 就出事了</h3>
+  <p>前提：宕机前 0.5 s，请求 A 在主库上拿到 <code>lock:product:88</code>（PX 30000），回填了 <code>product:88</code>；实例里有 20 万个商品（163 MB）。选一种事故、一种持久化、一种复制配置。先猜：事后 A 的锁还在不在？</p>
+  <div class="lab" id="lab" data-role="g2">
+    <div class="ctl-grid">
+      <div class="ctl"><span class="lbl">出了什么事</span>
+        <select id="c-ev"><option value="kill">主库进程被 kill，原地拉起</option><option value="crash">主库整机宕机（主从一直正常）</option><option value="split3" selected>主从先断网 3 s，然后主库整机宕机</option><option value="split10">主从先断网 10 s，然后主库整机宕机</option></select></div>
+      <div class="ctl"><span class="lbl">持久化</span>
+        <select id="c-per"><option value="none">不持久化</option><option value="rdb">只开 RDB（默认 save）</option><option value="aof" selected>AOF everysec（混合）</option></select></div>
+      <div class="ctl"><span class="lbl">复制</span>
+        <select id="c-rep"><option value="single">单机</option><option value="async" selected>一主一从 + Sentinel</option><option value="minrep">再加 min-replicas-to-write 1、max-lag 2</option></select></div>
+    </div>
+    <div class="guess" id="guess">
+      <p><b>先猜：</b>事后 A 的锁怎样了？</p>
+      <div class="opts">
+        <button type="button" data-g="keep">还在</button>
+        <button type="button" data-g="lost">丢了，B 也能拿到</button>
+        <button type="button" data-g="maybe">说不准</button>
+        <button type="button" data-g="rej">A 当时就没拿到</button>
+        <button type="button" data-g="skip" class="skip">不猜了，直接看</button>
+      </div>
+      <p class="res" id="g-res" hidden></p>
+    </div>
+    <div id="out" hidden>
+      <ol class="steps-out" id="steps"></ol>
+      <div class="res-grid" id="tiles" style="margin-top:12px">
+        <div class="tile" data-role="rn"><small>A 的锁</small><b id="t-lock"></b></div>
+        <div class="tile" data-role="of"><small>88 号缓存</small><b id="t-cache"></b></div>
+        <div class="tile" data-role="bad"><small>写不进去多久</small><b id="t-down"></b></div>
+        <div class="tile" data-role="bk"><small>数据库</small><b id="t-db"></b></div>
+      </div>
+      <p class="lab-res" id="verdict" style="margin-top:12px"></p>
+    </div>
+  </div>
+  <p class="cap">“进程被 kill”的恢复时间、断网后锁丢失、min-replicas 2.95 s 才拒、不持久化时从库被清空，来自 ⑤ 实测；30 s 是 Sentinel 默认的 down-after-milliseconds（按源码）；断电、整机宕机的结果按 ④ 推出，没有实测。</p>
+
+  <h3>第一圈 · 注意事项：不知道就会出事故</h3>
+  <div class="pits">
+    <div class="pit" id="p1"><b><em>1</em>拿 PING 做健康检查，加载期间被判死<a class="root" href="#loading">← ④ 只回 LOADING</a></b>
+      <dl><dt>现象</dt><dd>大实例重启后，探活脚本或容器平台的存活检查一直失败，有的平台还会把它再杀一次，于是又从头加载。</dd>
+      <dt>根源</dt><dd><code>PING</code> 的命令标志只有 <code>FAST, SENTINEL</code>，没有 <code>LOADING</code>，加载期间回 <code>-LOADING</code>（8.10.3 <code>commands/ping.json</code>）。<span class="seen">实测：163 MB 要回 126～220 次 LOADING，0.4～0.8 s；10 GB 估算 25 s 左右</span></dd>
+      <dt>做法</dt><dd class="fix">存活检查只看端口通不通，或者把 <code>LOADING</code> 也算“活着”；就绪检查看 <code>INFO persistence</code> 的 <code>loading:0</code>。大实例给足启动宽限时间。</dd></dl></div>
+    <div class="pit" id="p2"><b><em>2</em>切主以后，一把锁有两个主人<a class="root" href="#failover">← ④ 切主丢的那一段</a></b>
+      <dl><dt>现象</dt><dd>主库宕机切主后，同一个商品被两个线程同时重建；要是锁护的是扣库存，就会多扣。<span class="seen">实测：主从断网后 A 拿锁，切主后 B 的 SET NX 回 OK</span></dd>
+      <dt>根源</dt><dd>复制是异步的，主库回 <code>OK</code> 时从库还没收到这把锁。从库被提拔后，它的内存里根本没有这个 key。</dd>
+      <dt>做法</dt><dd class="fix">缓存重建：接受，最多多查一次库。要保证结果正确的：写回时带 fencing token 或版本号（<a href="redis-lock-expire-fencing.html">锁过期时 A 还在查库</a>），或者让数据库的唯一约束、乐观锁兜底。解锁用 Lua 比对 token（⑤ 实测 A 解锁回 0，没误删 B 的锁）。</dd></dl></div>
+    <div class="pit" id="p3"><b><em>3</em>主库不持久化又配了自动重启，主从一起清空<a class="root" href="#s5">← ⑤ 第三段</a></b>
+      <dl><dt>现象</dt><dd>主库进程崩了，守护进程马上把它拉起来，几秒后从库的数据也没了，缓存全部回源。<span class="seen">实测：拉起后 5～6 s，从库 dbsize 从 10000 变成 0</span></dd>
+      <dt>根源</dt><dd>重启后主库换了复制 ID，从库续不上，只能全量同步，先清空自己再加载主库的空快照。拉起得太快，Sentinel 也来不及判定下线。</dd>
+      <dt>做法</dt><dd class="fix">主库开持久化（混合 AOF 停机和不持久化一样快，重启多等约 0.7 s 的 LOADING）；实在不开，就关掉自动重启，让 Sentinel 先把从库提上来。官方复制文档的建议原话是 “auto restart of instances should be disabled”。</dd></dl></div>
+    <div class="pit" id="p4"><b><em>4</em>everysec 不是“最多丢 1 秒”<a class="root" href="#path">← ④ write 和 fsync</a></b>
+      <dl><dt>现象</dt><dd>磁盘忙的时候，日志里出现 <code>Asynchronous AOF fsync is taking too long (disk is busy?)</code>，写命令的延迟偶尔跳到秒级。</dd>
+      <dt>根源</dt><dd><code>flushAppendOnlyFile</code>：发现上一次后台 <code>fsync</code> 还没做完，就连 <code>write</code> 也先推迟，最多推迟 2000 ms；超过以后强制 <code>write</code>，<code>aof_delayed_fsync</code> 加一。推迟期间数据还在 <code>aof_buf</code> 里，这时进程挂了也会丢，最多约 2 秒；强制 <code>write</code> 那一下还可能卡住主线程。</dd>
+      <dt>做法</dt><dd class="fix">监控 <code>aof_delayed_fsync</code>，涨了就查磁盘；AOF 别和别的重 IO 共用一块盘。</dd></dl></div>
+    <div class="pit" id="p5"><b><em>5</em>开着 RDB，正常关机也慢<a class="root" href="#s3">← ③ 停机 1.77 s</a></b>
+      <dl><dt>现象</dt><dd>发版或迁移时停 Redis，等了很久才退出；容器平台的关机宽限期到了，直接 SIGKILL。</dd>
+      <dt>根源</dt><dd>配了 <code>save</code> 规则（默认就配了），SIGTERM 走关机流程时要同步存一份完整快照；7.0 起有从库时还要先等从库追上偏移量，最多 <code>shutdown-timeout</code>（默认 10 s）。<span class="seen">实测：163 MB 停机 1.77 s，不开 RDB 的约 0.2 s</span></dd>
+      <dt>做法</dt><dd class="fix">只做缓存、开了 AOF 的实例，用 <code>save ""</code> 关掉 RDB；宽限期按“快照时间 + 10 s”留。被 SIGKILL 也不会把文件写坏：快照先写临时文件再改名，只是会回到上一份。</dd></dl></div>
+    <div class="pit" id="p6"><b><em>6</em>Redis 8 镜像里关掉混合格式，起不来<a class="root" href="#s3">← ③ 纯命令那一行</a></b>
+      <dl><dt>现象</dt><dd><code>appendonly yes</code> 加 <code>aof-use-rdb-preamble no</code>，用官方 <code>redis:8.10.3-alpine</code> 镜像启动，容器立刻退出。<span class="seen">实测日志：&lt;search&gt; FATAL: aof-use-rdb-preamble required if AOF is used!</span></dd>
+      <dt>根源</dt><dd>Redis 8 的官方镜像自带 bf、search、timeseries、json 四个模块，RediSearch 初始化时检查这个配置，不满足就让整个进程退出。</dd>
+      <dt>做法</dt><dd class="fix">保持默认的 <code>yes</code>。它加载快、文件小，也没有理由关。</dd></dl></div>
+  </div>
+
+  <h3>第二圈 · 使用规范：团队里怎么配、怎么写</h3>
+  <div class="rules-list">
+    <div class="rl"><b>缓存和锁分开放</b><p>缓存实例丢了能重建；锁、计数、限流放单独的实例，并且按“会丢”来设计。防的是 ⑥-2。</p></div>
+    <div class="rl"><b>至少一主一从加三个 Sentinel</b><p>Sentinel 放在三台不同的机器上，quorum 设 2。防的是整机宕机时只能等人。</p></div>
+    <div class="rl"><b>客户端连 Sentinel，不写死主库地址</b><p>Lettuce 用 <code>redis-sentinel://</code> 地址，Spring 用 <code>spring.data.redis.sentinel.*</code>。<code>LOADING</code>、连接断开都按“暂时不可用”处理：短暂重试，再降级限流。</p></div>
+    <div class="rl"><b>不持久化，就不自动重启</b><p>两样只能选一样。防的是 ⑥-3。</p></div>
+    <div class="rl"><b>这几个指标进监控</b><p><code>aof_last_write_status</code>、<code>aof_delayed_fsync</code>、<code>rdb_last_bgsave_status</code>、<code>latest_fork_usec</code>，从库上看 <code>master_link_status</code>，主库上看每个从库的 <code>lag</code>。</p></div>
+    <div class="rl"><b>要更强的保证，就在那一条命令上要</b><p>拿到锁以后 <code>WAIT 1 100</code>，返回 0 就当没拿到。这样只是缩小了丢锁的窗口，不能消除它（见第三圈）。</p></div>
+  </div>
+
+  <h3 id="deep">第三圈 · 深处：fork、lag、WAIT 和从库</h3>
+  <div class="rules-list">
+    <div class="rl"><b>fork 卡多久：和内存大小成正比</b><p>BGSAVE、AOF 重写都要 <code>fork</code>，主线程停在 <code>fork()</code> 里，直到内核复制完页表，耗时记在 <code>latest_fork_usec</code>。4 KB 一页、一项 8 字节，24 GB 内存的页表约 48 MB。<span class="tag-real">实测</span> 163 MB 时 fork 2.7～16 ms。fork 之后靠写时复制，子进程存盘期间主进程改到哪一页就复制哪一页，写得越多，额外内存越多；开着透明大页时一次要复制 2 MB，所以 Redis 默认 <code>disable-thp yes</code>，给自己的进程关掉透明大页。</p></div>
+    <div class="rl"><b>min-replicas 为什么 2.95 s 才拒</b><p>主库只记每个从库最后一次 ACK 的时间（秒），从库每秒发一次 ACK。<code>lag = 当前秒 − 最后 ACK 的秒</code>，<code>lag ≤ max-lag</code> 才算好从库。所以 max-lag 设 2，断网后要到 lag 变成 3 才开始拒，再加上 ACK 周期，实测 2.95 s。在这之前主库收下的写，切主时照样会丢。这个配置限制的是丢失窗口有多长，消除不了丢失。</p></div>
+    <div class="rl"><b>WAIT 返回 1，也不保证切主不丢</b><p>官方复制文档：WAIT “does not turn a set of Redis instances into a CP system … acknowledged writes can still be lost during a failover”。比如两个从库，WAIT 1 只等到了一个，Sentinel 偏偏提拔了另一个。<code>WAITAOF</code>（7.2 起）多一层：等本机或从库把这条写 <code>fsync</code> 到盘。</p></div>
+    <div class="rl"><b>主库挂了以后，从库在干什么</b><p><code>replica-serve-stale-data</code> 默认 <code>yes</code>：和主库断开时照样回旧数据（⑤ 实测主库被 kill 后从库照样命中）。从库自己不删过期 key，等主库发 <code>DEL</code>；读的时候按自己的时钟判断，过期了就当不存在。</p></div>
+  </div>
+  <div class="tbl-wrap">
+    <table class="cmp">
+      <thead><tr><th>版本</th><th>和这一页有关的变化</th></tr></thead>
+      <tbody>
+        <tr><td>4.0</td><td>混合持久化 <code>aof-use-rdb-preamble</code>（5.0 起默认 yes）；PSYNC2：复制 ID 存进 RDB，从 RDB 重启后能增量续上</td></tr>
+        <tr><td>7.0</td><td>多文件 AOF：<code>appendonlydir/</code> 里的 base + incr + manifest；<code>repl-diskless-sync</code> 默认 yes；关机时等从库追上（<code>shutdown-timeout</code> 10 s）</td></tr>
+        <tr><td>7.2</td><td><code>WAITAOF</code>；第一圈两页按 7.x 写，本页讲的写入顺序、LOADING 规则、min-replicas 判断和 8.10 相同</td></tr>
+        <tr><td>8.0</td><td>官方发行版自带查询引擎、JSON、时序、概率结构四个模块，Docker 镜像启动时默认加载</td></tr>
+        <tr><td>8.10.3</td><td>本页实测版本；镜像里的 RediSearch 8.10.1 要求 <code>aof-use-rdb-preamble yes</code>（⑥-6）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <h3>这一层没有尽头</h3>
+  <ul class="next">
+    <li>Redlock：在 5 个独立的主库上拿多数派，能不能解决 ⑥-2，以及它依赖时钟的那场争论；和 ZooKeeper、etcd 的锁比一比</li>
+    <li>集群模式的切主：<code>cluster-node-timeout</code>（默认 15 s）、槽迁移时的 <code>MOVED</code> / <code>ASK</code>，Lettuce 的拓扑刷新（<a href="redis-ha-cluster.html">主从、哨兵与集群</a>）</li>
+    <li>从库全量同步时还能不能读：<code>repl-diskless-load</code> 的 <code>swapdb</code> 和异步加载</li>
+    <li><code>appendfsync always</code> 和 <code>WAITAOF</code> 的真实代价：在本机测每秒还能写多少</li>
+    <li>大实例的 fork：透明大页、<code>vm.overcommit_memory</code>、写时复制让内存翻倍的极端情况</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到第⑤步：改一改交易靶场</h2>
+  </div>
+  <ol class="ex">
+    <li><b>拿锁后等从库（⑥ 第二圈最后一条）</b>：在 <code>failover</code> 段 A 拿锁之后加 <code>WAIT 1 100</code>，返回 0 就删锁、按“没拿到”处理。先猜：B 还会拿到第二把锁吗？A 那边会发生什么？</li>
+    <li><b>健康检查（⑥-1）</b>：<code>restart</code> 段再加一个探针发 <code>PING</code>，另一个发 <code>INFO persistence</code> 读 <code>loading_loaded_perc</code>。先猜 PING 在加载期间回什么，再跑。</li>
+    <li><b>关掉 RDB（⑥-5）</b>：把“AOF 混合”那一组的 <code>--save ""</code> 去掉，猜停机时间会变成多少、重启后从哪个文件加载，再跑。</li>
+  </ol>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>Redis 回 OK 时，这条写只在主库内存和页缓存里：进程挂了，AOF 能救回来，但要先挨一阵 LOADING；机器挂了切主，从库没收到的就丢了，丢的是锁就会有两个主人；主库不持久化又自动重启，会把从库一起清空。</p></details>
+    <details><summary>2. 回 OK 那一刻，这条写在哪几处？进程被杀、断电、切主各丢什么？</summary><p>④：在主库内存里，<code>write</code> 进了页缓存（beforeSleep 里先 write 再发回复）；还没 <code>fsync</code>，也还没到从库。进程被杀：页缓存还在，开了 AOF 就不丢。断电：丢没 fsync 的，通常不到 1 s，fsync 卡住时最多约 2 s。切主：丢从库没收到的，正常不到 2 ms，主从断网时断多久丢多久。</p></details>
+    <details><summary>3. 切主后锁有两个主人，根源是哪条原理？</summary><p>④ 的异步复制：主库先回 OK，再把命令发给从库。Sentinel 提拔的从库只有它收到的那部分，新主库上没有这把锁，B 的 <code>SET NX</code> 自然成功。持久化帮不上忙，持久化文件在宕机的那台机器上。</p></details>
+    <details><summary>4. 预测：缓存实例开了 AOF everysec，主库进程被 kill -9，1 秒内被拉起来。Sentinel 会切主吗？A 刚拿的锁还在吗？</summary><p>不会切主：down-after-milliseconds 默认 30 s，1 秒内拉起来，Sentinel 还没判定它主观下线。锁在：进程死了，write 过的数据还在页缓存里，AOF 加载回来就有。代价是重启后要回一阵 LOADING（163 MB 实测约 0.7 s）。从库会因为主库换了复制 ID 全量同步一次。</p></details>
+    <details><summary>5. 预测：主库配了 min-replicas-to-write 1（max-lag 用默认 10），只有一个从库，从库那台机器宕机了。会怎样？</summary><p>大约 11 s 后，主库开始拒绝所有写命令，回 <code>NOREPLICAS</code>：第 5 站抢不到锁，第 7 站回填失败，读照常。一台从库挂了，主库就写不进去了。所以要配这个参数，至少要有两个从库、<code>min-replicas-to-write 1</code>；纯缓存实例一般不配。</p></details>
+    <details><summary>6. 放回全景：第 12 站前后各发生了什么？这一页讲的东西出问题，整条链路会怎样？</summary><p>第 5 站 <code>SET NX PX</code> 抢锁、第 7 站回填和 Lua 解锁、第 10 站改价删缓存，这些写在主线程执行完，就进了第 12 站：write 进 AOF、每秒 fsync，异步发给从库。之后第 2 站的下一次 <code>GET</code> 才能读到。这一站出问题有三种结局。重启时整段时间回 LOADING，第 2 站要么报错要么全部降级查库。切主时丢了最近的写：缓存回填丢了只是多查一次库，锁丢了，第 5 站的防线出现两个主人。主库不持久化又自动重启，主从一起变空，所有商品走一遍第 5～7 站，压力全落到第 6 站的 MySQL。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。Redis 8.10.3（本机 Docker 容器 <code>redis:8.10.3-alpine</code>，镜像默认加载 bf / search / timeseries / json 模块），Lettuce 6.8.2，代码按 JDK 8 写、在 JDK 17 上跑，本机 2 核 ARM。</p>
+  <p>标“实测”的都在本机跑过：<code>restart</code>、<code>failover</code> 两段各跑了两遍以上，<code>wipe</code> 两遍（5.3 s、6.3 s）。第一版 <code>failover</code> 用 <code>docker pause</code> 冻从库，锁没丢，原因见 ⑤，改成断开复制网络后才复现。第一版第一步写的 key 包含 88 号，新主库上读到的是旧值，也改过。写入顺序（beforeSleep 先 write 再回复）、LOADING 规则和命令标志、everysec 推迟 2 秒、min-replicas 的判断和 ACK 周期、关机等从库、Sentinel 默认值、加载时处理事件的间隔，对照的是 redis 8.10.3 的源码（server.c、aof.c、rdb.c、replication.c、sentinel.c、config.c、commands/*.json），部分对比了 7.2；WAIT 的保证和“关掉自动重启”取自官方复制文档。InnoDB 的对照来自 MySQL 文档。</p>
+  <p>相关：<a href="../java/pano-j07-product-detail-cache.html">全景：一次商品详情查询</a> · <a href="redis-persistence.html">Redis 持久化 RDB 与 AOF（第一圈）</a> · <a href="redis-ha-cluster.html">Redis 主从、哨兵与集群（第一圈）</a> · <a href="redis-lock-expire-fencing.html">锁过期时 A 还在查库</a> · <a href="redis-oom-eviction.html">第 617 个商品写不进去</a> · <a href="../java/roadmap.html#j07">Java 地图 J07</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+function failSim(ev, per, rep){
+  // 前提：宕机前 0.5 s，请求 A 在主库拿到 lock:product:88（PX 30000），回填了 product:88；实例里 20 万个商品（163 MB）
+  var steps = [], r = {lock:'', cache:'', down:'', db:'', notes:[]};
+  var single = rep === 'single';
+  var split = ev === 'split3' || ev === 'split10';
+  var gap = ev === 'split3' ? 3 : (ev === 'split10' ? 10 : 0);
+  var rejA = !single && split && rep === 'minrep' && gap - 0.5 > 2.95;   // max-lag 2：断网约 2.95 s 后开始拒（⑤ 实测）
+  var perName = {none:'不持久化', rdb:'RDB', aof:'AOF everysec'}[per];
+
+  if (rejA) {
+    steps.push({st:'第 5 站', role:'bad', cmd:'A：SET lock:product:88 … NX PX 30000', res:'NOREPLICAS：主从断网已经 ' + (gap - 0.5) + ' s，好从库 0 个，主库拒写；A 报错或降级'});
+    steps.push({st:'第 7 站', role:'bad', cmd:'回填 SET product:88', res:'同样被拒：断网 3 s 后起，主库上第 5、7 站的写全是 NOREPLICAS'});
+  } else {
+    steps.push({st:'第 5 站', role:'rn', cmd:'A：SET lock:product:88 … NX PX 30000', res:'OK（宕机前 0.5 s）' + (split && !single ? '：主从已经断网 ' + (gap - 0.5) + ' s' + (rep === 'minrep' ? '，lag 还没超过 2 s 的判定，主库照收' : '，主库照收') : '')});
+    steps.push({st:'第 12 站', role:'g2', cmd:'write → fsync / 复制', res: (per === 'aof' ? '已 write 进页缓存，下一次每秒 fsync 还没到' : per === 'rdb' ? '只开 RDB：这条写要等下一张快照' : '不落盘') + (single ? '' : (split ? '；从库没收到' : '；约 0.3 ms 后从库确认'))});
+  }
+
+  if (ev === 'kill') {
+    steps.push({st:'事件', role:'bad', cmd:'kill -9 主库进程，原地拉起', res:'机器还在，页缓存还在；重启比 Sentinel 的 30 s 判定快，不切主'});
+    if (per === 'none') {
+      r.lock = 'lost'; r.cache = '全空'; r.down = '0.26 s'; r.db = '全量回源';
+      r.notes.push('20 万个商品都要走一遍第 5～7 站。锁能保证同一个商品只查一次库，挡不住 20 万个不同的商品。');
+      steps.push({st:'第 2、3 站', role:'bad', cmd:'GET product:88', res:'0.26 s 后就有回复，但回 nil：内存里什么都没了'});
+      if (!single) r.notes.push('从库会跟着被清空：主库换了复制 ID，从库全量同步一个空快照（⑤ 实测 5～6 s 后从库 dbsize 0）。');
+    } else if (per === 'rdb') {
+      r.lock = 'lost'; r.cache = '回到快照'; r.down = '0.67 s'; r.db = '部分回源';
+      steps.push({st:'第 2、3 站', role:'cg', cmd:'GET product:88', res:'先回 LOADING（163 MB 约 0.4 s），之后读到的是上一张快照里的数据'});
+      r.notes.push('kill -9 不走关机流程，不会临走前存快照。默认 save 规则下快照最多落后 60 s（写得少时可以是 1 小时），这期间写的锁和回填都没了。');
+      if (!single) r.notes.push('从库的偏移量比重启后的主库新，只能全量同步，跟着回到快照。');
+    } else {
+      r.lock = 'keep'; r.cache = '在'; r.down = '0.95 s'; r.db = '几乎不用';
+      steps.push({st:'第 2、3 站', role:'cg', cmd:'GET product:88', res:'先回 LOADING（163 MB 约 0.65～0.8 s），之后锁和缓存都在'});
+      r.notes.push('进程死了，write 过的数据还在操作系统的页缓存里，照样会写到盘上。例外：fsync 卡住超过 2 s 时 write 也会推迟，那几秒就真丢了（⑥-4）。');
+      if (!single) r.notes.push('AOF 里不存复制 ID，从库会全量同步一次，数据和主库一致。');
+    }
+  } else if (single) {
+    steps.push({st:'事件', role:'bad', cmd:'整台机器宕机', res:'没有从库，没人顶上：第 2 站一直重连，等机器回来' + (split ? '（单机没有主从链路，断网这一条不影响结果）' : '')});
+    r.down = '等机器';
+    if (per === 'none') { r.lock = 'lost'; r.cache = '全空'; r.db = '全落库'; }
+    else if (per === 'rdb') { r.lock = 'lost'; r.cache = '回到快照'; r.db = '全落库'; }
+    else { r.lock = 'maybe'; r.cache = '可能丢 1 s'; r.db = '全落库';
+      r.notes.push('断电时页缓存也没了。A 的锁是宕机前 0.5 s 写的，每秒一次的 fsync 有没有赶上，看运气。'); }
+    steps.push({st:'第 6 站', role:'bk', cmd:'降级查库', res:'机器回来之前，详情要么报错，要么每个请求都查库'});
+  } else {
+    steps.push({st:'事件', role:'bad', cmd:'整台机器宕机，Sentinel 切主', res:'默认 down-after 30 s 才判定下线，再投票、提拔从库：至少 30 s 写不进去'});
+    r.down = '≥ 30 s';
+    if (rejA) {
+      r.lock = 'rej'; r.cache = '没写进去'; r.db = '断网就落库';
+      steps.push({st:'第 5 站', role:'rn', cmd:'新主库上 B：SET … NX', res:'OK，这时没有别人拿着锁：不会出现两个主人'});
+      r.notes.push('min-replicas-to-write 把“丢锁”换成了“拒写”：断网 3 s 后起到切主完成，第 5、7 站一直报错，可用性换一致性。');
+    } else if (split) {
+      r.lock = 'lost'; r.cache = '丢 ' + gap + ' s'; r.db = '重复重建';
+      steps.push({st:'第 5 站', role:'bad', cmd:'新主库上 B：SET … NX', res:'OK：从库从没见过 A 的锁。A 和 B 都以为自己拿着锁（⑤ 实测）'});
+      steps.push({st:'第 7 站', role:'of', cmd:'A 用 Lua 解锁', res:'比对 token 不一致，回 0，不会误删 B 的锁'});
+      if (rep === 'minrep') r.notes.push('配了 min-replicas-to-write 1 也没挡住：lag 按秒算、靠每秒一次的 ACK，max-lag 2 时断网约 3 s 才开始拒，A 在断网 2.5 s 时拿锁，主库照收（⑤ 实测 2.95 s 才拒）。');
+      else r.notes.push('主库在断网这 ' + gap + ' s 里照常回 OK，WAIT 1 会返回 0，可业务代码没调 WAIT 就不知道。');
+    } else {
+      r.lock = 'keep'; r.cache = '在'; r.db = '切主时落库';
+      steps.push({st:'第 5 站', role:'rn', cmd:'新主库上 B：SET … NX', res:'nil：锁 0.3 ms 内就复制过去了，B 去等缓存'});
+      r.notes.push('主从正常时复制只落后零点几毫秒，正好在这零点几毫秒里宕机才会丢。' + (per === 'none' ? '持久化开不开不影响切主：从库手里的数据在内存里。' : '主库的持久化文件在宕机的机器上，切主时用不上。'));
+    }
+  }
+  return {steps:steps, r:r};
+}
+/*SIM-END*/
+(function(){
+  function $(id){ return document.getElementById(id); }
+  var guessed = null;
+  var LOCK = {keep:'在', lost:'丢了', maybe:'说不准', rej:'没拿到'};
+  function cur(){ return failSim($('c-ev').value, $('c-per').value, $('c-rep').value); }
+  function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+  function render(){
+    var o = cur(), r = o.r;
+    $('steps').innerHTML = o.steps.map(function(s){
+      return '<li data-role="' + s.role + '"><b>' + s.st + '</b><span><code>' + esc(s.cmd) + '</code> → ' + esc(s.res) + '</span></li>';
+    }).join('');
+    $('t-lock').textContent = LOCK[r.lock]; $('t-cache').textContent = r.cache; $('t-down').textContent = r.down; $('t-db').textContent = r.db;
+    $('verdict').textContent = r.notes.join(' ');
+    $('verdict').setAttribute('data-role', r.lock === 'lost' ? 'bad' : (r.lock === 'keep' ? 'done' : 'warn'));
+    if (guessed !== null) showGuess();
+  }
+  function showGuess(){
+    var lock = cur().r.lock, btns = document.querySelectorAll('#guess .opts button');
+    btns.forEach(function(b){ b.classList.remove('right','wrong'); var g = b.getAttribute('data-g'); if (g === 'skip') return; if (g === lock) b.classList.add('right'); else if (g === guessed) b.classList.add('wrong'); });
+    var why = {
+      keep: '锁在：要么进程死了页缓存还在、AOF 救回来了，要么主从正常，锁 0.3 ms 内就复制过去了。',
+      lost: '锁丢了：救它的那一份（快照、页缓存、从库）里没有它，新的主库上 B 的 SET NX 会成功。',
+      maybe: '说不准：断电时页缓存也没了，宕机前 0.5 s 写的锁有没有赶上每秒一次的 fsync，看运气。',
+      rej: 'A 当时就没拿到：主从断网已经 9.5 s，min-replicas-to-write 让主库拒写，丢锁变成了拒写。'
+    }[lock];
+    var res = $('g-res'); res.hidden = false;
+    res.textContent = (guessed === 'skip' ? '' : (guessed === lock ? '猜对了。' : '猜错了。')) + why;
+    $('out').hidden = false;
+  }
+  document.querySelectorAll('#guess .opts button').forEach(function(b){
+    b.addEventListener('click', function(){ guessed = b.getAttribute('data-g'); render(); });
+  });
+  ['c-ev','c-per','c-rep'].forEach(function(id){
+    $(id).addEventListener('change', function(){
+      guessed = null; $('out').hidden = true; $('g-res').hidden = true;
+      document.querySelectorAll('#guess .opts button').forEach(function(b){ b.classList.remove('right','wrong'); });
+    });
+  });
+  render(); $('out').hidden = true;
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
