@@ -171,6 +171,7 @@
 | 02 | [3 台 TC 挂了 2 台，下单直接报错：CAP、BASE 与一致性模型](https://archeu.github.io/study-notes/arch/cap-base-consistency.html) | 分区时拒绝还是先答、PACELC、一致性模型五级尺子、多数派与 W+R>N、BASE 软状态的期限和收尾、七个误用，3 副本抢券实验台 |
 | 03 | [双击下单只出一张单：幂等设计——唯一键、状态机、去重表](https://archeu.github.io/study-notes/arch/idempotency-design.html) | 为什么必须由接收方去重、幂等的三个问题、唯一键的等锁与 1062、键同事务还是先提交、状态机的“从哪来归谁”、去重表与 Seata TCC fence、交易靶场 MySQL 实测，同一个键来两下实验台 |
 | 04 | [一单写三个库：2PC/XA、TCC、Saga、本地消息表与 Seata](https://archeu.github.io/study-notes/arch/distributed-transactions.html) | 两阶段提交的不确定区、四种做法把中间态放在哪（XA 锁住 / TCC 冻结 / Saga 先做后补 / 本地消息表只管送到）、fence 挡住重发空回滚悬挂、Seata TM RM TC 与 AT TCC Saga XA 各管什么、MySQL 8.4 四段实测，四种做法 × 三种故障实验台 |
+| 05 | [300 ms 超时，库存却冻了 2 件：时钟、超时与重试](https://archeu.github.io/study-notes/arch/clock-timeout-retry.html) | 超时 = 不知道的五种情况、查还是重做、退避抖动上限预算、墙上时钟 vs 单调时钟、Seata 判超时用谁的钟、比数不比钟，交易靶场实测和重试风暴实验台 |
 
 ## JDK
 
