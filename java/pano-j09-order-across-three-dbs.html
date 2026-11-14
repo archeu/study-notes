@@ -606,35 +606,35 @@ table.runs td.why code.bad{color:var(--bad)}
         <h3><span class="no">4</span>订单分支 Try：先插一行用户看不到的 CREATING</h3>
         <p>订单服务带着 XID，调自己的 TCC 方法 <code>OrderTcc.tryCreate()</code>。Seata 的代理先向 TC 登记“订单分支”，再在一个本地事务里做两件事：往 <code>orders</code> 插 9527，状态是 <code>CREATING</code>；往 <code>tcc_fence_log</code> 插一行“tried”。</p>
         <p class="why"><b>为什么要它</b>TCC 模式只回滚登记过的分支。订单服务如果直接写一行“待支付”而不当成分支，后面回滚时这一行没人管，就成了库存已退、订单还在。所以订单自己也要分 Try 和 Confirm：Try 只留个占位，Confirm 才让它对用户可见。</p>
-        <p class="down"><b>往下一层</b>分布式事务：2PC、TCC、Saga、本地消息表、Seata <span class="todo-chip">待做</span></p>
+        <p class="down"><b>往下一层</b><a href="../arch/distributed-transactions.html#m-seata">分布式事务：2PC、TCC、Saga、本地消息表、Seata</a></p>
         <p class="risk"><b>常出的事</b>在 <code>@GlobalTransactional</code> 方法里直接 <code>orderMapper.insert()</code>，以为 Seata 会回滚它。TCC 模式下不会，只有走了 TCC 代理（或 AT 模式的数据源代理）的写入才是分支。</p>
       </div>
       <div class="stop" id="s-5" data-stop="5" data-role="pd">
         <h3><span class="no">5</span>库存分支 Try：冻结 2 件，可售 50 → 48</h3>
         <p>就是 <a href="pano-j04-order-calls-inventory.html">J04 全景</a>里那次 <code>Reserve(9527, 88, 2)</code>，只是 RPC 的请求头里多了 XID。库存服务的 TCC 代理先登记“库存分支”，再在本地事务里执行 <code>UPDATE stock SET available = available - 2, frozen = frozen + 2 WHERE sku_id = 88 AND available &gt;= 2</code>，同时插 fence。</p>
         <p class="why"><b>为什么要它</b>直接扣减的话，后面券锁不上就得“加回去”，可这中间别人可能已经看到、甚至买走了。冻结是一个能干净撤销的中间态：Confirm 时 <code>frozen - 2</code>，Cancel 时 <code>available + 2, frozen - 2</code>。</p>
-        <p class="down"><b>往下一层</b>分布式事务（TCC 的资源预留）<span class="todo-chip">待做</span> · 时钟、超时与重试 <span class="todo-chip">待做</span> · 回顾：<a href="pano-j04-order-calls-inventory.html">J04 全景</a>的 deadline 300 ms</p>
+        <p class="down"><b>往下一层</b><a href="../arch/distributed-transactions.html#m-hold">分布式事务（TCC 的资源预留）</a> · 时钟、超时与重试 <span class="todo-chip">待做</span> · 回顾：<a href="pano-j04-order-calls-inventory.html">J04 全景</a>的 deadline 300 ms</p>
         <p class="risk"><b>常出的事</b>RPC 300 ms 超时了，订单服务以为“失败”，其实库存服务在 400 ms 时冻结成功了。超时只说明“不知道”，不说明“没做”。这个分支已经登记过，回滚时 TC 照样会给它发 Cancel，冻结的 2 件能退回来。</p>
       </div>
       <div class="stop" id="s-6" data-stop="6" data-role="pd">
         <h3><span class="no">6</span>券分支 Try：把 MINUS20 锁给 9527</h3>
         <p>券服务登记“券分支”，执行 <code>UPDATE user_coupon SET status = 'LOCKED', order_id = 9527 WHERE id = … AND status = 'UNUSED'</code>，影响 1 行才算成功，同时插 fence。<b>演练就在这里</b>：券服务刚收到请求、本地事务还没提交，订单服务实例 A 被 <code>kill -9</code>，再也没人会发 commit。</p>
         <p class="why"><b>为什么要它</b>用 <code>WHERE status = 'UNUSED'</code> 做条件更新，等于用状态机挡并发：两张单同时抢这张券，只有一张能影响 1 行。</p>
-        <p class="down"><b>往下一层</b>分布式事务 <span class="todo-chip">待做</span> · <a href="../arch/idempotency-design.html#m-state">幂等设计里的“状态机”</a></p>
+        <p class="down"><b>往下一层</b><a href="../arch/distributed-transactions.html#m-fence">分布式事务</a> · <a href="../arch/idempotency-design.html#m-state">幂等设计里的“状态机”</a></p>
         <p class="risk"><b>常出的事</b>Try 失败（券已被用）时，订单服务要抛异常，让 TC 回滚前面两个分支；把异常吞掉、照样往下走，就会发 commit，变成“没用券也打了折”。</p>
       </div>
       <div class="stop" id="s-7" data-stop="7" data-role="cg">
         <h3><span class="no">7</span>Seata TC：写下“要提交”的决议</h3>
         <p>正常路径上，三个 Try 都成功，<code>placeOrder()</code> 正常返回，TM 向 TC 发 commit。TC 把全局状态从 <code>Begin</code> 改成 <code>Committing</code>，这次修改同样要复制到多数派，然后就可以回复订单服务“成功”，用户看到“下单成功，请付款”。</p>
         <p class="why"><b>为什么要它</b>这是整个事务的“拍板”时刻：从这以后，哪怕订单服务、哪个参与者、甚至 tc-1 挂了，新 leader 读到的状态都是 Committing，结局只能是提交。</p>
-        <p class="down"><b>往下一层</b>共识：Raft <span class="todo-chip">待做</span> · 分布式事务里的 2PC：协调者的决议写在哪 <span class="todo-chip">待做</span></p>
+        <p class="down"><b>往下一层</b>共识：Raft <span class="todo-chip">待做</span> · <a href="../arch/distributed-transactions.html#m-2pc">分布式事务里的 2PC：协调者的决议写在哪</a></p>
         <p class="risk"><b>常出的事</b>决议只记在协调者一台机器的内存里（经典 2PC 的老问题），它在“有的分支收到提交、有的还没收到”时挂了，没收到的那些只能一直锁着等。</p>
       </div>
       <div class="stop" id="s-8" data-stop="8" data-role="pd">
         <h3><span class="no">8</span>Seata TC：往三个分支推 Confirm，失败就一直重试</h3>
         <p>TC 逐个调三个分支的二阶段提交（Seata 里默认方法名叫 <code>commit</code>，就是 TCC 说的 Confirm）。订单：<code>CREATING → WAIT_PAY</code>，<b>同一个本地事务</b>里往 outbox 插一行 <code>ORDER_CREATED</code>；库存：冻结的 2 变成真扣，库存 50 → 48；券：<code>LOCKED → USED</code>。每个分支先查 fence：已经是 committed 的直接返回成功。</p>
         <p class="why"><b>为什么要它</b>决议已定，资源要转正。Confirm 失败（比如券库重启）不能回头，只能重试：TC 的恢复任务每 1 秒捞一次没提交完的事务，默认不设上限。所以 Confirm 必须能重复执行。</p>
-        <p class="down"><b>往下一层</b>分布式事务（TCC fence：幂等、空回滚、悬挂）<span class="todo-chip">待做</span> · 时钟、超时与重试 <span class="todo-chip">待做</span> · <a href="../arch/idempotency-design.html#m-dedup">幂等设计：去重表</a></p>
+        <p class="down"><b>往下一层</b><a href="../arch/distributed-transactions.html#m-fence">分布式事务（TCC fence：幂等、空回滚、悬挂）</a> · 时钟、超时与重试 <span class="todo-chip">待做</span> · <a href="../arch/idempotency-design.html#m-dedup">幂等设计：去重表</a></p>
         <p class="risk"><b>常出的事</b>Confirm 里写了“库存再减 2”这种不幂等的逻辑，又没开 fence，一次重试就多扣 2 件。Confirm 依赖的东西被人工删了，重试永远失败，TC 日志里每秒报一次错，没人看。</p>
       </div>
       <div class="stop" id="s-9" data-stop="9" data-role="of">
@@ -648,14 +648,14 @@ table.runs td.why code.bad{color:var(--bad)}
         <h3><span class="no">10</span>演练：订单服务死在第 6 站，TC 等满 60 秒自己回滚</h3>
         <p>实例 A 被 <code>kill -9</code>，TC 里这个全局事务停在 <code>Begin</code>。TC 每 1 秒检查一次：开始时间加 60 秒（<code>@GlobalTransactional</code> 默认超时）已经过了，状态改成 <code>TimeoutRollbacking</code>，给登记过的三个分支推 Cancel：订单 <code>CREATING → CANCELLED</code>，库存冻结的 2 件退回，可售回到 50。券分支看 fence：Try 已提交的，<code>LOCKED → UNUSED</code>；Try 还没提交的，找不到 tried 记录，就是<b>空回滚</b>，什么也不改，但记下一行 suspended。之后那个迟到的 Try 想插 fence 会冲突，失败，这叫<b>防悬挂</b>。</p>
         <p class="why"><b>为什么要它</b>发起方死了，就没人说“提交”还是“回滚”。TC 不能永远等，只能拿“超时”当作“已经死了”的判断，而超时是它按自己的时钟量的。</p>
-        <p class="down"><b>往下一层</b>时钟、超时与重试：分布式里为什么不能信时间 <span class="todo-chip">待做</span> · 分布式事务（空回滚、悬挂）<span class="todo-chip">待做</span></p>
+        <p class="down"><b>往下一层</b>时钟、超时与重试：分布式里为什么不能信时间 <span class="todo-chip">待做</span> · <a href="../arch/distributed-transactions.html#m-fence">分布式事务（空回滚、悬挂）</a></p>
         <p class="risk"><b>常出的事</b>没开 fence：Cancel 先到、什么都没改，迟到的 Try 随后把券锁上，再也没人来解，这张券永远“已锁定”。另一种：业务真需要 90 秒（比如调外部风控），默认 60 秒的超时会把正常的单回滚掉。</p>
       </div>
       <div class="stop" id="s-11" data-stop="11" data-role="cg">
         <h3><span class="no">11</span>对账任务：每 10 分钟按单号比一次三个库</h3>
         <p>独立的对账任务扫最近一段时间的订单，按单号去库存和券库里找对应的冻结、扣减、锁定记录。9527 在演练后三边都是“没发生”，对得上。如果发现“订单 CANCELLED、券还 LOCKED 超过 10 分钟”这种组合，就报警，或按规则自动修。</p>
         <p class="why"><b>为什么要它</b>前面每一站都尽量保证一致，但人工改库、bug、重试被关掉，都可能留下对不上的数据。最终一致说的是“最终会一致”，得有一个东西去确认它真的一致了。</p>
-        <p class="down"><b>往下一层</b><a href="../arch/cap-base-consistency.html">CAP、BASE 与一致性模型</a> · 分布式事务（各方案的兜底）<span class="todo-chip">待做</span></p>
+        <p class="down"><b>往下一层</b><a href="../arch/cap-base-consistency.html">CAP、BASE 与一致性模型</a> · <a href="../arch/distributed-transactions.html#s3">分布式事务（各方案的兜底）</a></p>
         <p class="risk"><b>常出的事</b>对账用的是从库，复制延迟让刚提交的单看起来“对不上”，误报一大片（<a href="../database/mysql-replication-lag.html">主从复制延迟</a>）。只报警没人处理，问题单越积越多。</p>
       </div>
     </div>
@@ -672,7 +672,7 @@ table.runs td.why code.bad{color:var(--bad)}
       <tbody>
         <tr><td class="st">3、7、11</td><td>CAP、BASE 与一致性模型 <span class="dp">懂设计</span></td><td><a href="../arch/cap-base-consistency.html">有页</a></td><td class="ord"><b>1</b><span class="why">先拿到词汇：强一致、最终一致、软状态、分区时选 C 还是选 A。后面每一页都要用这些词说“第 ④⑤⑥ 站那几十毫秒里，三个库不一致算不算错”</span></td></tr>
         <tr><td class="st">1、6、8</td><td>幂等设计：唯一键、状态机、去重表 <span class="dp">懂设计</span></td><td><a href="../arch/idempotency-design.html">有页</a></td><td class="ord"><b>2</b><span class="why">分布式事务的 Confirm、Cancel 要重试，重试的前提就是幂等。J08 已经学过消费端的去重表，这一页把它扩到接口入口（第 1 站）和状态机（第 6 站）</span></td></tr>
-        <tr><td class="st">4、5、6、8、9、10</td><td>分布式事务：2PC、TCC、Saga、本地消息表、Seata <span class="dp">懂设计</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>3</b><span class="why">这一站的主角，管 6 站。同一个下单场景，分别用 2PC、TCC、Saga、本地消息表各做一遍，看谁锁资源多久、谁要写补偿、谁挡不住哪种宕机；再看 Seata 的 AT、TCC 各帮你做了什么</span></td></tr>
+        <tr><td class="st">4、5、6、8、9、10</td><td>分布式事务：2PC、TCC、Saga、本地消息表、Seata <span class="dp">懂设计</span></td><td><a href="../arch/distributed-transactions.html">有页</a></td><td class="ord"><b>3</b><span class="why">这一站的主角，管 6 站。同一个下单场景，分别用 2PC、TCC、Saga、本地消息表各做一遍，看谁锁资源多久、谁要写补偿、谁挡不住哪种宕机；再看 Seata 的 AT、TCC 各帮你做了什么</span></td></tr>
         <tr><td class="st">5、8、10</td><td>时钟、超时与重试：分布式里为什么不能信时间 <span class="dp">懂机制</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>4</b><span class="why">学完事务才看得出超时的代价：第 5 站超时只是“不知道”，第 10 站靠 60 秒判死，第 8 站的重试要有间隔和上限。时钟回拨也在这里，接第 2 站的雪花算法</span></td></tr>
         <tr><td class="st">3、7</td><td>共识：Raft 怎么选主、怎么复制日志 <span class="dp">懂设计</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>5</b><span class="why">回答“协调者自己会不会挂”。放在超时之后：Raft 的选举本身就是靠随机超时来发现 leader 死了。J08 里 Kafka 的 KRaft 也是它</span></td></tr>
         <tr><td class="st">9</td><td>分布式锁：Redis、ZooKeeper、数据库怎么选 <span class="dp">懂机制</span></td><td>有页：<a href="../redis/redis-distributed-lock.html">Redis 分布式锁</a> · 下一圈 <a href="../redis/redis-lock-expire-fencing.html">有页</a></td><td class="ord"><b>6</b><span class="why">Redis 一侧已经学了两圈。学完 Raft 再回来补 ZooKeeper（临时顺序节点）和数据库锁，三者放一起比：谁能在 leader 切换时不丢锁</span></td></tr>
