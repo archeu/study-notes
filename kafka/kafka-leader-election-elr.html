@@ -1,0 +1,1170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>三台 broker 都倒了，谁能当 leader：Kafka 的 ISR、ELR 与 unclean 选举</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J08 knowledge point 3 "reliability: acks, replicas, commits" (second round), station 5 of the J08 panorama. Roles: pd = leader and ISR, bk = ELR (eligible leader replicas), cg = Kafka log and offsets, rn = order service / producer, of = consumers (points-svc), warn = unclean election. Fixed: bad red = lost or refused, good green = safe, neutral grey = old ways. Interactions: one "guess first" bench in step 4 (who becomes leader after a rack power loss). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Kafka</span><span aria-hidden="true">/</span><span class="tb-here">三台 broker 都倒了，谁能当 leader</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--line-strong)"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">ISR · ELR · LastKnownElr · min.insync.replicas · unclean.leader.election.enable · 高水位 · leader epoch · 截断 · Kafka 4.4.0</p>
+  <h1>三台 broker 都倒了，谁能当 leader：Kafka 的 ISR、ELR 与 unclean 选举</h1>
+  <p class="lead">Kafka 只让<b>肯定有全部已提交消息</b>的副本当 leader：平时从 ISR 里挑；ISR 缩到 <code>min.insync.replicas</code> 以下时，被挤出去的副本记进 <b>ELR</b>，还能接班；非正常关机重启的副本不算数。三台都倒、先回来的偏偏是落后的那台时，只有两条路：<b>等</b>合格的副本回来，或者用 <b>unclean 选举</b>换回可用，代价是已经 ACK 的消息被截掉，offset 还会被新消息复用。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j08-order-event-life.html#s-5">一条订单消息的一生 · 第 5 站</a></span><span>地图：<a href="../java/roadmap.html#j08">J08 · 可靠性：生产确认、副本、消费提交</a></span><span>第一圈：<a href="kafka-reliability-group.html">Kafka 可靠性与消费组</a></span></p>
+  <p class="scene"><b>下一圈</b><span>第一圈讲了不丢消息的三段：生产者 <code>acks=all</code>，broker 用 <code>min.insync.replicas</code> 守住副本数，消费者处理完再提交位点；ELR 和 unclean 选举只各提了一句。全景第 5 站实测到“停两台 follower，写入被拒”就停了。这一页接着往下走：leader 也倒了以后，控制器怎么决定谁接班，每种选择丢什么、等多久。所有结论都在本机的 Kafka 4.4.0 三 broker 集群上演练过。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：最后一个副本也倒了，先回来的是落后的那台</h2>
+    <p class="lead">在全景第 5 站，这一步要解决的是：分区 3 存三份，任何一台 broker 挂了，消息都不丢。全景实测到 ISR 缩成 1 个就拒绝写入。现在往下多走一步：20:00 大促，分区 3 的三台 broker 放在同一个机架上，先后断了电。</p>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 360" role="img" aria-label="分区 3 的三个副本：broker 3 是 leader，日志有 A 批 offset 0 到 9 和 B 批 10 到 19；broker 2 也有 A、B 两批；broker 1 最先倒下，只有 A 批。broker 2 倒下后 C 批被拒绝，最后 broker 3 也倒了。只有 broker 1 先回来：让它当 leader，B 批 10 条已 ACK 的消息会被截掉；不让，分区 3 就一直没有 leader。">
+  <text x="20" y="26" class="t-h">分区 3 的三份日志，倒下前一刻（offset 0～19）</text>
+  <text x="168" y="54" class="t-monos">0</text><text x="330" y="54" class="t-monos">9</text><text x="348" y="54" class="t-monos">10</text><text x="510" y="54" class="t-monos">19</text>
+  <!-- broker 3 -->
+  <text x="20" y="84" class="t-s">broker 3 · leader</text>
+  <rect x="160" y="66" width="180" height="28" rx="4" class="b-cg"/><text x="250" y="85" text-anchor="middle" class="t-cg">A 批 10 条</text>
+  <rect x="340" y="66" width="180" height="28" rx="4" class="b-pd"/><text x="430" y="85" text-anchor="middle" class="t-pd">B 批 10 条</text>
+  <rect x="524" y="66" width="18" height="28" rx="4" class="b-bad"/><text x="533" y="85" text-anchor="middle" class="t-bad">✕</text>
+  <text x="554" y="78" class="t-xs">C：ISR 只剩 1 个 &lt; 2，</text><text x="554" y="92" class="t-xs">拒绝写入</text>
+  <circle cx="660" cy="80" r="11" class="b-bad"/><text x="660" y="85" text-anchor="middle" class="t-xs" style="fill:var(--bad);font-weight:700">3</text>
+  <text x="678" y="85" class="t-s">最后倒（kill -9）</text>
+  <!-- broker 2 -->
+  <text x="20" y="134" class="t-s">broker 2</text>
+  <rect x="160" y="116" width="180" height="28" rx="4" class="b-cg"/><text x="250" y="135" text-anchor="middle" class="t-cg">A 批</text>
+  <rect x="340" y="116" width="180" height="28" rx="4" class="b-pd"/><text x="430" y="135" text-anchor="middle" class="t-pd">B 批</text>
+  <circle cx="660" cy="130" r="11" class="b-bad"/><text x="660" y="135" text-anchor="middle" class="t-xs" style="fill:var(--bad);font-weight:700">2</text>
+  <text x="678" y="135" class="t-s">第二个倒</text>
+  <!-- broker 1 -->
+  <text x="20" y="184" class="t-s">broker 1</text>
+  <rect x="160" y="166" width="180" height="28" rx="4" class="b-cg"/><text x="250" y="185" text-anchor="middle" class="t-cg">A 批</text>
+  <rect x="340" y="166" width="180" height="28" rx="4" class="b-dash"/><text x="430" y="185" text-anchor="middle" class="t-xs">倒下时 B 批还没写</text>
+  <circle cx="660" cy="180" r="11" class="b-bad"/><text x="660" y="185" text-anchor="middle" class="t-xs" style="fill:var(--bad);font-weight:700">1</text>
+  <text x="678" y="185" class="t-s">最先倒，从此落后</text>
+  <text x="160" y="222" class="t-xs">A、B 两批都是 acks=all 拿到 ACK 的：订单服务的 outbox 已经把这 20 行标成“已发”，积分服务也处理完、提交了位点 20。</text>
+  <!-- decision -->
+  <line x1="20" y1="240" x2="940" y2="240" class="e-axis"/>
+  <rect x="20" y="258" width="250" height="84" rx="10" class="b-card"/>
+  <text x="145" y="284" text-anchor="middle" class="t-h">来电了，只有 broker 1</text>
+  <text x="145" y="304" text-anchor="middle" class="t-s">先起来（另两台磁盘自检中）</text>
+  <text x="145" y="326" text-anchor="middle" class="t-xs">让它当分区 3 的 leader 吗？</text>
+  <path d="M270,284 L350,272" class="e-bad" marker-end="url(#ah-bad)"/>
+  <path d="M270,318 L350,326" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="356" y="252" width="584" height="40" rx="8" class="b-bad"/>
+  <text x="370" y="270" class="t-bad">让它当：马上能用，但 B 批 10 条已 ACK 的消息没了</text>
+  <text x="370" y="285" class="t-xs">另两台回来后要截掉 offset 10～19，向它看齐；新消息从 offset 10 接着写</text>
+  <rect x="356" y="304" width="584" height="40" rx="8" class="b-warn"/>
+  <text x="370" y="322" class="t-warn">不让：一条不丢，但分区 3 一直没有 leader</text>
+  <text x="370" y="337" class="t-xs">订单 9527 之后的事件发不出去，outbox 越积越多；要等多久，取决于谁、以什么方式回来</text>
+</svg>
+  </div>
+  <figcaption>同一个机架断电，三台按 ①②③ 的顺序倒下。broker 编号和倒下顺序取自 ⑤ 的实测（分区 3 的副本是 [3,1,2]）。</figcaption>
+  </figure>
+  <div class="goals3">
+    <div class="fact" data-role="done"><h4>不丢已确认的</h4><p>B 批里有 9527 的“已支付”。生产者拿到了 ACK，就不会再发；Kafka 弄丢它，下游谁都补不回来。</p></div>
+    <div class="fact" data-role="warn"><h4>尽快能写</h4><p>分区 3 没有 leader，key 落在它上面的订单事件全都发不出去。大促期间等十分钟，outbox 里就是几万行。</p></div>
+    <div class="fact" data-role="bk"><h4>能预先知道</h4><p>值班的人要能回答：现在谁有资格当 leader，还要等哪台回来，要是强行恢复会丢哪一段。这一页讲的就是这套规则。</p></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：两种朴素的选法，一种丢消息，一种干等</h2>
+    <p class="lead">先不看 Kafka 4 现在怎么做，用两条最容易想到的规则各走一遍。缺的那一块，就是这一页的精华。</p>
+  </div>
+  <div class="design">
+    <div class="way" data-role="bad">
+      <h4>谁先回来选谁<small>Kafka 0.11 之前的默认</small></h4>
+<svg viewBox="0 0 460 200" role="img" aria-label="谁先回来选谁：broker 1 只有 A 批，当了 leader；broker 3、2 回来后把 offset 10 到 19 截掉向它看齐，B 批没了；新消息 D1 写在 offset 10。">
+  <text x="10" y="22" class="t-s">broker 1 当 leader，日志只到 offset 9</text>
+  <rect x="10" y="34" width="150" height="24" rx="4" class="b-cg"/><text x="85" y="51" text-anchor="middle" class="t-cg">A 0～9</text>
+  <rect x="160" y="34" width="60" height="24" rx="4" class="b-good"/><text x="190" y="51" text-anchor="middle" class="t-good">D1…</text>
+  <text x="230" y="51" class="t-xs">新消息从 offset 10 写</text>
+  <text x="10" y="90" class="t-s">broker 3、2 回来：向新 leader 看齐</text>
+  <rect x="10" y="102" width="150" height="24" rx="4" class="b-cg"/><text x="85" y="119" text-anchor="middle" class="t-cg">A 0～9</text>
+  <rect x="160" y="102" width="150" height="24" rx="4" class="b-bad"/><text x="235" y="119" text-anchor="middle" class="t-bad">B 10～19 截掉</text>
+  <path d="M235,130 L235,150" class="e-bad" marker-end="url(#ah-bad)"/>
+  <text x="10" y="172" class="t-bad">10 条已 ACK 的消息永久消失</text>
+  <text x="10" y="190" class="t-xs">offset 10 从此是 D1，不再是 B1</text>
+</svg>
+      <p>能马上恢复写入。可 Kafka 对生产者说过“写成功了”，这个承诺被悄悄收回。这就是今天的 <code>unclean.leader.election.enable=true</code>，从 0.11 起默认关掉（KIP-106）。</p>
+    </div>
+    <div class="way" data-role="other">
+      <h4>只认 ISR 里最后那一个<small>没有 ELR 的 KRaft</small></h4>
+<svg viewBox="0 0 460 200" role="img" aria-label="只认 ISR 里最后那一个：broker 2 倒下后 ISR 只剩 broker 3，broker 3 倒下时 ISR 不清空，仍是 3。broker 2 有 A、B 两批，先回来也不能当 leader，只能等 broker 3。">
+  <text x="10" y="22" class="t-s">倒完以后，控制器里：</text>
+  <rect x="10" y="34" width="200" height="30" rx="6" class="b-neu"/><text x="110" y="54" text-anchor="middle" class="t-mono">Isr: 3（留着最后一个）</text>
+  <text x="10" y="94" class="t-s">broker 2 先回来，A、B 两批都有</text>
+  <rect x="10" y="106" width="100" height="24" rx="4" class="b-cg"/><text x="60" y="123" text-anchor="middle" class="t-cg">A</text>
+  <rect x="110" y="106" width="100" height="24" rx="4" class="b-pd"/><text x="160" y="123" text-anchor="middle" class="t-pd">B</text>
+  <text x="222" y="123" class="t-xs">不在 ISR → 不能当</text>
+  <text x="10" y="166" class="t-warn">只能干等 broker 3</text>
+  <text x="10" y="186" class="t-xs">broker 3 的硬盘要是坏了，就只剩 unclean 一条路</text>
+</svg>
+      <p>不丢，可等得冤：broker 2 明明有全部已提交的数据，只因为它比 broker 3 早一步被踢出 ISR，就失去了资格。Kafka 3.x 的 KRaft 集群（以及 4.x 上没打开 ELR 的集群）就是这样。</p>
+    </div>
+  </div>
+  <div class="pains">
+    <p><b>缺的那块，就是精华：</b>在 ISR 一路缩小的过程中，<b>记住哪些副本仍然一定有全部已提交的数据</b>，并且这份名单要跟着“谁非正常关过机”一起更新。有了它，第二个倒下的 broker 2 先回来，也能干净接班。Kafka 4 管这份名单叫 ELR（Eligible Leader Replicas，有资格当 leader 的副本）。</p>
+    <p><b>不懂精华时的典型误用：</b>分区一离线就打开 <code>unclean.leader.election.enable</code> 或者跑 <code>kafka-leader-election.sh --election-type unclean</code>，以为只是“换个 leader”。其实它可能截掉已 ACK 的消息，而且没有任何客户端会收到报错（⑤ 实测：截掉 10 条，生产者、消费者都没报错）。</p>
+  </div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：同样三份副本，别的系统怎么选主</h2>
+    <p class="lead">“副本都挂了，选谁”不是 Kafka 独有的问题。把 Kafka 放进已经学过的几个系统里比一比，就能看出它为什么要多一份 ELR 名单。</p>
+  </div>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>系统</th><th>写成功的标准</th><th>3 份副本挂 2 台</th><th>谁有资格当主</th><th>全挂了以后</th></tr></thead>
+    <tbody>
+      <tr data-role="pd"><td><b>Kafka 数据分区</b><br>ISR + ELR</td><td>ISR 里的副本全写到，且 ISR ≥ <code>min.insync.replicas</code></td><td>min.isr=2：剩下的那台还能读、不能写；数据不丢</td><td>ISR，其次 ELR，再次最后一任 leader</td><td>等合格副本；或 unclean 选举，可能丢已 ACK 的</td></tr>
+      <tr><td><b>多数派（Raft）</b><br>KRaft 控制器自己、RocketMQ DLedger</td><td>过半节点写到</td><td>读写都停（3 台要 2 票）</td><td>日志最新、并拿到过半选票的</td><td>等过半节点回来，不会选落后的</td></tr>
+      <tr><td><b>MySQL 半同步</b><br><a href="../database/mysql-replication-lag.html">复制延迟那页</a></td><td>至少 1 个从库收到 binlog（超时会退回异步）</td><td>主库还在：退回异步继续写</td><td>MHA、Orchestrator 或人工挑 GTID 最全的从库</td><td>人工恢复</td></tr>
+      <tr><td><b>Redis 哨兵</b><br><a href="../redis/redis-restart-failover.html">重启、切主那页</a></td><td>主节点写进内存就算（复制是异步的）</td><td>哨兵过半同意后切到从库</td><td>复制偏移量最大的从库</td><td>切主本来就会丢最后一段</td></tr>
+    </tbody>
+  </table></div>
+  <p class="cap">MySQL 半同步、Redis 哨兵的细节以各自那页为准，这里只比“写成功的标准”和“选主的资格”这两列。</p>
+  <div class="pains">
+    <p><b>选择规则：</b>3 份副本、要扛 2 台故障还不丢已确认的数据，只能用 Kafka 这种“ISR + 名单”的做法；能接受 5 份副本扛 2 台，多数派更省心，因为“谁最全”靠投票就能定。<b>本页学 Kafka 数据分区的选主。</b>Kafka 自己的元数据（谁是 leader、ISR、ELR 存在哪）走的是另一套：KRaft 控制器用 Raft 多数派，本页的实验只有一个控制器，它不会倒。</p>
+  </div>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：控制器给每个分区记四张名单，按固定顺序挑 leader</h2>
+    <p class="lead">选 leader 的不是 broker 自己，而是 KRaft 控制器。它在元数据里给每个分区记着几张名单，每台 broker 的上线、下线、重启都会改这几张名单；选谁当 leader，就照着名单按顺序挑。</p>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>LEO 和高水位（HW）</b>：LEO 是一个副本“下一条要写的位置”；HW 是 ISR 里都已经有的位置，HW 以下的消息才算“已提交”，消费者也只读得到这里。见 <a href="kafka-reliability-group.html">第一圈</a>第三圈的图。</li>
+      <li><b>ISR、acks=all、min.insync.replicas</b>：ISR 是跟得上 leader 的副本（含 leader）。<code>acks=all</code> 等 ISR 全写到才回 ACK；ISR 少于 <code>min.insync.replicas</code> 时，leader 直接拒绝 <code>acks=all</code> 的写入（全景第 5 站实测）。</li>
+      <li><b>页缓存不刷盘</b>：broker 写进操作系统的页缓存就算写入，不等 fsync（<a href="kafka-storage-zerocopy.html">存储与零拷贝</a>）。所以“不丢”靠多副本，单台断电时页缓存里的尾巴会没。</li>
+      <li><b>leader epoch</b>：每换一任 leader，任期号加一。副本靠它判断自己的日志从哪里开始和新 leader 不一样（⑥ 第三圈）。</li>
+    </ul>
+  </div>
+
+  <h3 id="lists">四张名单，以及它们在断电过程中怎么变</h3>
+  <div class="sets">
+    <div class="fact" data-role="other"><h4>Replicas</h4><b class="v">3, 1, 2</b><p>分区 3 放在哪几台上。建 topic 时定下，平时不变。</p></div>
+    <div class="fact" data-role="pd"><h4>Isr</h4><b class="v">3, 2 → 3 → 空</b><p>跟得上 leader 的副本。正常的 leader 只从这里选。</p></div>
+    <div class="fact" data-role="bk"><h4>Elr</h4><b class="v">空 → 2 → 2, 3</b><p>不在 ISR、但一定有全部已提交数据的副本。ISR 空了才轮到它们。</p></div>
+    <div class="fact" data-role="warn"><h4>LastKnownElr</h4><b class="v">空 → 3</b><p>分区第一次变成没 leader 时，记下最后一任 leader。</p></div>
+  </div>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>时刻（⑤ 实测，<code>kafka-topics.sh --describe</code>）</th><th class="mono">Leader</th><th class="mono">Isr</th><th class="mono">Elr</th><th class="mono">LastKnownElr</th><th>为什么</th></tr></thead>
+    <tbody>
+      <tr><td>三台都在</td><td class="mono">3</td><td class="mono">3,1,2</td><td class="mono">–</td><td class="mono">–</td><td>正常</td></tr>
+      <tr><td>broker 1 kill -9</td><td class="mono">3</td><td class="mono">3,2</td><td class="mono">–</td><td class="mono">–</td><td>ISR 还有 2 个 = min.isr，不需要 ELR；broker 1 从此缺 B 批</td></tr>
+      <tr data-role="bk"><td>broker 2 kill -9</td><td class="mono">3</td><td class="mono">3</td><td class="mono">2</td><td class="mono">–</td><td>ISR 掉到 1 个 &lt; 2：被挤出去的 broker 2 进 ELR；broker 1 不进，它缺数据</td></tr>
+      <tr data-role="warn"><td>broker 3 kill -9</td><td class="mono">none</td><td class="mono">空</td><td class="mono">2,3</td><td class="mono">3</td><td>最后一个也被挤出 ISR，同样进 ELR；第一次没 leader，记下 3</td></tr>
+      <tr data-role="bad"><td>broker 1 先回来</td><td class="mono">none</td><td class="mono">空</td><td class="mono">2,3</td><td class="mono">3</td><td>broker 1 不在任何一张名单上，没资格</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3 id="rules">名单怎么变：三条规则</h3>
+  <ol class="callouts">
+    <li><b>1</b><span><b>ISR ≥ <code>min.insync.replicas</code> 时，ELR 清空。</b>ISR 够数，平时的选法就够用，不需要备胎。所以 broker 1 先倒时，它没进 ELR，它之后缺了 B 批，本来也不该有资格。</span></li>
+    <li><b>2</b><span><b>ISR 掉到 <code>min.insync.replicas</code> 以下时，被挤出 ISR 的副本进 ELR；同时 leader 停止推进高水位。</b>后半句是关键：HW 不再前进，就不会有新的“已提交”消息，ELR 里的副本被挤出去的那一刻有的数据，就永远够用。</span></li>
+    <li><b>3</b><span><b>非正常关机后重新上线的副本，从 ELR 里删掉。</b>kill -9、断电、进程崩溃都算。broker 正常关机时会在本地留一个“干净关机”的记录，里面有它这一轮的 broker epoch，下次向控制器注册时带上；没有或对不上，控制器就当它可能丢了页缓存里的尾巴，不再保证它“有全部已提交数据”。</span></li>
+  </ol>
+
+  <h3 id="ladder">选谁：从上往下，第一个有人的那一级</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="控制器选 leader 的顺序：一，ISR 里活着的副本；二，ISR 为空时，ELR 里活着的副本；三，ISR 和 ELR 都空、LastKnownElr 只有一个时，最后一任 leader 回来就选它，记作 unclean；四，topic 开了 unclean.leader.election.enable，任何活着的副本；都没有，分区没有 leader，等。前两级不丢已提交的消息，第三级一般不丢，第四级可能丢已 ACK 的消息。">
+  <text x="20" y="24" class="t-h">KRaft 控制器给分区 3 挑 leader（Kafka 4.4.0 PartitionChangeBuilder）</text>
+  <rect x="20" y="40" width="560" height="44" rx="10" class="b-pd"/>
+  <text x="36" y="60" class="t-pd">1 · ISR 里活着的副本</text><text x="36" y="76" class="t-xs">平时的选法；按 Replicas 的顺序挑第一个</text>
+  <rect x="620" y="48" width="320" height="28" rx="14" class="b-good"/><text x="780" y="67" text-anchor="middle" class="t-good">不丢已提交的</text>
+  <path d="M300,84 L300,100" class="e-mut" marker-end="url(#ah-mut)"/><text x="310" y="97" class="t-xs">没有</text>
+  <rect x="20" y="104" width="560" height="44" rx="10" class="b-bk"/>
+  <text x="36" y="124" class="t-bk">2 · ISR 为空时，ELR 里活着的副本</text><text x="36" y="140" class="t-xs">日志里记作 “using ELR”；新 leader 的 ISR 只有它自己</text>
+  <rect x="620" y="112" width="320" height="28" rx="14" class="b-good"/><text x="780" y="131" text-anchor="middle" class="t-good">不丢已提交的（规则 2 保证）</text>
+  <path d="M300,148 L300,164" class="e-mut" marker-end="url(#ah-mut)"/><text x="310" y="161" class="t-xs">没有</text>
+  <rect x="20" y="168" width="560" height="44" rx="10" class="b-warn"/>
+  <text x="36" y="188" class="t-warn">3 · ISR、ELR 都空：最后一任 leader（LastKnownElr）回来就选它</text><text x="36" y="204" class="t-xs">不看 unclean 开关；日志和指标里记作一次 unclean 选举</text>
+  <rect x="620" y="176" width="320" height="28" rx="14" class="b-warn"/><text x="780" y="195" text-anchor="middle" class="t-warn">一般不丢；真断电可能丢尾巴</text>
+  <path d="M300,212 L300,228" class="e-mut" marker-end="url(#ah-mut)"/><text x="310" y="225" class="t-xs">没有</text>
+  <rect x="20" y="232" width="560" height="44" rx="10" class="b-bad"/>
+  <text x="36" y="252" class="t-bad">4 · 开了 unclean.leader.election.enable：任何活着的副本</text><text x="36" y="268" class="t-xs">或者人工 kafka-leader-election.sh --election-type unclean</text>
+  <rect x="620" y="240" width="320" height="28" rx="14" class="b-bad"/><text x="780" y="259" text-anchor="middle" class="t-bad">可能丢已 ACK 的消息</text>
+  <path d="M300,276 L300,292" class="e-mut" marker-end="url(#ah-mut)"/><text x="310" y="289" class="t-xs">没有</text>
+  <rect x="20" y="296" width="560" height="28" rx="8" class="b-dash"/>
+  <text x="36" y="315" class="t-s">Leader: none，等下一台 broker 上线时再走一遍</text>
+</svg>
+  </div>
+  <figcaption>第 3 级是 KIP-966 带来的兜底：所有人都非正常关机过，没人能证明自己最全时，最后一任 leader 最可能是最全的。源码里它只在 ISR、ELR 都为空、LastKnownElr 恰好一个人时生效，所以 ELR 里还挂着一个没回来的副本时，它不会触发（⑥ 坑 4）。</figcaption>
+  </figure>
+
+  <h3 id="why">为什么这样设计</h3>
+  <div class="design">
+    <div class="way" data-role="pd">
+      <h4>ISR + 名单<small>Kafka 的选择</small></h4>
+<svg viewBox="0 0 460 150" role="img" aria-label="ISR 加名单：3 份副本，挂 2 台，剩下 1 台仍有全部已提交数据；写一条只等 ISR。">
+  <rect x="20" y="20" width="60" height="36" rx="8" class="b-pd"/><text x="50" y="43" text-anchor="middle" class="t-s">副本</text>
+  <rect x="96" y="20" width="60" height="36" rx="8" class="b-neu"/><text x="126" y="43" text-anchor="middle" class="t-bad">✕</text>
+  <rect x="172" y="20" width="60" height="36" rx="8" class="b-neu"/><text x="202" y="43" text-anchor="middle" class="t-bad">✕</text>
+  <text x="250" y="43" class="t-s">3 份扛 2 台</text>
+  <text x="20" y="84" class="t-xs">要扛 f 台故障，只要 f+1 份副本</text>
+  <text x="20" y="104" class="t-xs">代价：剩下最后几份时，没法靠投票知道谁最全，</text>
+  <text x="20" y="122" class="t-xs">只能靠控制器一路记名单（ISR → ELR → 最后一任）</text>
+</svg>
+    </div>
+    <div class="way" data-role="other">
+      <h4>多数派投票<small>被放弃的</small></h4>
+<svg viewBox="0 0 460 150" role="img" aria-label="多数派：要扛 2 台故障需要 5 份副本，比 ISR 多出 2 份磁盘和网络流量。">
+  <rect x="20" y="20" width="50" height="36" rx="8" class="b-neu"/>
+  <rect x="80" y="20" width="50" height="36" rx="8" class="b-neu"/>
+  <rect x="140" y="20" width="50" height="36" rx="8" class="b-neu"/>
+  <rect x="200" y="20" width="50" height="36" rx="8" class="b-neu"/><text x="225" y="43" text-anchor="middle" class="t-bad">✕</text>
+  <rect x="260" y="20" width="50" height="36" rx="8" class="b-neu"/><text x="285" y="43" text-anchor="middle" class="t-bad">✕</text>
+  <text x="324" y="43" class="t-s">5 份扛 2 台</text>
+  <text x="20" y="84" class="t-xs">要扛 f 台故障，需要 2f+1 份副本</text>
+  <text x="20" y="104" class="t-xs">好处：谁最全，过半投票自然决定，不用额外名单</text>
+  <text x="20" y="122" class="t-xs">对 Kafka 输在：每多一份副本，就多一份磁盘和复制流量</text>
+</svg>
+    </div>
+  </div>
+  <p class="cap">决定胜负的约束：Kafka 存的是海量的日志数据，副本数直接乘到磁盘和网络上。官方设计文档“Replicated Logs”一节就是这样论证的：ISR 用 f+1 份扛 f 台，代价是“所有副本都挂了怎么办”（文档原题 <i>Unclean leader election: What if they all die?</i>）只剩两个选项：等 ISR 里的副本回来，或者让第一个回来的副本当 leader。ELR 是 Kafka 4 对第一个选项的改进：把“可以等谁”的范围从“最后那一个”放宽到“所有肯定不缺数据的”。</p>
+  <div class="design">
+    <div class="way" data-role="bk">
+      <h4>非正常关机就除名<small>Kafka 的选择</small></h4>
+      <p>写入只进页缓存，不 fsync。进程被 kill -9 时页缓存还在，可机器断电时就没了，控制器分不清是哪一种，只能一律当成“可能丢了尾巴”。吞吐保住了，代价是 ⑤ 里那种情况：broker 2 明明数据齐全，kill -9 重启后也失去资格。</p>
+    </div>
+    <div class="way" data-role="other">
+      <h4>每条都 fsync<small>被放弃的</small></h4>
+      <p>每条 fsync 以后，非正常关机也不丢，ELR 不用除名。可写入速度就被磁盘每秒能完成的 fsync 次数卡住了。Kafka 留了 <code>log.flush.interval.messages</code> 这类参数，默认值是 Long 的最大值，等于不主动刷盘（见 <a href="kafka-storage-zerocopy.html">存储与零拷贝</a>）。</p>
+    </div>
+  </div>
+
+  <h3 id="syntax">最少的命令</h3>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">看名单、看开关、强行选举</span><span>Kafka 4.4.0 自带脚本</span></div>
+<pre><code><span class="cm"># 分区的四张名单（Elr、LastKnownElr 两栏是 4.x 才有的）</span>
+kafka-topics.sh --bootstrap-server $BS --describe --topic order-events
+<span class="cm">#  Partition: 3  Leader: none  Replicas: 3,1,2  Isr:   Elr: 2,3  LastKnownElr: 3</span>
+
+<span class="cm"># 这个集群开没开 ELR：FinalizedVersionLevel: 1 是开着</span>
+kafka-features.sh --bootstrap-server $BS describe | grep eligible.leader.replicas
+
+<span class="cm"># unclean 的开关是 topic 级配置，默认 false（broker 上也有同名的默认值）</span>
+kafka-configs.sh --bootstrap-server $BS --alter --entity-type topics --entity-name order-events \
+  --add-config unclean.leader.election.enable=true
+
+<span class="cm"># 不改配置，只对一个分区强行做一次 unclean 选举，立即生效</span>
+kafka-leader-election.sh --bootstrap-server $BS --election-type unclean --topic order-events --partition 3</code></pre>
+  </div>
+  <p class="cap">放到第 ⑥ 步的细节：打开配置后什么时候真的选（控制器每 5 分钟扫一次，或者有 broker 上线时）、选完以后为什么还写不进、消费者的位点怎么办。</p>
+
+  <h3 id="lab-h">推演台：换一种倒法、换一台先回来</h3>
+  <div class="lab" id="lab" data-role="bk">
+    <div class="ctl-grid">
+      <div class="ctl"><span class="lbl">先回来的是</span>
+        <select id="c-first"><option value="F1" selected>broker 1（最先倒、缺 B 批）</option><option value="F2">broker 2（第二个倒）</option><option value="L">broker 3（最后一任 leader）</option></select></div>
+      <div class="ctl"><span class="lbl">broker 2 是怎么停的</span>
+        <select id="c-f2"><option value="kill" selected>kill -9 / 断电</option><option value="term">正常关机（SIGTERM）</option></select></div>
+      <div class="ctl"><span class="lbl">unclean.leader.election.enable</span>
+        <select id="c-unclean"><option value="0" selected>false（默认）</option><option value="1">true</option></select></div>
+      <div class="ctl"><span class="lbl">min.insync.replicas</span>
+        <select id="c-minisr"><option value="2" selected>2</option><option value="1">1（broker 默认）</option></select></div>
+      <div class="ctl"><span class="lbl">ELR</span>
+        <select id="c-elr"><option value="1" selected>开（4.1 起新集群默认）</option><option value="0">关（3.x KRaft、没开的老集群）</option></select></div>
+    </div>
+    <div class="guess" id="guess">
+      <p><b>先猜：</b>这台 broker 回来以后，分区 3 会怎样？</p>
+      <div class="opts">
+        <button type="button" data-g="ok">它马上当 leader，已确认的一条不丢</button>
+        <button type="button" data-g="lost">它马上当 leader，但丢了已确认的消息</button>
+        <button type="button" data-g="wait">它当不了，分区还是没有 leader</button>
+        <button type="button" data-g="skip" class="skip">不猜了，直接看</button>
+      </div>
+      <p class="res" id="g-res" hidden></p>
+    </div>
+    <div id="out" hidden>
+      <div class="res-grid" id="tiles">
+        <div class="tile" data-role="pd"><small>它回来以后的 leader</small><b id="t-leader"></b><span id="t-rule"></span></div>
+        <div class="tile" data-role="bk"><small>此刻的名单</small><b id="t-sets" style="font-family:var(--font-mono);font-size:15px"></b><span id="t-sets2"></span></div>
+        <div class="tile" data-role="bad"><small>丢掉的已确认消息</small><b id="t-lost"></b><span id="t-lost2"></span></div>
+        <div class="tile" data-role="warn"><small>马上能写吗</small><b id="t-write"></b><span id="t-write2"></span></div>
+      </div>
+      <div class="lab-res" id="verdict" style="margin-top:12px"></div>
+    </div>
+  </div>
+  <p class="cap">推演按 4.4.0 控制器的规则（PartitionChangeBuilder 的选举顺序、ELR 的三条规则）写成，在 node 里和 ⑤ 的四个剧本逐一对过：laggard、elr-kill、elr-clean、leader-first 的名单和结果都一致。没有 leader 时，按“broker 2 → broker 3 → broker 1”的顺序让其余的陆续回来，告诉你 leader 什么时候出现。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：在交易靶场里断一次电</h2>
+    <p class="lead">沿用全景的部署：Kafka 4.4.0，KRaft，1 个控制器加 3 个 broker，<code>order-events</code> 6 个分区、3 副本、<code>min.insync.replicas=2</code>，其余全是默认值。只盯订单 9527 所在的分区 3。订单服务用 <code>acks=all</code> 发事件、逐条看回调；积分服务 <code>points-svc</code> 处理完再提交位点。</p>
+  </div>
+  <div class="codebox">
+    <div class="code-bar"><span class="n">四个剧本</span><span>study-labs <code>java/kafka/kafka-leader-election-elr</code>，需要 JDK 17+、Maven，每个约 3 分钟</span></div>
+<pre><code>./run.sh laggard        <span class="cm"># 只有落后的 broker 1 回来：等不到，就 unclean</span>
+./run.sh elr-kill       <span class="cm"># broker 2 是 kill -9 停的，它先回来</span>
+./run.sh elr-clean      <span class="cm"># broker 2 是正常关机停的，它先回来</span>
+./run.sh leader-first   <span class="cm"># 最后一任 leader broker 3 先回来，broker 2 还没回来</span>
+./run.sh clean          <span class="cm"># 停进程、删数据</span>
+
+<span class="cm">// Drill.java 里订单服务的那一段：每条都看回调，才知道哪些真的写成功了</span>
+p.put(ProducerConfig.ACKS_CONFIG, <span class="s">"all"</span>);
+p.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, <span class="s">"8000"</span>);   <span class="cm">// 默认 120 s，演练里缩短</span>
+RecordMetadata m = producer.send(<span class="kw">new</span> ProducerRecord&lt;&gt;(<span class="s">"order-events"</span>, <span class="s">"9527"</span>, json)).get();
+ok.add(id + <span class="s">"@"</span> + m.offset());                               <span class="cm">// 记下 ACK 回来的 offset</span></code></pre>
+  </div>
+  <p><a href="https://github.com/archeu/study-labs/tree/main/java/kafka/kafka-leader-election-elr">完整代码 →</a> <span class="tag-real">实测</span> 下面是 <code>./run.sh laggard</code> 的输出，删掉了时间戳和重复的列：</p>
+<pre class="console"><span class="w">send A×10：ACK 10 条 [A1@0 … A10@9]</span>
+<b>kill -9 broker 1</b>   →  Leader: 3  Isr: 3,2  Elr:    LastKnownElr:
+<span class="w">send B×10：ACK 10 条 [B1@10 … B10@19]</span>
+points-svc：处理了分区 3 的 20 条，位置 20（提交）
+<b>kill -9 broker 2</b>   →  Leader: 3  Isr: 3    Elr: 2  LastKnownElr:
+<span class="r">send C×1：ACK 0 条；失败 1 条（TimeoutException: Expiring 1 record(s) … 8001 ms）</span>
+<b>kill -9 broker 3</b>   →  Leader: none  Isr:   Elr: 2,3  LastKnownElr: 3
+<b>只有 broker 1 回来</b> →  Leader: none  Isr:   Elr: 2,3  LastKnownElr: 3
+<span class="r">send D×1：失败 1 条（TimeoutException）</span>
+<b>kafka-leader-election.sh --election-type unclean</b>
+  Successfully completed leader election (UNCLEAN) for partitions order-events-3
+                    →  Leader: 1  Isr: 1  Elr:    LastKnownElr:
+read 分区 3：HW = 10，读到 10 条 [0:A1 … 9:A10]
+<span class="r">send D×1：失败 1 条（TimeoutException）       ← ISR 只有 1 个 &lt; min.insync.replicas=2</span>
+<b>kafka-configs.sh … --add-config min.insync.replicas=1</b>
+<span class="w">send D×3：ACK 3 条 [D1@10, D2@11, D3@12]   ← offset 10 现在是 D1</span>
+<b>broker 3、2 也回来了</b> →  Leader: 1  Isr: 1,2,3
+<span class="r">broker 3 日志：WARN Truncating order-events-3 to offset 10 below high watermark 20</span>
+read 分区 3：HW = 13，读到 13 条 [0:A1 … 9:A10, 10:D1, 11:D2, 12:D3]      ← B1～B10 没了
+points-svc：处理了分区 3 的 3 条 [10:D1, 11:D2, 12:D3]，提交前组里记的位点 20</pre>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>剧本</th><th>先回来的</th><th>它回来时</th><th>leader 什么时候出现</th><th>丢了什么</th></tr></thead>
+    <tbody>
+      <tr data-role="bad"><td><code>laggard</code></td><td>broker 1（缺 B）</td><td class="mono">Leader: none · Elr: 2,3</td><td>强行 unclean 后马上；还要把 min.isr 临时改成 1 才能写</td><td>B 批 10 条已 ACK 的</td></tr>
+      <tr data-role="warn"><td><code>elr-kill</code></td><td>broker 2（kill -9 停的）</td><td class="mono">Leader: none · Elr: 3 · LastKnownElr: 3</td><td>broker 3 回来后，按“最后一任 leader”选它（日志记作 unclean election）</td><td>没丢，20 条都在</td></tr>
+      <tr data-role="done"><td><code>elr-clean</code></td><td>broker 2（正常关机的）</td><td class="mono">Leader: 2 · Isr: 2 · Elr: 3</td><td>马上（日志 <code>using ELR</code>）；能读 20 条，但等 broker 3 回来 ISR 到 2 个才能写</td><td>没丢</td></tr>
+      <tr data-role="warn"><td><code>leader-first</code></td><td>broker 3（最后一任 leader）</td><td class="mono">Leader: none · Elr: 2 · LastKnownElr: 3</td><td>broker 2 回来、也被移出 ELR 以后，才选 broker 3</td><td>没丢</td></tr>
+    </tbody>
+  </table></div>
+  <p class="cap">broker 编号在每次运行里会变，表里统一换成 laggard 那次的编号：broker 3 是最后一任 leader，broker 1 最先倒，broker 2 第二个倒。原始输出见 study-labs 里的 README。</p>
+  <div class="verdict" data-role="done"><b>到这里已经能交差了：</b>值班时看到 <code>Leader: none</code>，先读 <code>Isr</code>、<code>Elr</code>、<code>LastKnownElr</code> 三栏，就能说出“在等谁”和“现在强行恢复会丢哪一段”。<br>已知还没处理的细节：unclean 之后为什么还写不进（<a href="#p2">⑥ 坑 2</a>），积分服务已经处理过的 B 批怎么对账（<a href="#p5">⑥ 坑 5</a>），重启 broker 的方式会改变结果（<a href="#p3">⑥ 坑 3</a>），以及怎么从根上避免三台一起断电（<a href="#rules2">⑥ 第二圈</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="warn">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：截掉的消息、复用的 offset、kill -9 的代价</h2>
+  </div>
+  <div class="round"><span class="rb">第一圈</span><b>注意事项：不知道就会出事故</b></div>
+  <div class="pits">
+    <div class="pit" id="p1"><b><em>1</em>unclean 选举截掉已确认的消息，offset 还会被复用<a class="root" href="#ladder">← ④ 第 4 级</a></b>
+      <dl><dt>现象</dt><dd>分区恢复了，生产者、消费者都没报错。几天后对账，发现 9527 的“已支付”在 Kafka 里找不到了，offset 10 上是另一条消息。<span class="seen">⑤ 实测 10 条</span></dd>
+      <dt>根源</dt><dd>新 leader 只有 A 批。另外两台回来时，按 leader epoch 找到和新 leader 分叉的位置（offset 10），把自己 10～19 截掉，向新 leader 看齐。B 批在三台上都没了，offset 10 以后写的是新消息。</dd>
+      <dt>做法</dt><dd class="fix">订单类 topic 保持默认的 <code>false</code>；真要强行恢复，先用 <code>kafka-dump-log.sh</code> 把另两台磁盘上的段文件拷出来留证，事后补发。下游按 <code>eventId</code> 去重，别拿 offset 当消息的身份。</dd></dl></div>
+    <div class="pit" id="p2"><b><em>2</em>unclean 选出了 leader，还是写不进<a class="root" href="#rules">← ④ 规则 2</a></b>
+      <dl><dt>现象</dt><dd>执行完 <code>--election-type unclean</code>，<code>Leader: 1</code> 有了，订单服务照样超时。<span class="seen">⑤ 实测</span></dd>
+      <dt>根源</dt><dd>新 leader 的 ISR 只有它自己，1 &lt; <code>min.insync.replicas=2</code>：<code>acks=all</code> 的写入被拒，高水位也不前进。</dd>
+      <dt>做法</dt><dd class="fix">应急手册里写成两步：unclean 选举，再把这个 topic 的 <code>min.insync.replicas</code> 临时改成 1；另两台回来、ISR 恢复后立刻改回 2。两步都要有人批准、有记录。</dd></dl></div>
+    <div class="pit" id="p3"><b><em>3</em>kill -9 重启的副本，数据再全也没资格<a class="root" href="#rules">← ④ 规则 3</a></b>
+      <dl><dt>现象</dt><dd>运维用 kill -9 重启了 broker 2，它回来后分区 3 还是 <code>Leader: none</code>，<code>Elr</code> 里没有它。<span class="seen">⑤ elr-kill</span></dd>
+      <dt>根源</dt><dd>控制器分不清 kill -9 和断电，凡是没走正常关机的，都当成可能丢了页缓存里的尾巴。</dd>
+      <dt>做法</dt><dd class="fix">停 broker 用 <code>kafka-server-stop.sh</code>（SIGTERM），等受控关闭做完再动机器；systemd 的 <code>TimeoutStopSec</code> 别设太短，免得被补一刀 SIGKILL。</dd></dl></div>
+    <div class="pit" id="p4"><b><em>4</em>数据最全的那台先回来，反而当不了 leader<a class="root" href="#ladder">← ④ 第 3 级的条件</a></b>
+      <dl><dt>现象</dt><dd>最后一任 leader broker 3 先起来了，分区 3 还是没有 leader，直到 broker 2 也回来。<span class="seen">⑤ leader-first</span></dd>
+      <dt>根源</dt><dd>broker 3 非正常关机，回来就被移出 ELR；可 <code>Elr</code> 里还挂着没回来的 broker 2。“选最后一任 leader”只在 ISR、ELR 都空时才走，ELR 不空就只能等 ELR 里的人。</dd>
+      <dt>做法</dt><dd class="fix">broker 2 要是回不来了（比如磁盘坏了），这里就只剩人工 unclean 选举。此时活着的只有 broker 3，选的正是它，不丢数据。看懂名单再动手，比盲目重启更快。</dd></dl></div>
+    <div class="pit" id="p5"><b><em>5</em>下游处理过的消息，Kafka 里却没了<a class="root" href="#ladder">← ④ 第 4 级</a></b>
+      <dl><dt>现象</dt><dd>积分服务已经给 B 批加过积分，提交了位点 20；unclean 之后，Kafka 里不再有 B 批，新的 D1～D3 从 offset 10 开始。<span class="seen">⑤ 实测</span></dd>
+      <dt>根源</dt><dd>下游的数据库和 Kafka 是两个系统。Kafka 截掉了日志，可消费结果早已写进积分库，回滚不了。</dd>
+      <dt>做法</dt><dd class="fix">对账以 outbox 和下游的去重表为准：outbox 里记下每条 ACK 回来的 partition 和 offset，unclean 之后按 offset 区间查出“标了已发、Kafka 里却没有”的行，重发；下游靠 eventId 去重，已经处理过的不会再加一次。</dd></dl></div>
+  </div>
+
+  <div class="round" id="rules2"><span class="rb">第二圈</span><b>使用规范：团队里该怎么配、怎么运维</b></div>
+  <ul class="callouts">
+    <li><b>·</b><span><b>订单类 topic：3 副本，<code>min.insync.replicas=2</code>，<code>unclean.leader.election.enable=false</code>。</b>防的是坑 1。日志、埋点这类能丢一点的 topic，可以单独在 topic 级打开 unclean，换可用性。</span></li>
+    <li><b>·</b><span><b>给每台 broker 配 <code>broker.rack</code>，副本分到不同机架或可用区。</b>这一页的整个场景，起因就是三份副本在同一个机架上。这一条防的是“三台一起断电”本身。</span></li>
+    <li><b>·</b><span><b>滚动重启一次一台，用 SIGTERM，等 <code>UnderReplicatedPartitions</code> 回到 0 再动下一台。</b>防坑 3：一边重启一边再坏一台，正好掉进 ELR 的除名规则。</span></li>
+    <li><b>·</b><span><b>监控这几个指标：</b><code>OfflinePartitionsCount</code>（没有 leader 的分区数）、<code>UnderMinIsrPartitionCount</code>、<code>AtMinIsrPartitionCount</code>（再坏一台就不能写了）、<code>UncleanLeaderElectionsPerSec</code>、<code>ElectionFromEligibleLeaderReplicasPerSec</code>。unclean 计数不为 0，就要启动坑 5 的对账。</span></li>
+    <li><b>·</b><span><b>outbox 里记下 ACK 回来的 partition 和 offset。</b>平时没用，出了 unclean 选举，它是唯一能精确算出“丢了哪几条”的地方。</span></li>
+    <li><b>·</b><span><b>升级上来的集群，确认 ELR 开了没有。</b><code>kafka-features.sh describe</code> 里 <code>eligible.leader.replicas.version</code> 是 0 就是没开，这时的行为是 ② 里“只认 ISR 最后那一个”。</span></li>
+  </ul>
+
+  <div class="round" id="deep"><span class="rb">第三圈</span><b>深处：高水位为什么冻结，截断怎么对齐，版本怎么变过来</b></div>
+  <div class="deep">
+    <div class="fact" data-role="pd"><h4>ISR 不够数时，高水位不前进</h4>
+      <p>4.4.0 的 <code>Partition.maybeIncrementLeaderHW</code> 开头就是：ISR 少于 <code>min.insync.replicas</code> 时直接返回，注释写着 “The HW can only advance if the ISR size is equal or large than the min ISR”。这是 ELR 的地基（④ 规则 2）。</p>
+      <p>顺带的影响（按源码推出，本页没有实测）：用 <code>acks=1</code> 往这种 topic 写的生产者，ISR 不够时照样写成功，可消费者看不到这些消息，要等 ISR 恢复、高水位追上来。</p></div>
+    <div class="fact" data-role="cg"><h4>副本截断，消费者也会察觉</h4>
+      <p>回来的副本拿自己最后一任 leader epoch 去问新 leader：“这一任你写到哪了？”答案是 10，就截到 10（⑤ 日志 <code>Truncating … to offset 10 below high watermark 20</code>）。</p>
+      <p>消费者也一样（KIP-320）：提交的位点带着 leader epoch，换 leader 后客户端会去验证。<code>SubscriptionState</code> 里，发现分叉、且 <code>auto.offset.reset</code> 不是 <code>none</code> 时，就退回分叉点。所以 ⑤ 里位点 20 的积分服务没跳过 D1～D3，而是从 10 读起；设成 <code>none</code> 会抛 <code>LogTruncationException</code>，交给你决定。</p></div>
+    <div class="fact" data-role="warn"><h4>“最后一任 leader”的兜底</h4>
+      <p>④ 的第 3 级来自 KIP-966：分区第一次没 leader 时，控制器把当时的 leader 记进 <code>LastKnownElr</code>。等 ISR、ELR 都空了、它又活着回来，就选它，不看 unclean 开关。</p>
+      <p>它在日志和 <code>UncleanLeaderElectionsPerSec</code> 里记作 unclean，因为它也是非正常关机回来的：如果是真断电，它页缓存里最后那一小段可能没了。⑤ 用的是 kill -9，页缓存还在，所以 20 条都在。</p></div>
+    <div class="fact" data-role="other"><h4>版本怎么变过来</h4>
+      <p><b>0.11</b>：<code>unclean.leader.election.enable</code> 默认从 true 改成 false（KIP-106）。</p>
+      <p><b>3.x KRaft</b>：ISR 不会清空，最后一个成员留在 ISR 里，只有它能当 leader（② 右边）。</p>
+      <p><b>4.0</b>：有了 ELR 的特性开关，元数据版本够新可以手动打开。<b>4.1 起</b>新建的集群默认打开（4.4.0 源码里它的默认引导版本是 4.1-IV0；⑤ 实测 <code>FinalizedVersionLevel: 1</code>）。</p>
+      <p>KIP-966 还规划了按日志长度挑副本的 unclean 恢复策略，4.4.0 的 jar 里只有 <code>unclean.leader.election.enable</code> 和 <code>unclean.leader.election.interval.ms</code>（默认 5 分钟）两个配置，还没有它。</p></div>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li><b>KRaft 控制器自己挂了</b>：3 个控制器丢了 2 个，元数据写不进，选 leader 也停了，这时 broker 还能服务多久</li>
+    <li><b>跨机房</b>：MirrorMaker 2 把 <code>order-events</code> 复制到另一个机房，主机房整个没了时，位点怎么换算、会丢多少</li>
+    <li><b>分层存储</b>：旧段在对象存储上，截断和 unclean 选举时，远端的段怎么处理</li>
+    <li><b>磁盘坏了一块</b>（JBOD）：只丢一个日志目录时，副本怎么在本机或别处重建</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到第⑤步</h2>
+    <p class="lead">在 ⑤ 的 <code>run.sh</code> 上改，先猜结果再跑。</p>
+  </div>
+  <ol class="callouts">
+    <li><b>1</b><span><b>只做 unclean，不改 min.isr。</b>把 laggard 里 <code>kafka-configs.sh … min.insync.replicas=1</code> 那两行删掉：订单服务的 D 批能写进去吗？等另两台回来以后呢？（坑 2）</span></li>
+    <li><b>2</b><span><b>把 topic 建成 <code>min.insync.replicas=1</code>，再跑 elr-kill。</b>C 批写进去了没有？leader 倒下后 <code>Elr</code> 一栏是什么？先在 ④ 的推演台上猜一遍。（④ 规则 1、2）</span></li>
+    <li><b>3</b><span><b>给 points-svc 加上 <code>auto.offset.reset=none</code> 再跑 laggard。</b>它抛什么异常？在积分服务里，你打算怎么处理：报警停下，还是退回分叉点继续？（第三圈）</span></li>
+  </ol>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>Kafka 只让肯定有全部已提交消息的副本当 leader：先 ISR，ISR 空了再 ELR，都空了等最后一任 leader；剩下的只能 unclean 选举，用丢掉已 ACK 的消息换可用。</p></details>
+    <details><summary>2. 两种朴素的选法各疼在哪？</summary><p>“谁先回来选谁”会截掉已 ACK 的消息、复用 offset，客户端还不报错。“只认 ISR 最后那一个”不丢，但数据齐全的 broker 2 只因为早一步被踢出 ISR 就没了资格，只能干等。ELR 补的就是后者。</p></details>
+    <details><summary>3. 为什么 broker 1 先倒时没进 ELR，broker 2 倒时就进了？</summary><p>④ 规则 1、2：broker 1 被踢时 ISR 还剩 2 个，等于 min.isr，ELR 保持为空；它之后缺了 B 批，本来就不该有资格。broker 2 被踢时 ISR 只剩 1 个，低于 min.isr，从这一刻起高水位冻结，broker 2 一定有全部已提交的消息，所以进 ELR。</p></details>
+    <details><summary>4. 预测：其他条件和 ⑤ 一样，只是 broker 2 用 SIGTERM 正常关机，然后 broker 1（缺 B 批）先回来。分区 3 会怎样？</summary><p>还是没有 leader。broker 1 不在 ISR、也不在 ELR；ELR 里是 2、3，都没回来；ELR 不空，“最后一任 leader”的兜底也不走。等 broker 2 回来，它是正常关机的，留在 ELR 里，马上接班，不丢；若 broker 3 先回来，它被移出 ELR，可 ELR 里还有 2，还得等 2。从 ④ 的选举顺序和规则 3 推出。</p></details>
+    <details><summary>5. 预测：<code>min.insync.replicas=1</code>（broker 默认值）时，同样的断电顺序，C 批会怎样？broker 2 先回来又会怎样？</summary><p>C 批会写成功：ISR 只剩 broker 3 时 1 ≥ 1，<code>acks=all</code> 照样 ACK，C 只在 broker 3 上。ISR 一直不低于 min.isr，broker 2 被踢时不进 ELR；broker 3 倒下时 ELR 只有 3。broker 2 先回来没资格，要等 broker 3 回来按 ELR 或兜底规则当选。要是这时强行 unclean 选 broker 2，丢的就是 C。这也是第一圈说“acks=all 单独用不够”的另一面。</p></details>
+    <details><summary>6. 放回全景：第 5 站前后各发生了什么？这一页讲的东西坏了，整条链路会怎样？</summary><p>第 5 站之前：第 4 站 broker 3 把订单服务攒好的那一批追加进段文件，只进了页缓存。第 5 站：broker 1、2 拉走复制，高水位前移。之后：第 6 站 ACK 回到订单服务，outbox 标成已发；第 7 站三个消费组才看得到这条。<br>这一页的东西坏了，比如开着 unclean 让落后的副本当了 leader：第 6 站已经 ACK、第 1 站 outbox 已经标了已发的消息，在 Kafka 里被截掉，没人重发；第 8 站的下游已经处理过它（积分加了 798），Kafka 里却找不到它，对账对不上；offset 被新消息复用，第 9 站提交的位点指向了别的消息，靠 KIP-320 才退回分叉点。反过来，不开 unclean、又没有 ELR，第 3 站的生产者在 Sender 线程里重试到 <code>delivery.timeout.ms</code>，第 1 站的 outbox 越积越多，直到有合格副本回来。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。Kafka 4.4.0 官方二进制包（KRaft，1 个控制器加 3 个 broker，每个 broker 512 MB 堆，同一台机器），kafka-clients 4.4.0 跑在 JDK 17 上，本机 2 核 ARM。四个剧本各跑一次，laggard 跑了两次（第一次程序在 unclean 之后读分区 3 时超时：那次新 leader 从检查点加载的高水位是 0，低于本任起点 10，按源码会回 <code>OFFSET_NOT_AVAILABLE</code>；改了读取的超时处理后重跑，结果稳定）。</p>
+  <p>按源码（Kafka 4.4.0 的 sources jar）：选举顺序和 ELR 规则来自 <code>PartitionChangeBuilder</code>；非正常关机的判断来自 <code>ClusterControlManager</code>（<code>previousBrokerEpoch</code>）；高水位冻结来自 <code>Partition.maybeIncrementLeaderHW</code>；消费者截断检测来自 <code>SubscriptionState</code>；ELR 的默认引导版本来自 <code>EligibleLeaderReplicasVersion</code>；5 分钟来自 <code>ReplicationConfigs</code>。按文档：Kafka 设计文档“Replicated Logs”和“Unclean leader election”两节，KIP-106、KIP-320、KIP-966。推演台的模拟在 node 里和四个剧本逐一对过。</p>
+  <p>相关：<a href="../java/pano-j08-order-event-life.html">全景：一条订单消息的一生</a> · <a href="kafka-reliability-group.html">Kafka 可靠性与消费组（第一圈）</a> · <a href="kafka-storage-zerocopy.html">Kafka 存储与零拷贝</a> · <a href="kafka-idempotent-ordering.html">幂等消费与顺序消息</a> · <a href="../redis/redis-restart-failover.html">Redis 重启、切主以后丢了什么</a> · <a href="../java/roadmap.html#j08">Java 地图 J08</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 分区 3 的三个副本：L = broker 3（最后一任 leader），F1 = broker 1（最先倒、落后），F2 = broker 2（第二个倒）。
+// o: {f2Stop:'kill'|'term', first:'F1'|'F2'|'L', unclean:bool, minIsr:1|2, elr:bool}
+var NAME = {L: 'broker 3', F1: 'broker 1', F2: 'broker 2'};
+var REPLICAS = ['L', 'F1', 'F2'];   // 副本顺序 [3,1,2]
+function without(a, x){ return a.filter(function(y){ return y !== x; }); }
+function fallen(o){
+  // 三台依次倒下以后，控制器里分区 3 的样子
+  var data = {L: ['A', 'B'], F2: ['A', 'B'], F1: ['A']};
+  var acked = ['A', 'B'];
+  if (o.minIsr === 1) { data.L.push('C'); acked.push('C'); }      // ISR 只剩 leader 时，min.isr=1 照样 ACK
+  var st = {isr: [], elr: [], lke: [], leader: null, alive: [], data: data, acked: acked};
+  if (o.elr) {
+    st.elr = o.minIsr === 2 ? ['F2', 'L'] : ['L'];                 // ISR 掉到 min.isr 以下时被移出的副本进 ELR
+    st.lke = ['L'];                                                  // 第一次没 leader 时记下最后一任 leader
+  } else {
+    st.isr = ['L'];                                                  // 没有 ELR：ISR 不会清空，最后一个成员留着
+  }
+  return st;
+}
+function copy(st){ return {isr: st.isr.slice(), elr: st.elr.slice(), lke: st.lke.slice(), leader: st.leader, alive: st.alive.slice(), data: st.data, acked: st.acked}; }
+function bringBack(st0, x, o){
+  var st = copy(st0);
+  st.alive.push(x);
+  var uncleanShutdown = x === 'F2' ? o.f2Stop === 'kill' : true;  // F1、L 都是 kill -9 / 断电
+  var removedFromElr = false;
+  if (o.elr && uncleanShutdown && st.elr.indexOf(x) >= 0) { st.elr = without(st.elr, x); removedFromElr = true; }
+  if (st.leader) {                                                   // 已经有 leader：回来的副本截断对齐、追上后进 ISR
+    if (st.isr.indexOf(x) < 0) st.isr.push(x);
+    return {st: st, rule: 'follower', removedFromElr: removedFromElr, uncleanShutdown: uncleanShutdown};
+  }
+  var aliveOk = function(r){ return st.alive.indexOf(r) >= 0; };
+  var rule = 'none', who = null;
+  var inIsr = st.isr.filter(aliveOk);
+  var inElr = st.isr.length === 0 ? st.elr.filter(aliveOk) : [];
+  if (inIsr.length) { who = inIsr[0]; rule = 'isr'; }
+  else if (inElr.length) { who = REPLICAS.filter(function(r){ return inElr.indexOf(r) >= 0; })[0]; rule = 'elr'; }
+  else if (o.elr && st.isr.length === 0 && st.elr.length === 0 && st.lke.length === 1 && aliveOk(st.lke[0])) { who = st.lke[0]; rule = 'last'; }
+  else if (o.unclean) { who = REPLICAS.filter(aliveOk)[0]; rule = 'unclean'; }
+  if (who) {
+    st.leader = who; st.isr = [who]; st.elr = without(st.elr, who);
+    if (rule === 'unclean' || rule === 'last') { st.elr = []; }
+    st.lke = [];
+  }
+  return {st: st, rule: rule, removedFromElr: removedFromElr, uncleanShutdown: uncleanShutdown};
+}
+function simulate(o){
+  var st = fallen(o);
+  var before = copy(st);
+  var r = bringBack(st, o.first, o);
+  var first = {who: r.st.leader, rule: r.rule, removedFromElr: r.removedFromElr, uncleanShutdown: r.uncleanShutdown,
+               isr: r.st.isr.slice(), elr: r.st.elr.slice(), lke: r.st.lke.slice()};
+  // 其余两台按 F2 → L → F1 的顺序陆续回来，看 leader 什么时候出现
+  var later = null, cur = r.st;
+  ['F2', 'L', 'F1'].filter(function(x){ return x !== o.first; }).forEach(function(x){
+    if (cur.leader) { cur = bringBack(cur, x, o).st; return; }
+    var rr = bringBack(cur, x, o); cur = rr.st;
+    if (cur.leader && !later) later = {after: x, who: cur.leader, rule: rr.rule, removedFromElr: rr.removedFromElr};
+  });
+  var leader = r.st.leader || (later && later.who);
+  var lost = leader ? st.acked.filter(function(b){ return st.data[leader].indexOf(b) < 0; }) : [];
+  return {
+    before: before, first: first, later: later, leader: leader, lost: lost, acked: st.acked,
+    cAcked: o.minIsr === 1,
+    writableNow: !!first.who && first.isr.length >= o.minIsr,
+    outcome: !first.who ? 'wait' : (lost.length ? 'lost' : 'ok')
+  };
+}
+/*SIM-END*/
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var RULE = {isr: '从 ISR 里选的', elr: '从 ELR 里选的（using ELR）', last: '最后一任 leader 兜底（记作 unclean）', unclean: 'unclean 选举', none: '没有合格的副本'};
+  var BN = {L: 'broker 3', F1: 'broker 1', F2: 'broker 2'};
+  function nums(a){ return a.length ? a.map(function(x){ return BN[x].replace('broker ', ''); }).join(',') : '空'; }
+  function opts(){ return {first: $('c-first').value, f2Stop: $('c-f2').value, unclean: $('c-unclean').value === '1', minIsr: +$('c-minisr').value, elr: $('c-elr').value === '1'}; }
+  function explain(o, r){
+    var f = r.first, x = BN[o.first], li = [];
+    var b = r.before;
+    li.push('三台倒完时：Isr ' + nums(b.isr) + '，Elr ' + nums(b.elr) + '，LastKnownElr ' + nums(b.lke) + '。' + (r.cAcked ? 'min.isr=1，C 批在只剩 broker 3 时也拿到了 ACK，只有 broker 3 有它。' : 'C 批被拒绝，没写进去。'));
+    if (f.removedFromElr) li.push(x + ' 是非正常关机回来的，被移出 ELR（规则 3）。');
+    else if (o.first === 'F2' && o.f2Stop === 'term' && o.elr && b.elr.indexOf('F2') >= 0) li.push(x + ' 是正常关机的，留在 ELR 里。');
+    if (f.who) {
+      li.push(x + ' 当选：' + RULE[f.rule] + '。');
+      if (r.lost.length) li.push('它缺 ' + r.lost.join('、') + ' 批：另外两台回来后要截掉这一段向它看齐，这些已 ACK 的消息永久消失，offset 会被新消息复用。');
+      li.push(r.writableNow ? '新 ISR 只有它一个，1 ≥ min.isr，马上能写。' : '新 ISR 只有它一个，1 &lt; min.isr=2：能选出 leader，但 acks=all 的写入照样被拒，等别的副本回来追上，或者临时调低 min.isr。');
+    } else {
+      var why = !o.elr ? '没有 ELR，ISR 里留着最后一个成员 broker 3，只有它能当。' :
+        ((f.elr.indexOf(o.first) < 0 ? '它不在 ISR、ELR 里。' : '') + (f.isr.length === 0 && f.elr.length ? 'ELR 里的 broker ' + nums(f.elr) + ' 还没回来；ELR 不空，“最后一任 leader”的兜底不走。' : ''));
+      li.push(x + ' 当不了：' + why + (o.unclean ? '' : ' unclean 开关是 false。'));
+      if (r.later) li.push('其余的陆续回来：' + BN[r.later.after] + ' 回来后，' + BN[r.later.who] + ' 当选（' + RULE[r.later.rule] + '）' + (r.lost.length ? '，丢 ' + r.lost.join('、') + ' 批。' : '，已确认的一条不丢。'));
+    }
+    return '<ul>' + li.map(function(s){ return '<li>' + s + '</li>'; }).join('') + '</ul>';
+  }
+  function run(){
+    var o = opts(), r = simulate(o), f = r.first;
+    $('t-leader').textContent = f.who ? BN[f.who] : 'none';
+    $('t-rule').textContent = RULE[f.rule];
+    $('t-sets').textContent = 'Isr ' + nums(f.isr) + ' · Elr ' + nums(f.elr);
+    $('t-sets2').textContent = 'LastKnownElr ' + nums(f.lke);
+    $('t-lost').textContent = f.who ? (r.lost.length ? r.lost.join('、') + ' 批' : '无') : '暂时无';
+    $('t-lost2').textContent = f.who ? (r.lost.length ? '已 ACK 的' : '已确认的都在') : '没有 leader，也没截断';
+    $('t-write').textContent = r.writableNow ? '能' : '不能';
+    $('t-write2').textContent = !f.who ? '分区没有 leader' : (r.writableNow ? 'ISR 1 ≥ min.isr' : 'ISR 1 < min.isr');
+    $('verdict').innerHTML = explain(o, r);
+    $('out').hidden = false;
+    return r;
+  }
+  var btns = document.querySelectorAll('#guess .opts button');
+  function reset(){ $('out').hidden = true; $('g-res').hidden = true; btns.forEach(function(x){ x.setAttribute('aria-pressed', 'false'); x.classList.remove('right', 'wrong'); }); }
+  btns.forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var r = run(), g = btn.getAttribute('data-g');
+      btns.forEach(function(x){ x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'); x.classList.remove('right', 'wrong'); });
+      var res = $('g-res');
+      if (g === 'skip') { res.hidden = true; return; }
+      var ok = g === r.outcome;
+      btn.classList.add(ok ? 'right' : 'wrong');
+      var hint = {ok: '决定它能不能当的是 ④ 的选举顺序：先 ISR，ISR 空了看 ELR。', lost: '丢不丢，看新 leader 缺不缺已 ACK 的批次：只有第 4 级 unclean 会选到缺数据的副本。', wait: '当不了，通常是因为 ELR 里还挂着没回来的副本，或者它被规则 3 除了名。'}[r.outcome];
+      res.innerHTML = (ok ? '<b>猜对了。</b>' : '<b>不对。</b>') + hint;
+      res.hidden = false;
+    });
+  });
+  ['c-first', 'c-f2', 'c-unclean', 'c-minisr', 'c-elr'].forEach(function(id){ $(id).addEventListener('change', reset); });
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
