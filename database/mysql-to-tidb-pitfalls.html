@@ -1,0 +1,1217 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>从 MySQL 换到 TiDB 的四件事</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, same family as the other notes. Knowledge-point page (learn, mechanism type) for J11 panorama station 12 (second page): four behaviour differences when moving from MySQL 8.4 to TiDB 8.5: AUTO_INCREMENT caching and AUTO_ID_CACHE=1, range sharding write hotspots and AUTO_RANDOM, transaction size limits and pipelined DML, snapshot isolation without gap locks. Roles: other = MySQL behaviour, rn = TiDB behaviour, pd = regions, of = transaction limits, bad = pitfalls, done = what to keep. One interactive: the primary-key chooser (pure function, checked in node, anchored on measured numbers). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+#cb-tiles .tile b{white-space:normal;font-size:20px}
+.strip45{display:grid;grid-template-columns:repeat(45,minmax(0,1fr));gap:2px}
+.strip45 i{display:block;height:26px;border-radius:3px;background:var(--good-tint);border:1px solid var(--good)}
+.strip45 i.o{background:var(--bad-tint);border-color:var(--bad)}
+.strip45 i.h{background:var(--warn-tint);border-color:var(--warn)}
+.strip45 i.n{background:var(--neutral-tint);border-color:var(--neutral)}
+.strip-ax{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.lg-row{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lg-row i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1px solid}
+
+/* sharding-key bench */
+.sk-wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.sk-bars{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;align-items:end;height:160px;padding:4px 6px 0;border-bottom:1.5px solid var(--line-strong)}
+.sk-bars .bar{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;min-width:0;gap:2px}
+.sk-bars .bar i{display:block;width:100%;background:var(--pd);border-radius:6px 6px 0 0;min-height:2px;transition:height .3s}
+.sk-bars .bar.hot i{background:var(--bad)}
+.sk-bars .bar.zero i{background:var(--line-strong)}
+.sk-bars .bar small{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);white-space:nowrap}
+.sk-names{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:2px 6px 0}
+.sk-names span{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);text-align:center}
+.sk-q td.n{font-family:var(--font-mono);white-space:nowrap}
+.sk-q td.one{color:var(--good);font-weight:700}
+.sk-q td.all{color:var(--bad);font-weight:700}
+@media (max-width:700px){.sk-wrap{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.sk-bars .bar i{transition:none}}
+
+/* paging calculator */
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>数据库</span><span aria-hidden="true">/</span><span class="tb-here">从 MySQL 换到 TiDB 要注意的四件事</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">AUTO_INCREMENT 缓存 · AUTO_ID_CACHE = 1 · 按范围分片的写热点 · AUTO_RANDOM · SHARD_ROW_ID_BITS · txn-total-size-limit · txn-entry-size-limit · Pipelined DML · 快照隔离 · 没有间隙锁 · 当前读 · MySQL 8.4 vs TiDB 8.5.8 实测</p>
+  <h1>代码没改，行为变了：从 MySQL 换到 TiDB 要注意的四件事</h1>
+  <p class="lead">TiDB 说 MySQL 的协议、语法也基本一样，所以最危险的是那些<b>语句能跑、结果却不同</b>的地方。四件事都能从上一页的架构推出来：每台 TiDB server 各自缓存一段自增 ID，所以 <b>id 不连续</b>；数据按主键范围切 Region，所以<b>递增主键会让写入挤在最后一块</b>；事务要在内存里攒齐再两阶段提交，所以<b>事务有大小上限</b>；隔离靠快照和行锁、没有间隙锁，所以 <b><code>SELECT … FOR UPDATE</code> 挡不住插入</b>。本页把同样的 SQL 在 MySQL 8.4 和 TiDB 8.5.8 上各跑一遍，结果都是实测。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j11-order-table-sharding.html#s-12">订单表从一张到八张 · 第 12 站</a></span><span>地图：<a href="../java/roadmap.html#j11">J11 · 从 MySQL 换过去要注意：自增 ID、写热点、大事务、隔离级别</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>J11 第 7 个、也是最后一个知识点，接 <a href="distributed-db-tidb-oceanbase.html">上一页</a>的 TiDB 架构。MySQL 这边的对照：<a href="mysql-mvcc-lock.html">MVCC 与锁</a>、<a href="mysql-lock-wait-deadlock.html">锁等待与死锁</a>、<a href="../arch/distributed-id.html">分布式 ID</a>。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="rn">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：迁移前就要知道哪几处会悄悄变</h2>
+  </div>
+  <p class="lead">在全景第 12 站，交易靶场如果选了 TiDB，订单服务的代码一行不改、连接串换一下就能跑。真正的风险是那些“能跑但不对”的地方：</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>代码里的老习惯</th><th>在 TiDB 上</th></tr></thead>
+      <tbody>
+        <tr><th><code>id BIGINT AUTO_INCREMENT</code>，对账脚本靠 id 连续发现漏单</th><td>id 不连续，重启一台 TiDB 就跳几万：对账报一堆“漏单”</td></tr>
+        <tr><th>主键自增、大促时加机器扛写入</th><td>新订单全写在最后一个 Region，加机器没用</td></tr>
+        <tr><th>归档任务 <code>DELETE FROM t_order WHERE created_at &lt; ?</code> 一次删几千万行</th><td>事务太大被拒，或者把 TiDB server 的内存吃光</td></tr>
+        <tr><th>用 <code>SELECT … FOR UPDATE</code> 锁住一个范围，防止别人往里插（比如同一用户同一时段只能有一单）</th><td>挡不住，并发插入直接成功</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：只看“兼容 MySQL”就迁</h2>
+  </div>
+  <p>功能测试都会通过：每条 SQL 都能执行，结果在单线程、小数据下也对。问题只会在<b>多台 TiDB server、大数据量、高并发</b>下出现，也就是上线以后。四个问题里，自增 ID 和大事务会直接报错或报警，比较好发现；写热点表现为“加了机器写入还是上不去”，容易被误判成容量问题；隔离级别的差别最隐蔽，它不报错，只在并发时偶尔多插进一行，表现成“偶发的重复下单”。</p>
+  <div class="know" data-role="bad"><b>不懂精华时的典型误用</b><span>看到 TiDB 的 <code>@@transaction_isolation</code> 也是 <code>REPEATABLE-READ</code>（⑤ 实测），就以为和 InnoDB 一样。名字一样，实现不同：TiDB 的 RR 是快照隔离，没有间隙锁。</span></div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="rn">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：这四件事在其他几家</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>自增 ID</th><th>写热点</th><th>大事务</th><th>间隙锁</th></tr></thead>
+      <tbody>
+        <tr><th>MySQL 8.4（InnoDB）</th><td>单机计数，连续（回滚会留空洞）</td><td>不存在（单机）</td><td>受 undo、binlog、内存限制，但没有硬上限</td><td>RR 下有，挡插入</td></tr>
+        <tr><th>TiDB 8.5</th><td>每台 server 缓存一段，不连续；<code>AUTO_ID_CACHE = 1</code> 可连续</td><td>按主键范围分片，递增主键会热；<code>AUTO_RANDOM</code> 打散</td><td>单事务有上限（内存配额、单行 6 MiB）</td><td>没有</td></tr>
+        <tr><th>自己分库分表（第 1～3 页）</th><td>每张表各自自增，会重复，必须全局发号</td><td>按哈希分片不热；按时间范围分会热</td><td>单个分片里是 MySQL，没有跨分片事务</td><td>单个分片里有</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">OceanBase、GoldenDB 在这四点上各有自己的做法，迁移时同样要逐项查对应版本的文档；本页只实测 TiDB。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="rn">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：四件事都是上一页那张架构图的直接后果</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <span><b>TiDB 架构</b>：无状态的 TiDB server × N、按主键范围切成 Region 的 TiKV、发时间戳的 PD，见 <a href="distributed-db-tidb-oceanbase.html#m-region">上一页机制 1</a>。</span>
+    <span><b>InnoDB 的间隙锁</b>：RR 下锁住索引上的“空隙”，别的事务不能往里插，见 <a href="mysql-mvcc-lock.html">MVCC 与锁</a>。</span>
+  </div>
+
+  <h3 id="m-inc">机制 1：自增 ID 是每台 TiDB server 各领一段</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 196" role="img" aria-label="自增 ID 的分配。默认缓存模式下，tidb1 第一次插入时向存储层领一段 1 到 30000，tidb2 领 30001 到 60000，各自在内存里往后发，所以交替插入的 id 是 1、30001、2、30002。tidb1 重启后内存里那一段丢了，再领下一段，从 60001 开始。AUTO_ID_CACHE = 1 时，所有 TiDB server 都向一个中心化的分配服务要号，交替插入就是 1、2、3、4。">
+  <text class="t-h" x="16" y="24">默认：每台各领 3 万个</text>
+  <rect x="16" y="40" width="200" height="40" rx="8" class="b-rn"/><text class="t-b" x="28" y="58">tidb1 领到 1～30000</text><text class="t-xs" x="28" y="73">内存里往后发：1、2、3…</text>
+  <rect x="16" y="90" width="200" height="40" rx="8" class="b-rn"/><text class="t-b" x="28" y="108">tidb2 领到 30001～60000</text><text class="t-xs" x="28" y="123">30001、30002…</text>
+  <rect x="16" y="140" width="200" height="40" rx="8" class="b-bad"/><text class="t-b" x="28" y="158">tidb1 重启：那一段丢了</text><text class="t-xs" x="28" y="173">再领一段：从 60001 起</text>
+  <text class="t-b" x="236" y="64">交替插入（⑤ 实测）</text>
+  <text class="t-mono" x="236" y="86">1, 30001, 2, 30002, 3, 30003</text>
+  <text class="t-mono" x="236" y="166">重启后下一个：60001</text>
+  <line x1="490" y1="16" x2="490" y2="186" class="e-mut" style="stroke-dasharray:4 4"/>
+  <text class="t-h" x="510" y="24">AUTO_ID_CACHE = 1：中心化分配</text>
+  <rect x="510" y="40" width="160" height="40" rx="8" class="b-rn"/><text class="t-b" x="522" y="64">tidb1</text>
+  <rect x="510" y="100" width="160" height="40" rx="8" class="b-rn"/><text class="t-b" x="522" y="124">tidb2</text>
+  <line x1="672" y1="60" x2="740" y2="88" class="e-ink" marker-end="url(#ah-ink)"/>
+  <line x1="672" y1="120" x2="740" y2="96" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="744" y="70" width="200" height="44" rx="10" class="b-card"/><text class="t-b" x="756" y="90">一个分配服务</text><text class="t-xs" x="756" y="106">每个 id 都要问它一次</text>
+  <text class="t-mono" x="510" y="166">交替插入（⑤ 实测）：1, 2, 3, 4, 5, 6</text>
+</svg>
+  </div>
+  </figure>
+  <p>为什么默认要缓存：如果每台 TiDB server 每次插入都去存储层要一个号，自增列就成了全集群的串行点，插入吞吐被它卡死。缓存一段是用“连续性”换“吞吐”。<code>AUTO_ID_CACHE = 1</code>（v6.4 引入中心化分配，v6.5 起保证递增）把连续性要回来，代价是每个号都多一次网络往返。更根本的做法是不依赖数据库自增：用 J09 的号段或雪花在应用里发号。</p>
+
+  <h3 id="m-hot">机制 2：按范围分片 + 递增主键 = 表尾热点</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 200" role="img" aria-label="写热点。h_seq 用 AUTO_INCREMENT，表预先按主键切成 8 个 Region，2 万行全部落在第 0 个 Region，只有它的 leader 所在的 tikv3 在干活。h_rand 用 AUTO_RANDOM，主键高位是随机分片位，2 万行分到 8 个 Region，分别是 2000、3500、4000、2500、1500、2000、3000、1500 行，leader 分布在 3 台 TiKV 上。">
+  <text class="t-h" x="16" y="24">AUTO_INCREMENT（⑤：8 个 Region 各分到多少行）</text>
+  <g>
+    <rect x="16" y="40" width="110" height="40" rx="6" class="b-bad"/><text class="t-b" x="24" y="58">R0 20000</text><text class="t-xs" x="24" y="73">leader tikv3</text>
+    <rect x="132" y="40" width="100" height="40" rx="6" class="b-neu"/><text class="t-xs" x="140" y="64">R1 0</text>
+    <rect x="238" y="40" width="100" height="40" rx="6" class="b-neu"/><text class="t-xs" x="246" y="64">R2 0</text>
+    <rect x="344" y="40" width="100" height="40" rx="6" class="b-neu"/><text class="t-xs" x="352" y="64">R3 0</text>
+    <rect x="450" y="40" width="100" height="40" rx="6" class="b-neu"/><text class="t-xs" x="458" y="64">R4 0</text>
+    <rect x="556" y="40" width="100" height="40" rx="6" class="b-neu"/><text class="t-xs" x="564" y="64">R5 0</text>
+    <rect x="662" y="40" width="100" height="40" rx="6" class="b-neu"/><text class="t-xs" x="670" y="64">R6 0</text>
+    <rect x="768" y="40" width="100" height="40" rx="6" class="b-neu"/><text class="t-xs" x="776" y="64">R7 0</text>
+  </g>
+  <text class="t-bad" x="16" y="100">id 是 1、2、3…，永远落在最左边那一块：一个 Raft 组、一台 TiKV 扛全部写入</text>
+  <text class="t-h" x="16" y="134">AUTO_RANDOM</text>
+  <g>
+    <rect x="16" y="146" width="110" height="40" rx="6" class="b-good"/><text class="t-xs" x="24" y="170">R0 2000</text>
+    <rect x="132" y="146" width="100" height="40" rx="6" class="b-good"/><text class="t-xs" x="140" y="170">R1 3500</text>
+    <rect x="238" y="146" width="100" height="40" rx="6" class="b-good"/><text class="t-xs" x="246" y="170">R2 4000</text>
+    <rect x="344" y="146" width="100" height="40" rx="6" class="b-good"/><text class="t-xs" x="352" y="170">R3 2500</text>
+    <rect x="450" y="146" width="100" height="40" rx="6" class="b-good"/><text class="t-xs" x="458" y="170">R4 1500</text>
+    <rect x="556" y="146" width="100" height="40" rx="6" class="b-good"/><text class="t-xs" x="564" y="170">R5 2000</text>
+    <rect x="662" y="146" width="100" height="40" rx="6" class="b-good"/><text class="t-xs" x="670" y="170">R6 3000</text>
+    <rect x="768" y="146" width="100" height="40" rx="6" class="b-good"/><text class="t-xs" x="776" y="170">R7 1500</text>
+  </g>
+  <text class="t-xs" x="876" y="160">leader 分在</text>
+  <text class="t-xs" x="876" y="176">3 台 TiKV</text>
+</svg>
+  </div>
+  </figure>
+  <p>TiKV 按主键排序存放，Region 是连续的一段，所以“下一个主键比所有现有的都大”就意味着“下一行写进最后一个 Region”。<code>AUTO_RANDOM</code> 在 BIGINT 主键的高位放几个随机的分片位（默认 5 位），新行就散到整个主键空间。⑤ 里还有一个细节：每个 Region 分到的行数都是 500 的倍数，⑤ 每 500 行一个事务，所以看起来同一个事务插入的行拿到的是同一组分片位（一个事务的行落在同一个 Region），打散是按事务、不是按行。没有整数主键的表，用 <code>SHARD_ROW_ID_BITS</code> 打散隐藏的 <code>_tidb_rowid</code>。</p>
+  <div class="design">
+    <div class="card" data-role="other"><h3>按范围切（TiDB）</h3><p>范围查询、按主键顺序扫描很便宜，Region 能按大小自动分裂、合并；代价是递增键会写热点。</p></div>
+    <div class="card" data-role="pd"><h3>按哈希切（第 1 页的取模）</h3><p>写入天然均匀；代价是范围查询要问遍所有分片，扩容要重新哈希、搬一半数据。</p></div>
+  </div>
+  <p class="verdict">决定胜负的约束：<b>TiDB 要能自动分裂、合并、搬迁数据块，这只有按范围切才做得到</b>（一段连续的 key 可以从中间劈开；哈希桶不行）。所以热点不是 bug，是这个设计的代价，要靠选主键来避开。</p>
+
+  <div class="lab" id="pk" data-role="rn">
+    <h3>主键选型台</h3>
+    <div class="guess" id="pk-guess">
+      <p>先猜：交易靶场的订单表换到 TiDB，用 <code>AUTO_ID_CACHE = 1</code> 的自增主键（id 连续了）。大促写入翻 3 倍，加 3 台 TiKV，写入能跟着涨吗？</p>
+      <div class="opts" role="group" aria-label="猜一个答案">
+        <button type="button" data-g="yes">能，加机器就行</button><button type="button" data-g="no">不能，写入还挤在一块</button><button type="button" class="skip" data-g="skip">不猜，直接看</button>
+      </div>
+      <p class="res" id="pk-res" hidden></p>
+    </div>
+    <div class="ctl-grid">
+      <div style="grid-column:1 / -1"><p class="lbl">主键怎么来</p><div class="pick2" id="pk-k" role="group" aria-label="主键"></div></div>
+      <div><p class="lbl">几台 TiDB server</p><div class="pick2" id="pk-n" role="group" aria-label="TiDB server 数">
+        <button type="button" data-v="1" aria-pressed="false">1</button><button type="button" data-v="2" aria-pressed="true">2 台以上</button></div></div>
+      <div><p class="lbl">这张表写得多吗</p><div class="pick2" id="pk-w" role="group" aria-label="写入量">
+        <button type="button" data-v="1" aria-pressed="true">写多（订单表）</button><button type="button" data-v="0" aria-pressed="false">写少（配置表）</button></div></div>
+    </div>
+    <div class="tiles4" id="pk-tiles"></div>
+    <div class="lab-res" id="pk-out"></div>
+    <p class="cap">规则表 + ⑤ 的实测锚点（node 里跑过）。“老假设”是 MySQL 单机时代常见、换库后会失效的用法。</p>
+  </div>
+
+  <h3 id="m-txn">机制 3：大事务要在 TiDB server 的内存里攒齐</h3>
+  <ul class="steps-out" data-role="of">
+    <li><b>为什么有上限</b><span>TiDB 的事务在提交前，所有改动都缓存在执行它的那台 TiDB server 的内存里，提交时再两阶段写到各个 Region。一个事务改几千万行，就要在一台机器的内存里放下它们，还要一次性对很多 Region 加锁。</span></li>
+    <li><b>两道限制</b><span>单个事务的总大小：v6.5 起主要由会话内存配额 <code>tidb_mem_quota_query</code> 管，配置项 <code>txn-total-size-limit</code>（默认 100 MiB）只有显式设置时才按它来（⑤ 的 tidb2 显式设成了 10 MiB，报 <code>[8004] Transaction is too large</code>）；单个键值对：<code>txn-entry-size-limit</code> 默认 6 MiB（⑤：一行 7 MB 报 <code>[8025] entry too large</code>）。</span></li>
+    <li><b>Pipelined DML</b><span><code>SET tidb_dml_type = 'bulk'</code> 让自动提交的大 DML 边执行边往 TiKV 刷，不受事务大小限制（⑤：tidb2 上同一条 30 MB 的 INSERT 能过了）。v8.0 引入，v8.5 仍是实验特性，文档不建议生产使用。</span></li>
+    <li><b>正确的做法</b><span>归档、批量修数据这类操作本来就该分批：每批几千行一个事务、按主键范围推进，和 MySQL 上的最佳实践一样，只是在 TiDB 上从“建议”变成了“必须”。</span></li>
+  </ul>
+
+  <h3 id="m-iso">机制 4：同叫 REPEATABLE-READ，TiDB 是快照隔离，没有间隙锁</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 214" role="img" aria-label="隔离级别对照。T1 开事务，SELECT k BETWEEN 10 AND 20 FOR UPDATE，读到 10 和 20。MySQL：这条语句给 10、20 两行和它们之间的间隙加了 next-key 锁，T2 插入 k = 15 被挡住，等 3 秒后锁等待超时。TiDB：只锁住了已经存在的 10、20 两行，没有间隙锁，T2 插入 15 用了 13 毫秒就成功了；T1 再普通读一次，读的是事务开始时的快照，还是 10、20；再 FOR UPDATE 读一次，读的是最新提交的数据，看到 10、15、20。">
+  <text class="t-b" x="16" y="24">T1：BEGIN; SELECT … WHERE k BETWEEN 10 AND 20 FOR UPDATE → 10, 20</text>
+  <rect x="16" y="40" width="452" height="164" rx="14" class="b-dash"/>
+  <text class="t-h" x="28" y="64">MySQL 8.4（InnoDB，RR）</text>
+  <rect x="28" y="76" width="60" height="28" rx="6" class="b-neu"/><text class="t-xs" x="40" y="94">k=10 锁</text>
+  <rect x="94" y="76" width="150" height="28" rx="6" class="b-bad"/><text class="t-xs" x="104" y="94">（10, 20）间隙也锁了</text>
+  <rect x="250" y="76" width="60" height="28" rx="6" class="b-neu"/><text class="t-xs" x="262" y="94">k=20 锁</text>
+  <text class="t-s" x="28" y="128">T2 INSERT k = 15：</text>
+  <text class="t-bad" x="28" y="148">等了 3.0 s → [1205] Lock wait timeout exceeded</text>
+  <text class="t-xs" x="28" y="172">T1 普通读：10, 20　T1 FOR UPDATE 读：10, 20</text>
+  <text class="t-xs" x="28" y="192">范围被守住了：没人能往里插</text>
+  <rect x="492" y="40" width="452" height="164" rx="14" class="b-dash"/>
+  <text class="t-h" x="504" y="64">TiDB 8.5.8（悲观事务，RR = 快照隔离）</text>
+  <rect x="504" y="76" width="60" height="28" rx="6" class="b-neu"/><text class="t-xs" x="516" y="94">k=10 锁</text>
+  <rect x="570" y="76" width="150" height="28" rx="6" class="b-card"/><text class="t-xs" x="580" y="94">间隙不锁</text>
+  <rect x="726" y="76" width="60" height="28" rx="6" class="b-neu"/><text class="t-xs" x="738" y="94">k=20 锁</text>
+  <text class="t-s" x="504" y="128">T2 INSERT k = 15：</text>
+  <text class="t-good" x="504" y="148">13 ms 成功</text>
+  <text class="t-xs" x="504" y="172">T1 普通读（快照）：10, 20</text>
+  <text class="t-bad" x="504" y="192">T1 FOR UPDATE 读（当前读）：10, 15, 20</text>
+</svg>
+  </div>
+  </figure>
+  <p>TiDB 的 <code>REPEATABLE-READ</code> 实际是快照隔离：普通读读事务开始时的快照（所以 T1 第二次普通读还是两行），<code>FOR UPDATE</code> 是“当前读”，读最新提交的版本并加行锁（所以看到了 15）。它只锁已经存在的行，<b>不支持间隙锁</b>。InnoDB 在 RR 下用 next-key 锁把范围和间隙都锁住，防住了幻读插入。依赖“锁范围防插入”的业务逻辑（同一用户同一时段只能下一单、号段不重叠），在 TiDB 上要改成<b>唯一约束</b>或者<b>锁一行“占位”记录</b>。<code>READ-COMMITTED</code> 只在悲观事务模式下生效。</p>
+
+  <h3>最少的写法</h3>
+  <div class="codebox" data-role="rn"><div class="code-bar"><b>迁到 TiDB 的订单表</b><code>四件事各一行</code></div>
+<pre><code>CREATE TABLE t_order (
+  id BIGINT PRIMARY KEY AUTO_RANDOM,          -- 机制 2：写入打散（或者由应用发号，见 J09）
+  order_no VARCHAR(24) NOT NULL UNIQUE,       -- 业务上看的“单号”另起一列，别指望 id 连续
+  user_id BIGINT NOT NULL, slot INT NOT NULL, created_at DATETIME(3) NOT NULL,   -- slot：比如“用户 + 下单时段”
+  KEY idx_user_created (user_id, created_at),
+  UNIQUE KEY uk_user_slot (user_id, slot)     -- 机制 4：用唯一约束代替“锁范围防插入”
+);
+-- 机制 3：归档按主键范围分批，每批一个事务
+DELETE FROM t_order WHERE created_at &lt; '2025-11-01' LIMIT 5000;   -- 循环到影响 0 行</code></pre></div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="rn">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：同样的 SQL，MySQL 8.4 和 TiDB 8.5.8 各跑一遍</h2>
+  </div>
+  <p class="lead">TiDB 用上一页的小集群（1 PD + 3 TiKV + 2 TiDB server；tidb2 显式把单事务上限设成 10 MiB），MySQL 8.4.13 一个容器做对照。下面是 <code>PitfallsLab</code> 的真实输出。</p>
+  <div class="codebox" data-role="rn"><div class="code-bar"><b>怎么跑</b><code>JDK 17 · 2 核 ARM 虚拟机</code></div>
+<pre><code>cd study-labs/java/database/mysql-to-tidb-pitfalls
+DOCKER="sudo docker" ./run.sh up all      # 起 TiDB 集群和 MySQL 容器，跑 autoinc hotspot bigtxn iso
+DOCKER="sudo docker" ./run.sh down</code></pre></div>
+  <p><a href="https://github.com/archeu/study-labs/tree/main/java/database/mysql-to-tidb-pitfalls">完整代码 →</a></p>
+  <div class="codebox" data-role="rn"><div class="code-bar"><b>PitfallsLab 输出（节选）</b><code>真实输出</code></div>
+<pre><code>==== autoinc 1：两台 TiDB server 交替各插 3 行（默认 AUTO_ID_CACHE）
+   插入顺序是 tidb1、tidb2、tidb1、tidb2…；按 id 排序：[1:tidb1, 2:tidb1, 3:tidb1, 30001:tidb2, 30002:tidb2, 30003:tidb2]
+==== autoinc 2：AUTO_ID_CACHE = 1
+   [1:tidb1, 2:tidb2, 3:tidb1, 4:tidb2, 5:tidb1, 6:tidb2]
+==== autoinc 3：重启 tidb1，再从 tidb1 插一行
+   重启后 tidb1 插入的 id：[60001]
+==== autoinc 对照：MySQL 8.4，两个连接交替插入
+   [1:conn1, 2:conn2, 3:conn1, 4:conn2, 5:conn1, 6:conn2]
+==== hotspot：AUTO_INCREMENT 插 2 万行（每 500 行一个事务），21.0 s
+   第几个 Region : 行数 → [0:20000]
+==== hotspot：AUTO_RANDOM 插 2 万行（每 500 行一个事务），19.3 s
+   第几个 Region : 行数 → [0:2000, 1:3500, 2:4000, 3:2500, 4:1500, 5:2000, 6:3000, 7:1500]
+==== bigtxn 1：一条 INSERT … SELECT，3 万行 × 1000 字节 ≈ 30 MB
+   tidb2（txn-total-size-limit = 10 MiB）：报错 [8004] Transaction is too large, size: 10486628
+   tidb1（默认配置）：成功，写入 30000 行，2.8 s
+   tidb2 + tidb_dml_type = 'bulk'：成功，写入 30000 行，3.3 s
+==== bigtxn 2：单行 7 MB
+   tidb1 插一行 7 MB：报错 [8025] entry too large, the max entry size is 6291456, the size of data is 7340065
+==== bigtxn 对照：MySQL 8.4 同一条 INSERT … SELECT
+   MySQL 8.4：成功，写入 30000 行，5.7 s
+==== iso（MySQL 8.4）：T1 锁住 k 在 10～20 的范围，T2 插入 k = 15
+   T2 INSERT k = 15：等了 3.0 s 后报错 [1205] Lock wait timeout exceeded; try restarting transaction
+   T1 再普通读一次：[10:10, 20:20]　T1 再 FOR UPDATE 读一次：[10:10, 20:20]
+==== iso（TiDB 8.5.8，tidb_txn_mode = pessimistic）
+   T2 INSERT k = 15：成功，13 ms
+   T1 再普通读一次：[10:10, 20:20]　T1 再 FOR UPDATE 读一次：[10:10, 15:15, 20:20]
+   隔离级别：[REPEATABLE-READ]</code></pre></div>
+  <p class="cap">hotspot 的耗时两张表差不多（21.0 s vs 19.3 s），因为 3 个 TiKV 挤在同一台 2 核虚拟机上，“分散到 3 台机器”在这里体现不出吞吐差别；这里要看的是行落在哪几个 Region。各跑 1 次。</p>
+  <p class="verdict"><b>到这里已经能交差了</b>：四件事都亲眼看到了，也都有对应的写法（④ 的“最少的写法”）。<b>已知还没处理的</b>：存量代码里哪些地方依赖了这些行为（<a href="#p-scan">第二圈</a>），以及 OceanBase、GoldenDB 上的同一套检查。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节</h2>
+  </div>
+  <h3>第一圈 · 不知道就会出事</h3>
+  <div class="pits">
+    <div class="pit" id="p-gap"><b><em>1</em>对账靠 id 连续，换库后天天报漏单<a class="rootmark" href="#m-inc">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>⑤：两台 TiDB 交替插入就是 1、30001、2、30002；重启一台跳到 60001。</dd><dt>根源</dt><dd>每台 TiDB server 缓存一段号，重启丢掉没用完的那段。</dd><dt>做法</dt><dd class="fix">对账按业务单号和时间范围比，不按 id 连续；确实要连续用 <code>AUTO_ID_CACHE = 1</code>（v6.5 起保证递增），并接受每个号多一次网络往返。</dd></dl>
+    </div>
+    <div class="pit" id="p-order"><b><em>2</em><code>ORDER BY id</code> 当成按时间排序、<code>MAX(id)</code> 当成最新一单<a class="rootmark" href="#m-inc">← ④ 机制 1、2</a></b>
+      <dl><dt>现象</dt><dd>⑤：默认模式下 tidb2 先发的 30001 比 tidb1 后发的 3 大；换成 AUTO_RANDOM 后 id 和时间完全无关。</dd><dt>根源</dt><dd>id 不再是全局单调的。</dd><dt>做法</dt><dd class="fix">按时间排序就用 <code>created_at</code>（建索引）；“最新一单”按 <code>created_at</code> 取。</dd></dl>
+    </div>
+    <div class="pit" id="p-hot"><b><em>3</em>自增主键的写入挤在一个 Region，加机器没用<a class="rootmark" href="#m-hot">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>⑤：AUTO_INCREMENT 的 2 万行全部落在第 0 个 Region（leader 只在 tikv3）；AUTO_RANDOM 分到 8 个。</dd><dt>根源</dt><dd>按主键范围分片，新 key 永远比旧 key 大。</dd><dt>做法</dt><dd class="fix">写多的表用 <code>AUTO_RANDOM</code>、应用发号先哈希、或者 <code>SHARD_ROW_ID_BITS</code>；新表上线前用 <code>SPLIT TABLE</code> 预切 Region，避免刚上线时只有一块。递增的二级索引（比如 <code>created_at</code>）也会热，同样要留意。</dd></dl>
+    </div>
+    <div class="pit" id="p-big"><b><em>4</em>一次删几千万行，事务太大<a class="rootmark" href="#m-txn">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>⑤：显式设了 10 MiB 上限的 tidb2，30 MB 的 INSERT 报 <code>[8004] Transaction is too large</code>；任何配置下，一行超过 6 MiB 报 <code>[8025] entry too large</code>。默认配置下限制换成了会话内存配额，事务再大一点就会被内存配额终止或拖垮 TiDB server。</dd><dt>根源</dt><dd>事务提交前全部改动缓存在一台 TiDB server 的内存里。</dd><dt>做法</dt><dd class="fix">分批（每批几千行一个事务）；大字段（图片、长文本）放对象存储，库里只存地址；<code>tidb_dml_type = 'bulk'</code> 在 v8.5 仍是实验特性，只用在可以重跑的离线任务上。</dd></dl>
+    </div>
+    <div class="pit" id="p-iso"><b><em>5</em>靠 <code>FOR UPDATE</code> 锁范围防插入，在 TiDB 上失效<a class="rootmark" href="#m-iso">← ④ 机制 4</a></b>
+      <dl><dt>现象</dt><dd>⑤：MySQL 里 T2 被挡了 3 秒后超时；TiDB 里 T2 13 ms 就插进去了，T1 的 <code>FOR UPDATE</code> 读到了 3 行。业务上就是“同一时段下了两单”“号段重叠”。</dd><dt>根源</dt><dd>TiDB 只锁已存在的行，不支持间隙锁；RR 实际是快照隔离。</dd><dt>做法</dt><dd class="fix">用唯一约束兜底（<code>UNIQUE (user_id, slot)</code>）；或者先锁一行一定存在的“占位”记录（比如用户行）再判断；迁移前在代码里搜 <code>FOR UPDATE</code> 逐个确认它是不是在锁范围。</dd></dl>
+    </div>
+  </div>
+
+  <h3 id="p-scan">第二圈 · 迁移前怎么排查</h3>
+  <ul class="steps-out" data-role="done">
+    <li><b>搜代码</b><span><code>MAX(id)</code>、<code>ORDER BY id</code>、<code>FOR UPDATE</code>、<code>LAST_INSERT_ID()</code> 后再做计算的地方，逐个确认依赖的是哪种行为。防的是坑 1、2、5。</span></li>
+    <li><b>看表结构</b><span>所有 <code>AUTO_INCREMENT</code> 主键的大表、所有按时间递增的二级索引，列出来决定用 AUTO_RANDOM、应用发号还是保持不变。防的是坑 3。</span></li>
+    <li><b>看批处理</b><span>归档、修数、导入任务，确认都是分批提交。防的是坑 4。</span></li>
+    <li><b>并发回放</b><span>把生产流量（或压测脚本）在 TiDB 上回放一遍，对比结果和错误码；单线程功能测试发现不了坑 3、5。</span></li>
+    <li><b>前端精度</b><span>AUTO_RANDOM 和雪花的 id 都超过 2<sup>53</sup>，JavaScript 的 Number 接会丢精度，接口里 id 用字符串。</span></li>
+  </ul>
+
+  <h3>第三圈 · 深处</h3>
+  <ul class="steps-out" data-role="of">
+    <li><b>乐观事务</b><span>TiDB 也支持乐观事务（<code>tidb_txn_mode = 'optimistic'</code>）：执行时不加锁，提交时才检查冲突，冲突就整个事务失败要重试。v3.0.8 起新建集群默认悲观，行为更接近 MySQL；从老集群升级上来的要确认一下是哪种。</span></li>
+    <li><b>写偏斜</b><span>快照隔离挡不住“两个事务各读一行、各改另一行”的写偏斜（比如“至少一个值班”的约束）。MySQL 的 RR 在普通读时同样挡不住，要靠 <code>FOR UPDATE</code>；TiDB 下用 <code>FOR UPDATE</code> 锁住两行即可。</span></li>
+    <li><b>Region 的预切和 placement</b><span>除了 <code>SPLIT TABLE</code>，建表时可以用 <code>PRE_SPLIT_REGIONS</code> 配合 <code>SHARD_ROW_ID_BITS</code> 一次切好；Placement Rules 能指定某张表的 leader 放在哪个机房，接上一页的两地三中心。</span></li>
+  </ul>
+  <h3>下一圈</h3>
+  <ul class="steps-out" data-role="other">
+    <li><b>回到全景</b><span>J11 的 7 个知识点都有页了：合上页面，把“订单表从一张到八张”的 12 站讲一遍，说“回到全景”我来查漏。</span></li>
+    <li><b>J12 高并发高可用</b><span>10 万人抢 1000 张券：这一站的分库分表、ES、分布式数据库都会在那张全景里出现。</span></li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>唯一约束兜底</b>：给 <code>t_iso</code> 加 <code>slot</code> 列和 <code>UNIQUE (slot)</code>，在 TiDB 上重跑 iso，T2 插入同一个 slot 时看报什么错。（坑 5）</li>
+    <li><b>行级打散</b>：hotspot 改成每行一个事务插 2000 行，看 AUTO_RANDOM 每个 Region 的行数还是不是整百。（机制 2）</li>
+    <li><b>分批删除</b>：给 <code>t_big</code> 写一个 <code>DELETE … LIMIT 5000</code> 的循环，在 tidb2（10 MiB 上限）上把 3 万行删完。（坑 4）</li>
+    <li><b>乐观事务</b>：<code>SET tidb_txn_mode = 'optimistic'</code> 再跑 iso：T1 的 FOR UPDATE 还加锁吗？T1 提交时会怎样？（第三圈）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>TiDB 兼容 MySQL 的协议和语法，但四处行为来自它的架构：每台 server 缓存一段自增号所以 id 不连续，按主键范围分片所以递增主键写热点，事务在一台 server 内存里攒齐所以有大小上限，RR 是快照隔离、没有间隙锁所以 FOR UPDATE 挡不住插入；迁移前要逐项排查、用 AUTO_RANDOM、分批、唯一约束来改写。</p></details>
+    <details><summary>2. 只看“兼容 MySQL”就迁，疼在哪？</summary><p>功能测试全过，问题都在多台 server、大数据量、高并发下才出现：id 跳号、加机器写不上去、批处理报错、偶发的重复插入。</p></details>
+    <details><summary>3. 坑 3（写热点）的根源是 ④ 的哪条？为什么 TiDB 不改成按哈希分片？</summary><p>机制 2：按主键范围分片，递增键总写最后一个 Region。TiDB 需要自动分裂、合并、迁移数据块，连续范围可以从中间劈开，哈希桶做不到，所以选了范围，把热点留给主键设计来解决。</p></details>
+    <details><summary>4. 预测：订单表用应用发的雪花 id（J09）做主键、不打散，在 TiDB 上会热吗？</summary><p>会：雪花 id 高位是时间戳，整体随时间递增，新订单同样落在表尾的 Region。要么先哈希、要么把分片位放到高位（类似 AUTO_RANDOM），要么用 AUTO_RANDOM 让数据库来做。</p></details>
+    <details><summary>5. 预测：在 TiDB 上，T1 先普通读范围（两行）、再 <code>FOR UPDATE</code> 读同一范围，中间 T2 插入并提交了一行。T1 的两次读结果一样吗？MySQL 呢？</summary><p>TiDB 不一样：普通读读快照（两行），FOR UPDATE 当前读看到新行（三行），⑤ 实测正是如此。MySQL 的普通读也是快照（两行）；但如果 T1 的第一次读就是 FOR UPDATE，间隙锁会挡住 T2，所以 ⑤ 里两次读都是两行。</p></details>
+    <details><summary>6. 放回全景：第 12 站“另一条路”上，第 2 站（定分片键）和第 7 站（订单号基因）还需要吗？</summary><p>不再需要自己定分片键和基因来路由，数据库按主键范围自动分片、任意条件都能查。但主键的选择从“分片键”变成了“打散写入”：第 2 站的问题换了个样子还在，就是坑 3；第 7 站的订单号仍然要全局唯一，由发号器或 AUTO_RANDOM 保证。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM 虚拟机，JDK 17，TiDB / TiKV / PD v8.5.8 小集群，MySQL 8.4.13 容器）：⑤ 的四组实验各跑 1 次，页面上的 id、行数、错误码和报错原文都来自这次输出。主键选型台是规则表加实测锚点（node 里跑过）。</p>
+  <p>按文档（TiDB v8.5）：默认每台 TiDB 缓存 30000 个自增 ID、只在单台内单调；<code>AUTO_ID_CACHE = 1</code> v6.4 引入中心化分配、v6.5 起保证递增；AUTO_RANDOM 默认 5 个分片位、只能用于 BIGINT 聚簇主键；递增主键的插入只落在一个 Region；<code>txn-total-size-limit</code> 默认 100 MiB、v6.5 起不再推荐（事务内存计入 <code>tidb_mem_quota_query</code>，显式设置时仍生效）；<code>txn-entry-size-limit</code> 默认 6 MiB；Pipelined DML（<code>tidb_dml_type = 'bulk'</code>）v8.0 引入、v8.5 仍是实验特性；RR 实际是快照隔离、不支持间隙锁、RC 只在悲观模式生效、v3.0.8 起新建集群默认悲观。MySQL 8.4 文档：RR 下的 next-key 锁会阻止往 <code>BETWEEN 10 AND 20</code> 里插入 15。</p>
+  <p>相关：<a href="../java/pano-j11-order-table-sharding.html">全景：订单表从一张到八张</a> · <a href="distributed-db-tidb-oceanbase.html">上一页：分布式数据库</a> · <a href="mysql-mvcc-lock.html">MVCC 与锁</a> · <a href="../arch/distributed-id.html">分布式 ID</a> · <a href="../java/roadmap.html#j11">Java 地图 J11</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 主键选型台：在 TiDB 上给订单表选主键，看连续性、单调性、写入分布，以及会打破哪些“MySQL 时代的老假设”。
+// 锚点是本页 ⑤ 的实测：两台 TiDB 交替插入时默认缓存模式得到 1,2,3 / 30001,30002,30003，重启后跳到 60001；
+// AUTO_ID_CACHE = 1 得到 1..6；AUTO_INCREMENT 的 2 万行全部落在 1 个 Region，AUTO_RANDOM 分到 8 个 Region。
+const KEYS = {
+  inc:     { name: "AUTO_INCREMENT（默认缓存）", contiguous: false, monotonicGlobal: false, monotonicPerServer: true, spread: false, size: "小",
+             sample: n => n === 1 ? "1, 2, 3, 4, 5, 6" : "1, 30001, 2, 30002, 3, 30003（重启一台后从 60001 起）" },
+  inc1:    { name: "AUTO_INCREMENT + AUTO_ID_CACHE = 1", contiguous: true, monotonicGlobal: true, monotonicPerServer: true, spread: false, size: "小",
+             sample: () => "1, 2, 3, 4, 5, 6" },
+  random:  { name: "AUTO_RANDOM", contiguous: false, monotonicGlobal: false, monotonicPerServer: false, spread: true, size: "大（高 5 位是随机分片位）",
+             sample: () => "高位随机，大小相差几个数量级（⑤ 里最小的三个是 2501、2502、2503）" },
+  snow:    { name: "应用发号：雪花（J09）", contiguous: false, monotonicGlobal: false, monotonicPerServer: true, spread: false, size: "大",
+             sample: () => "按时间递增，多台发号器之间大致有序" },
+  snowsh:  { name: "雪花 + 先哈希打散 / 基因", contiguous: false, monotonicGlobal: false, monotonicPerServer: false, spread: true, size: "大",
+             sample: () => "按时间无序，写入打散" }
+};
+const ASSUMPTIONS = [
+  { k: "gap", text: "用 id 是否连续来发现漏单", breaks: K => !K.contiguous },
+  { k: "order", text: "ORDER BY id 当成按下单时间排序", breaks: K => !K.monotonicGlobal },
+  { k: "max", text: "SELECT MAX(id) 拿“最新一单”", breaks: K => !K.monotonicGlobal },
+  { k: "int", text: "前端用 JavaScript Number 接 id（超过 2^53 会丢精度）", breaks: K => K.size.startsWith("大") }
+];
+function chooseKey(key, servers, writeHeavy) {
+  const K = KEYS[key];
+  const hot = !K.spread;
+  const broken = ASSUMPTIONS.filter(a => a.breaks(K)).map(a => a.text);
+  let verdict;
+  if (writeHeavy && hot) verdict = "写入集中在表尾的一个 Region：加 TiKV 也分摊不了，这是写多的订单表最该避开的。";
+  else if (writeHeavy && !hot) verdict = "写入打散到各个 Region，加机器能分摊写入；代价是 id 不再有序，按时间查要靠 created_at 上的索引。";
+  else if (!writeHeavy && hot) verdict = "写入不多时表尾热点不明显，这个选择可以接受，换来 id 有序。";
+  else verdict = "写入不多也打散了：没有坏处，只是 id 看不出先后。";
+  return { name: K.name, sample: K.sample(servers), contiguous: K.contiguous, monotonic: K.monotonicGlobal, hot, size: K.size, broken, verdict };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const st = { key: "inc", servers: 2, heavy: true };
+  $("#pk-k").innerHTML = Object.entries(KEYS).map(([k, v]) => `<button type="button" data-v="${k}" aria-pressed="${k === st.key}">${v.name}</button>`).join("");
+
+  function render() {
+    const r = chooseKey(st.key, st.servers, st.heavy);
+    const tiles = [
+      { k: "id 连续吗", v: r.contiguous ? "连续" : "不连续", sub: r.contiguous ? "" : "会跳号", role: r.contiguous ? "done" : "of" },
+      { k: "全局单调吗", v: r.monotonic ? "是" : "否", sub: r.monotonic ? "可以按 id 排先后" : "按时间请用 created_at", role: r.monotonic ? "done" : "of" },
+      { k: "写入", v: r.hot ? "挤在表尾" : "打散", sub: r.hot ? "一个 Region 扛全部写" : "分到各个 Region", role: r.hot ? (st.heavy ? "bad" : "of") : "done" },
+      { k: "id 大小", v: r.size.startsWith("大") ? "大" : "小", sub: r.size.startsWith("大") ? "前端用字符串接" : "", role: "other" }
+    ];
+    $("#pk-tiles").innerHTML = tiles.map(t => `<div class="tile" data-role="${t.role}"><small>${t.k}</small><b>${t.v}</b><span>${t.sub}</span></div>`).join("");
+    const out = $("#pk-out");
+    out.dataset.role = r.hot && st.heavy ? "bad" : "done";
+    out.innerHTML = `<b>${r.name}</b>：${r.verdict}<ul><li><b>插入几行看看</b>：${r.sample}</li>` +
+      (r.broken.length ? `<li><b>会失效的老假设</b>：${r.broken.join("；")}</li>` : `<li><b>老假设</b>：都还成立</li>`) + `</ul>`;
+  }
+
+  function wire(id, set) {
+    $$("#" + id + " button").forEach(b => b.addEventListener("click", () => {
+      $$("#" + id + " button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      set(b.dataset.v);
+      render();
+    }));
+  }
+  wire("pk-k", v => { st.key = v; });
+  wire("pk-n", v => { st.servers = +v; });
+  wire("pk-w", v => { st.heavy = v === "1"; });
+
+  const answer = chooseKey("inc1", 2, true).hot ? "no" : "yes";
+  $$("#pk-guess .opts button").forEach(b => b.addEventListener("click", () => {
+    $$("#pk-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", String(x === b)); });
+    const g = b.dataset.g;
+    if (g !== "skip") b.classList.add(g === answer ? "right" : "wrong");
+    $$("#pk-guess .opts button").forEach(x => { if (x.dataset.g === answer) x.classList.add("right"); });
+    const res = $("#pk-res");
+    res.hidden = false;
+    res.innerHTML = (g === "skip" ? "" : (g === answer ? "猜对了。" : "没猜中。")) +
+      " 不能。AUTO_ID_CACHE = 1 只让 id 连续了，id 还是递增的，新订单照样全写进表尾那一个 Region（⑤：AUTO_INCREMENT 的 2 万行全在第 0 个 Region）。连续和打散是矛盾的，二选一。";
+    st.key = "inc1"; st.heavy = true;
+    $$("#pk-k button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === "inc1")));
+    $$("#pk-w button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === "1")));
+    render();
+  }));
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
