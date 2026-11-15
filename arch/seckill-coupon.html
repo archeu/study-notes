@@ -1,0 +1,1160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>秒杀与抢券：削峰、预扣、异步化</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step page (design-idea type) for Java map J12 node "秒杀与抢券". Roles: cg = peak shaving layers + Redis pre-deduct (the pick), of = async MQ + DB ledger, other = old way (deduct in MySQL), bad = misuse, done = good practice, bk = rate limiting (previous page). One interaction: the oversell race stepper in ④ (naive GET/DECR vs Lua, two requests, stock = 1). Reuses rate-limit page CSS plus .race rules. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+#cb-tiles .tile b{white-space:normal;font-size:20px}
+.strip45{display:grid;grid-template-columns:repeat(45,minmax(0,1fr));gap:2px}
+.strip45 i{display:block;height:26px;border-radius:3px;background:var(--good-tint);border:1px solid var(--good)}
+.strip45 i.o{background:var(--bad-tint);border-color:var(--bad)}
+.strip45 i.h{background:var(--warn-tint);border-color:var(--warn)}
+.strip45 i.n{background:var(--neutral-tint);border-color:var(--neutral)}
+.strip-ax{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.lg-row{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lg-row i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1px solid}
+
+/* sharding-key bench */
+.sk-wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.sk-bars{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;align-items:end;height:160px;padding:4px 6px 0;border-bottom:1.5px solid var(--line-strong)}
+.sk-bars .bar{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;min-width:0;gap:2px}
+.sk-bars .bar i{display:block;width:100%;background:var(--pd);border-radius:6px 6px 0 0;min-height:2px;transition:height .3s}
+.sk-bars .bar.hot i{background:var(--bad)}
+.sk-bars .bar.zero i{background:var(--line-strong)}
+.sk-bars .bar small{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);white-space:nowrap}
+.sk-names{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:2px 6px 0}
+.sk-names span{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);text-align:center}
+.sk-q td.n{font-family:var(--font-mono);white-space:nowrap}
+.sk-q td.one{color:var(--good);font-weight:700}
+.sk-q td.all{color:var(--bad);font-weight:700}
+@media (max-width:700px){.sk-wrap{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.sk-bars .bar i{transition:none}}
+
+/* paging calculator */
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+
+.rl-ax{stroke:var(--line);stroke-width:1}
+.rl-win{stroke:var(--line-strong);stroke-width:1;stroke-dasharray:4 4}
+.rl-tick{stroke-width:1.2}
+.rl-lane{font-size:12.5px;fill:var(--ink)}
+.rl-cnt{font-size:12.5px;font-weight:700;fill:var(--ink);font-family:var(--font-mono)}
+.rl-cnt.bad{fill:var(--bad)}
+.rl-bar{fill:var(--rc)}
+.rl-lab-out{display:flex;flex-direction:column;gap:6px}
+.rl-row{display:grid;grid-template-columns:9.5em minmax(0,1fr) 7.5em;gap:8px;align-items:center;font-size:13.5px}
+.rl-row > span{min-width:0}
+.rl-row svg{width:100%;height:44px;display:block}
+.rl-row .sum{font-family:var(--font-mono);font-size:12.5px;color:var(--muted)}
+.rl-row .sum b{color:var(--ink)}
+.algo-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.algo{border:1.5px solid var(--rc);background:var(--card);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.algo h4{margin:0;color:var(--rc);font-size:16px}
+.algo svg{width:100%;height:auto;display:block}
+.algo p{font-size:14.5px;margin:0}
+.algo .gives{font-size:13.5px;color:var(--muted)}
+@media (max-width:760px){.algo-cards{grid-template-columns:1fr}.rl-row{grid-template-columns:7em minmax(0,1fr);}.rl-row .sum{grid-column:1 / -1}}
+
+.race{display:flex;flex-direction:column;gap:12px}
+.race-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.lane-box{border:1.5px solid var(--line);border-radius:14px;padding:10px 12px;background:var(--card);min-width:0;display:flex;flex-direction:column;gap:6px}
+.lane-box h4{margin:0;font-size:15px}
+.lane-box ol{margin:0;padding-left:1.3em;font-family:var(--font-mono);font-size:12.5px;display:flex;flex-direction:column;gap:3px}
+.lane-box li{opacity:.35;transition:opacity .2s}
+.lane-box li.done{opacity:1}
+.lane-box li.now{opacity:1;font-weight:700;color:var(--rc)}
+.redis-state{font-family:var(--font-mono);font-size:13px;display:flex;flex-direction:column;gap:4px}
+.redis-state .v{font-size:26px;font-family:var(--font-display);color:var(--ink)}
+.redis-state .v.bad{color:var(--bad)}
+.layer-t td:nth-child(2),.layer-t td:nth-child(3){font-variant-numeric:tabular-nums;white-space:nowrap}
+@media (max-width:760px){.race-grid{grid-template-columns:1fr}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>架构</span><span aria-hidden="true">/</span><span class="tb-here">秒杀与抢券：削峰、预扣、异步化</span></div></nav>
+<main>
+<header class="hero">
+  <p class="kicker">削峰漏斗 · 页面静态化 · 售罄标记 · Redis Lua 预扣 · 一人一张 · 异步落库 · 条件更新 · 唯一键 · 对账 · 热点行 · Redis 8.10 + JDK 17 实测</p>
+  <h1>1000 张券、10 万人：秒杀与抢券</h1>
+  <p class="lead">秒杀难在<b>所有写都挤在同一个数上</b>：MySQL 里的一行库存，每秒只扣得动几百次。解法有两条主线：一是<b>一层一层削</b>，App、CDN、网关、售罄标记，每层只把下一层扛得住的量放进去；二是<b>把“决定谁抢到”和“记账”拆开</b>，Redis 里一段 Lua 原子地查重、扣数，在内存里快速决定；MySQL 只按自己的速度落库，用条件更新和唯一键当最后的账本。Redis 快但可能丢，MySQL 慢但可靠，两者不一致时以账本为准。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j12-coupon-rush.html#s-6">10 万人抢 1000 张券的那一秒 · 第 3、4、6～9 站</a></span><span>地图：<a href="../java/roadmap.html#j12">J12 · 秒杀与抢券：削峰、预扣、异步化</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>J12 第 4 个知识点，接上一页<a href="rate-limit-algorithms.html">限流算法</a>（第 5 站）。要用到的旧页：<a href="../redis/redis-lua-tx.html">Redis Lua 脚本</a>、<a href="../database/db-pool-tx-perf-hot-row.html">热点行</a>、<a href="idempotency-design.html">幂等设计</a>、<a href="../rocketmq/rocketmq-tx-delay-order.html">RocketMQ 事务消息</a>。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：一个数，10 万人同时改</h2>
+  </div>
+  <p class="lead">全景里 20:00:00 那一秒，1000 张券、10 万人、30 万次点击。地图给这一站的要求，拆开是五条：</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>要求</th><th>为什么难</th><th>全景里谁负责</th></tr></thead>
+      <tbody>
+        <tr><th>不超发：最多 1000 张</th><td>10 万个请求并发地“看库存、扣库存”</td><td>第 7 站 Lua 预扣，第 9 站条件更新兜底</td></tr>
+        <tr><th>不少发：1000 张都发出去</th><td>扣了库存、后面某一步失败，券就“丢”了</td><td>第 8 站消息补发 + 对账</td></tr>
+        <tr><th>一人一张</th><td>同一个人点 3 次，3 个请求同时到</td><td>第 7 站集合查重，第 9 站唯一键</td></tr>
+        <tr><th>没抢到的快速知道</th><td>99% 的人注定抢不到，让他们排队是浪费</td><td>第 3～6 站层层快速失败</td></tr>
+        <tr><th>不拖累别的业务</th><td>同一台机器、同一个库上还有正常下单</td><td>每层削峰 + 独立部署</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>不用它会怎样：直接在 MySQL 里扣</h2>
+  </div>
+  <p>最直接的写法完全正确，不会超发：</p>
+  <div class="codebox"><pre><code>BEGIN;
+UPDATE coupon_stock SET stock = stock - 1 WHERE id = 'c88' AND stock &gt; 0;   -- 影响 1 行才继续
+INSERT INTO t_coupon_user (user_id, coupon_id) VALUES (1024, 'c88');        -- 唯一键 (user_id, coupon_id)
+COMMIT;</code></pre></div>
+  <p>问题在速度。所有请求都要改 <code>id = 'c88'</code> 这一行，行锁要等到 <code>COMMIT</code> 才放，于是 10 万个事务在这一行上排成一队。<a href="../database/db-pool-tx-perf-hot-row.html">热点行那一页</a>的结论：<b>每秒最多 ≈ 1 ÷ 热点行持锁时间</b>，持锁 2 ms 就是每秒 500 次，加连接、加机器都没用。全景第 2 站的压测正是卡在这里：同步扣 MySQL 的版本 600 QPS 就上不去了。排不上的请求占着连接池等锁，连同一个库上的正常下单也拿不到连接。</p>
+  <div class="know" data-role="bad"><b>不懂精华时的典型误用</b><span>把库存搬进 Redis，代码却还是“先看再扣”：<code>GET</code> 一下还有，再 <code>DECR</code>。单线程测试完全正常，并发一上来就超发。⑤ 的实验 1 里，100 张券回了 200 次“抢到了”，库存扣到 -100。搬进 Redis 解决的是速度，<b>原子性要靠 Lua 另外保证</b>。</span></div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种流派：库存扣在哪</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>流派</th><th>做法</th><th>扛得住多少</th><th>代价</th></tr></thead>
+      <tbody>
+        <tr><th>数据库硬扛</th><td>条件更新或乐观锁（<code>version</code>），前面靠限流把量压到几百</td><td>每秒几百（受热点行持锁时间限制）</td><td>最简单、最一致；量大就排队</td></tr>
+        <tr><th>数据库拆热点</th><td>库存拆成 10 行，随机扣一行；或者攒一批请求合并成一次扣减</td><td>大约乘以拆的份数</td><td>“还剩几张”要加起来算；最后几张分散在各行，有的行先扣完</td></tr>
+        <tr><th>Redis 预扣 + 异步落库</th><td>Lua 原子查重、扣数；成功的发消息，消费者慢慢写 MySQL</td><td>单个 Redis 分片每秒几万到十几万次</td><td>Redis 和 MySQL 是两份数据，要处理两者不一致</td></tr>
+        <tr><th>令牌预分配</th><td>开抢前往 Redis List 里放 1000 个券码，抢的人 <code>LPOP</code> 一个</td><td>同上</td><td>和预扣本质一样；券码天然唯一，查重仍要另做</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="verdict" data-role="cg">本页学第三种：<b>Redis 预扣 + 异步落库</b>，加上前面几层削峰。选择规则：峰值在每秒几百以内，就用数据库条件更新，别引入第二份数据；峰值大到热点行扛不住、而且“抢到没有”必须一秒内回复，才上 Redis 预扣。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>核心取舍：削峰漏斗，和“决定”与“记账”分家</h2>
+  </div>
+
+  <h3 id="m-funnel">取舍一：每层只放下一层扛得住的量</h3>
+  <p>越靠外的一层，挡掉一个请求越便宜；越靠里的一层，越贵、也越准。所以粗筛放在外面，精确判断放在里面。</p>
+  <div class="tbl-wrap">
+    <table class="t layer-t">
+      <thead><tr><th>层（全景站）</th><th>进来</th><th>放过去</th><th>靠什么挡</th><th>挡错了的代价</th></tr></thead>
+      <tbody>
+        <tr><th>③ App</th><td>30 万次点击</td><td>10 万</td><td>点一次置灰、随机延迟</td><td>几乎没有；但脚本能绕过</td></tr>
+        <tr><th>④ CDN</th><td>50 万次刷新</td><td>0</td><td>页面静态化，抢购地址开抢才下发</td><td>页面信息有几秒延迟</td></tr>
+        <tr><th>⑤ 网关</th><td>10 万</td><td>2 万</td><td>令牌桶（<a href="rate-limit-algorithms.html">上一页</a>）</td><td>有人本来能抢到，被随机拒了：不公平，但券反正不够分</td></tr>
+        <tr><th>⑥ 售罄标记</th><td>2 万</td><td>约 3000</td><td>本机内存里的一个布尔值</td><td>标记该清没清，剩下的券发不出去</td></tr>
+        <tr><th>⑦ Redis Lua</th><td>约 3000</td><td>1000</td><td>原子的查重 + 扣数</td><td>切主时可能丢最后几笔扣减</td></tr>
+        <tr><th>⑨ MySQL</th><td>1000 条消息</td><td>1000 行</td><td>条件更新 + 唯一键</td><td>没有：它就是最终答案</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="m-split">取舍二：“决定”在 Redis，“记账”在 MySQL</h3>
+  <div class="design">
+    <div class="codebox" data-role="cg"><div class="code-bar"><b>选：异步</b><span>Redis 决定 → 消息 → MySQL 记账</span></div>
+      <div style="padding:12px 14px;font-size:14.5px"><p>Redis 里扣成功就回复用户，MySQL 由消费者每秒 200 条慢慢写。<b>写库的速度不再跟着流量走</b>：10 万人还是 100 万人，MySQL 都只写 1000 行、每秒 200 行。代价是同一份库存有了两份数据，要回答“两边对不上怎么办”。</p></div></div>
+    <div class="codebox" data-role="other"><div class="code-bar"><b>没选：同步</b><span>Redis 扣成功 → 当场写 MySQL → 回复</span></div>
+      <div style="padding:12px 14px;font-size:14.5px"><p>只有 1000 张券时其实能跑：1000 次 INSERT 不算多。但只要事务里还要更新 <code>coupon_stock</code> 那一行，就又回到热点行；券一多、活动一多，写库的量就跟着流量涨。<b>MySQL 一慢，用户的响应就跟着慢</b>，前面几层削峰换来的快速响应也就没了。</p></div></div>
+  </div>
+  <p class="verdict" data-role="cg"><b>决定胜负的约束</b>：用户要的是“一秒内知道结果”，账本要的是“绝对正确”。两件事对速度和可靠性的要求相反，放进同一个同步调用，就只能按慢的那个走。</p>
+
+  <h3 id="m-ledger">两份数据对不上时，谁说了算</h3>
+  <ul class="steps-out" data-role="of">
+    <li><b>Redis 多了</b><span>切主后新主少了最后几笔扣减，库存“回涨”，Redis 又放出几个人。落库时 <code>UPDATE … WHERE issued &lt; 1000</code> 影响 0 行，不发，改发致歉。⑤ 实验 4 实测：回涨 5 张，挡下 5 人。</span></li>
+    <li><b>Redis 少了</b><span>扣了库存、消息没发出去（进程崩了）。靠本地重试表补发，活动后再拿 Redis 的已领集合和 MySQL 对一次账，补发漏掉的。</span></li>
+    <li><b>消息多了</b><span>重试导致同一条消息到两次。唯一键 <code>(user_id, coupon_id)</code> 让第二次 INSERT 失败，消费者把这种失败当成功处理。⑤ 实验 4：投递 200 条，落库 100 行，撞唯一键 100 次。</span></li>
+  </ul>
+  <p>所以回复用户时有个措辞上的选择：Redis 扣成功就说“抢到了”，体验最好，但极少数人会在切主后收到致歉；说“排队中，结果稍后通知”，等落库成功再确认，绝不会说错，用户多等几秒。</p>
+
+  <h3 id="m-atomic">为什么非要 Lua：两个请求抢最后一张</h3>
+  <div class="race lab" data-role="cg" tabindex="0" aria-label="超发分步演示，左右方向键切换">
+    <div class="run-row">
+      <div class="presets" style="grid-template-columns:repeat(2,minmax(0,1fr));flex:1 1 320px" role="group" aria-label="写法">
+        <button type="button" data-mode="naive" aria-pressed="true"><b>GET 再 DECR</b><span>三次调用</span></button>
+        <button type="button" data-mode="lua" aria-pressed="false"><b>一段 Lua</b><span>一次调用，原子执行</span></button>
+      </div>
+      <button class="btn" type="button" id="r-prev">← 上一步</button>
+      <button class="btn primary" type="button" id="r-next">下一步 →</button>
+      <button class="btn" type="button" id="r-reset">从头来</button>
+    </div>
+    <div class="race-grid">
+      <div class="lane-box" data-role="cg"><h4>请求 A（用户 7）</h4><ol id="r-a"></ol></div>
+      <div class="lane-box" data-role="of"><h4>请求 B（用户 9）</h4><ol id="r-b"></ol></div>
+      <div class="lane-box" data-role="other"><h4>Redis 里</h4><div class="redis-state"><span>c88:stock</span><span class="v" id="r-stock">1</span><span>c88:users</span><span id="r-users">{ }</span></div></div>
+    </div>
+    <p class="lab-res" id="r-note" data-role="cg"></p>
+  </div>
+  <p class="cap">库存只剩 1 张。Redis 一次只执行一条命令，但 A、B 的命令可以交错。Lua 脚本在执行期间不会插进别的命令，所以“看”和“扣”之间没有缝。</p>
+
+  <h3>最少的写法</h3>
+  <div class="codebox"><div class="code-bar"><b>Lua：查重 + 扣数</b><span>返回 0 成功、1 领过、2 售罄</span></div><pre><code>if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then return 1 end
+local s = tonumber(redis.call('GET', KEYS[1]) or '0')
+if s &lt;= 0 then return 2 end
+redis.call('DECR', KEYS[1])
+redis.call('SADD', KEYS[2], ARGV[1])
+return 0</code></pre></div>
+  <div class="codebox"><div class="code-bar"><b>消费者：条件更新 + 唯一键</b><span>同一个本地事务</span></div><pre><code>int n = jdbc.update("UPDATE coupon_stock SET issued = issued + 1 WHERE id = ? AND issued &lt; ?", "c88", 1000);
+if (n == 0) { notifySorry(uid); return; }                 // Redis 多放的人：不发
+try { jdbc.update("INSERT INTO t_coupon_user(user_id, coupon_id) VALUES (?, ?)", uid, "c88"); }
+catch (DuplicateKeyException e) { throw new AlreadyIssued(); }  // 重复消息：回滚这次 +1，当成功确认</code></pre></div>
+  <p class="cap">第二段里，撞唯一键时要让整个事务回滚（<code>issued</code> 的 +1 也撤销），再确认消息，所以抛异常而不是直接 return。参数细节放到第⑥步。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>套进场景：在 Redis 上真抢一次</h2>
+  </div>
+  <p>规模按全景缩小 10 倍：100 张券，1000 个用户每人点 2 次（共 2000 个请求，打乱顺序），200 个线程同时抢。四段实验：错误写法、Lua、售罄标记、异步落库。第 4 段的“库”是内存里模拟的条件更新和唯一键，不是真 MySQL。</p>
+  <div class="codebox"><pre><code>cd study-labs/java/arch/seckill-coupon
+DOCKER="sudo docker" ./run.sh      # 起 redis:8.10.3-alpine（端口 63799），编译并运行 CouponRushLab
+./run.sh clean                     # 删掉容器</code></pre></div>
+  <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>CouponRushLab 输出</b><a href="https://github.com/archeu/study-labs/tree/main/java/arch/seckill-coupon">完整代码 →</a></div><pre class="console"><span class="w">Redis redis_version:8.10.3
+券 100 张，1000 个用户每人点 2 次，200 个线程同时抢
+
+1. naive  GET → DECR → SADD
+  回“抢到了” 200 次（券只有 100 张），一人抢到多张的用户 18 个，回“领过” 164，回“已抢完” 1636；Redis 里库存剩 -100，已领集合 182 人；耗时 667 ms
+
+2. lua    一段脚本做完
+  回“抢到了” 100 次（券只有 100 张），一人抢到多张的用户 0 个，回“领过” 100，回“已抢完” 1800；Redis 里库存剩 0，已领集合 100 人；耗时 224 ms
+
+3. flag 关    20000 个请求，Redis 被调用 20000 次，抢到 100，耗时 1285 ms
+3. flag 开    20000 个请求，Redis 被调用   137 次，抢到 100，耗时 45 ms
+
+4. async 抢到 100 人，投递 200 条消息（每条两次）：落库 100 行，撞唯一键 100 次，条件更新挡下 0 次
+   模拟切主后库存回涨 5 张：Redis 又放出 5 人，落库时条件更新挡下 5 人，最终发券 100 张</span></pre></div>
+  <p class="cap"><span class="tag-real">实测</span> 2 核 ARM 虚拟机，JDK 17，Lettuce 6.8.2，Redis 8.10.3 容器。1、2 段的具体数字每次运行会变（线程交错不同），“naive 超发、Lua 正好 100”每次都成立；耗时只用来比较，不代表生产。</p>
+  <ul class="steps-out" data-role="cg">
+    <li><b>1 和 2</b><span>同样的 Redis、同样的命令，差别只在三次调用还是一段脚本。naive 超发了整整 1 倍，还有 18 个人一人两张；Lua 一张不多。naive 还更慢，因为每个请求要 3 次往返。</span></li>
+    <li><b>3</b><span>8 个实例各有一个售罄标记。2 万个请求里，只有 137 个走到了 Redis：100 个抢到的，加上售罄那一刻已经在路上的 37 个。其余全在本机内存里结束。</span></li>
+    <li><b>4</b><span>重复消息被唯一键挡住，“切主回涨”多放出的人被条件更新挡住，最终发券数始终是 100。Redis 可以错，账本不能错。</span></li>
+  </ul>
+  <p>到这里已经能交差了：Lua 预扣、售罄标记、发消息、消费者条件更新加唯一键，四样东西。已知还没处理的细节：<a href="#p-lost">扣了没发出去</a>、<a href="#p-flag">售罄标记怎么清</a>、<a href="#p-hotkey">一个 key 扛不住</a>、<a href="#p-iso">和正常业务隔离</a>，都在⑥。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>反例和误用</h2>
+  </div>
+  <h3>第一圈 · 套上了名字，没满足约束</h3>
+  <div class="pits">
+    <div class="pit" id="p-naive"><b><em>1</em>库存放进了 Redis，还是“先看再扣”<span class="seen">⑤ 实验 1</span><a class="rootmark" href="#m-atomic">← ④ 为什么非要 Lua</a></b>
+      <dl><dt>现象</dt><dd>100 张券回了 200 次“抢到了”，库存 -100。</dd><dt>根源</dt><dd><code>GET</code> 和 <code>DECR</code> 之间能插进别的请求。</dd><dt>做法</dt><dd class="fix">查重和扣数放进同一段 Lua；或者直接 <code>DECR</code> 看返回值，小于 0 就 <code>INCR</code> 回去。</dd></dl>
+    </div>
+    <div class="pit" id="p-trust"><b><em>2</em>落库时完全相信 Redis 的结果<span class="seen">⑤ 实验 4</span><a class="rootmark" href="#m-ledger">← ④ 谁说了算</a></b>
+      <dl><dt>现象</dt><dd>Redis 切主后库存回涨，消费者照单全收，发出 1037 张。</dd><dt>根源</dt><dd>主从异步复制，新主可能少了最后几笔写入。</dd><dt>做法</dt><dd class="fix">消费者用 <code>WHERE issued &lt; 1000</code> 的条件更新，MySQL 才是最终的数。</dd></dl>
+    </div>
+    <div class="pit" id="p-lost"><b><em>3</em>扣了库存，消息没发出去<a class="rootmark" href="#m-ledger">← ④ 谁说了算</a></b>
+      <dl><dt>现象</dt><dd>用户看到“抢到了”，券一直没到账；活动结束库存是 0，MySQL 只有 996 行。</dd><dt>根源</dt><dd>Redis 扣减和发消息是两个系统，中间进程崩了。</dd><dt>做法</dt><dd class="fix">发送失败写本地重试表；活动后用 Redis 已领集合对账补发；或用 RocketMQ 事务消息把“扣减”和“发消息”绑在一起。</dd></dl>
+    </div>
+    <div class="pit" id="p-idem"><b><em>4</em>消费者不幂等，一人到账两张<span class="seen">⑤ 实验 4</span><a class="rootmark" href="#m-ledger">← ④ 消息多了</a></b>
+      <dl><dt>现象</dt><dd>MQ 至少投递一次，重试时同一条消息到了两次。</dd><dt>根源</dt><dd>消息系统保证不丢，不保证不重。</dd><dt>做法</dt><dd class="fix">唯一键 <code>(user_id, coupon_id)</code>，撞键当成功；见 <a href="idempotency-design.html">幂等设计</a>。</dd></dl>
+    </div>
+    <div class="pit" id="p-flag"><b><em>5</em>售罄标记只会置位、不会清<a class="rootmark" href="#m-funnel">← ④ 漏斗第 6 层</a></b>
+      <dl><dt>现象</dt><dd>运营补了 200 张，或者切主后库存回涨，可所有实例都在回“已抢完”。</dd><dt>根源</dt><dd>标记是本机内存里的副本，补货时没人通知它。</dd><dt>做法</dt><dd class="fix">补货走同一个频道广播“清标记”；标记带过期时间（比如 5 秒后重新问一次 Redis）。</dd></dl>
+    </div>
+    <div class="pit" id="p-consumer"><b><em>6</em>为了“快点到账”把消费者开到 200 线程<a class="rootmark" href="#m-split">← ④ 异步</a></b>
+      <dl><dt>现象</dt><dd>MySQL 又被打满，连同一个库上的正常下单都变慢。</dd><dt>根源</dt><dd>异步的价值就是让写库速度和流量脱钩，消费速度一放开，等于又把峰值送回了数据库。</dd><dt>做法</dt><dd class="fix">消费速度按数据库能力定（全景：4 线程、每秒 200 条），宁可到账晚几秒。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 团队里怎么做</h3>
+  <ul class="steps-out" data-role="done">
+    <li id="p-iso"><b>独立部署</b><span>秒杀的券服务实例、Redis、甚至网关路由单独一套，和日常下单分开。防的是一场活动拖垮全站。</span></li>
+    <li><b>开抢前预热</b><span>库存、券信息提前写进 Redis 和本地缓存，Lua 脚本提前 <code>SCRIPT LOAD</code>，应用提前 JIT 预热（压一轮）。防的是开抢第一秒冷启动。</span></li>
+    <li><b>防刷</b><span>抢购地址带一次性的签名参数，开抢时才下发；按用户、设备限流；风控名单在网关挡掉。防的是脚本比真人快。</span></li>
+    <li><b>可降级</b><span>每一层都有开关：Redis 不可用时直接回“活动太火爆”，而不是退回去扣 MySQL。防的是兜底方案把热点行重新引回来。</span></li>
+    <li><b>活动后对账</b><span>Redis 已领集合、消息发送记录、MySQL 发券表三方对一次，差异有人处理。防的是少发没人知道。</span></li>
+  </ul>
+
+  <h3>第三圈 · 深处</h3>
+  <ul class="steps-out" data-role="of">
+    <li id="p-hotkey"><b>一个 key 扛不住时</b><span>所有请求都打 <code>c88:stock</code>，在 Redis Cluster 里它只在一个分片上，单分片每秒几万到十几万次。更大的活动把库存拆成 10 个 key（<code>c88:stock:{0..9}</code>），请求随机挑一个，扣完了再换下一个；代价是最后几张分散在各 key，“已抢完”的判断要多问几次。见 <a href="../redis/redis-bigkey-hotkey.html">热 key</a>。</span></li>
+    <li><b>Lua 里别做慢事</b><span>脚本执行期间 Redis 不处理别的命令。脚本里只放 O(1) 的几条命令；<code>SMEMBERS</code> 这种 O(N) 的、或者循环几千次的，会让整个 Redis 卡住。</span></li>
+    <li><b>Redis Cluster 下的 key</b><span>Lua 里用到的多个 key 必须在同一个槽，所以写成 <code>{c88}:stock</code>、<code>{c88}:users</code>，用 hash tag 绑到一起。</span></li>
+    <li><b>下单秒杀比抢券多出来的</b><span>抢到以后还要建订单、等支付，30 分钟不付要把库存还回去：要用延时消息或定时任务回补 Redis 和 MySQL，这是全景“下一圈”。</span></li>
+  </ul>
+
+  <h3>下一圈</h3>
+  <ul class="steps-out" data-role="other">
+    <li><b>下单秒杀</b><span>库存预扣 → 建单 → 支付 → 超时回补，三处库存怎么对齐，接 <a href="distributed-transactions.html">J09 分布式事务</a> 和 <a href="../rocketmq/rocketmq-tx-delay-order.html">延时消息</a>。</span></li>
+    <li><b>库存分段和热点探测</b><span>开抢前不知道哪个商品会热：本地缓存 + 热点探测（如京东 hotkey 类组件）自动把热 key 推到本机。</span></li>
+    <li><b>下一个知识点</b><span>J12 第 5 个：<a href="../perf/full-link-load-test.html">全链路压测与容量规划</a>，全景第 2 站：这一页的架构到底能扛多少，要压出来。</span></li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>只用 DECR</b>：把 naive 改成直接 <code>DECR</code>，返回值 &lt; 0 就 <code>INCR</code> 回去、回“已抢完”。还超发吗？一人多张的问题还在吗？（坑 1）</li>
+    <li><b>真 MySQL</b>：把第 4 段换成真 MySQL（<code>mysql:8.4</code> 容器），建 <code>coupon_stock</code> 和带唯一键的 <code>t_coupon_user</code>，用 4 个消费线程落库，量一下每秒能写多少。（④ 取舍二）</li>
+    <li><b>丢消息</b>：在发消息前随机让 1% 的请求“崩掉”，活动后写一个对账程序找出这些人并补发。（坑 3）</li>
+    <li><b>清标记</b>：售罄后把库存 <code>SET</code> 回 20，看有多少实例还在回“已抢完”；加上“5 秒后重新问 Redis”再跑一次。（坑 5）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>秒杀是很多写挤在同一个数上：外层一层层削峰，每层只放下一层扛得住的量；里面把“决定谁抢到”（Redis Lua，原子、快、可能丢）和“记账”（MySQL 条件更新加唯一键，慢、可靠）拆开，用消息连起来，两边对不上时以账本为准。</p></details>
+    <details><summary>2. 直接在 MySQL 里扣，疼在哪？</summary><p>不会错，但所有事务排在一行的行锁上，每秒最多约 1 ÷ 持锁时间，几百次；排不上的占着连接，连正常下单都拖慢。加机器、加连接都没用。</p></details>
+    <details><summary>3. 坑 2（落库时多发）的根源是 ④ 的哪一条？</summary><p>“决定”和“记账”分家以后有两份数据；Redis 主从是异步复制，切主可能丢掉最后几笔扣减，所以 Redis 的结果不能当最终答案，MySQL 的条件更新才是。</p></details>
+    <details><summary>4. 预测：把售罄标记去掉，⑤ 实验 3 里 Redis 要处理 2 万次。全景规模下（网关放 2 万）会怎样？</summary><p>Redis 每秒多处理 1.7 万次脚本调用，单个 key 在一个分片上，仍在它的能力范围内，结果不会错；但每个请求多一次网络往返，券服务的线程和 Redis 连接被占得更久，响应时间变长。售罄标记省下的是“结局已定的请求”的成本。</p></details>
+    <details><summary>5. 预测：Lua 脚本里漏掉了 SISMEMBER 查重，只靠 MySQL 唯一键挡，最后会发几张券？</summary><p>Redis 里同一个人能扣多次库存，1000 张库存可能被 900 个人扣完，其中有人扣了两三次。落库时唯一键挡掉重复的，MySQL 只有 900 行左右：<b>少发</b>了。重复的人占掉了别人的名额，所以查重必须和扣库存在同一步。</p></details>
+    <details><summary>6. 放回全景：第 7 站前后各发生了什么？如果第 7 站的 Redis 整个不可用，整条链路怎么走？</summary><p>前面是第 6 站券服务的售罄标记，后面是第 8 站发消息、第 9 站落库。Redis 不可用时预扣调用失败，熔断打开，券服务直接回“活动太火爆，稍后再试”（第 11 站的预案）；千万不能退回去直接扣 MySQL，那会把 2 万个请求引到热点行上。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM 虚拟机，JDK 17，Lettuce 6.8.2，<code>redis:8.10.3-alpine</code> 容器）：⑤ 的四段各跑 1 次，页面上的次数都来自这次输出；第 4 段的数据库是内存里模拟的条件更新和唯一键。④ 的分步演示是按 Redis 单线程执行命令的规则手排的两种交错。</p>
+  <p>按文档：Redis 执行 Lua 脚本期间不会执行其他客户端的命令；脚本访问的 key 在 Cluster 模式下必须落在同一个哈希槽；Redis 主从默认异步复制。漏斗各层的数字来自<a href="../java/pano-j12-coupon-rush.html">全景页</a>，是交易靶场的设计。</p>
+  <p>相关：<a href="../java/pano-j12-coupon-rush.html">全景：10 万人抢 1000 张券的那一秒</a> · <a href="rate-limit-algorithms.html">上一页：限流算法</a> · <a href="../database/db-pool-tx-perf-hot-row.html">热点行</a> · <a href="../redis/redis-lua-tx.html">Redis Lua</a> · <a href="idempotency-design.html">幂等</a> · <a href="../java/roadmap.html#j12">Java 地图 J12</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 两个请求抢最后 1 张券时，Redis 依次执行的命令（Redis 一次只执行一条命令或一段脚本）
+const SCHED = {
+  naive: [
+    { who: "a", cmd: "SISMEMBER users 7 → 0", eff: {} },
+    { who: "b", cmd: "SISMEMBER users 9 → 0", eff: {} },
+    { who: "a", cmd: "GET stock → 1", eff: {} },
+    { who: "b", cmd: "GET stock → 1", eff: {} },
+    { who: "a", cmd: "DECR stock → 0", eff: { stock: -1 } },
+    { who: "b", cmd: "DECR stock → -1", eff: { stock: -1 } },
+    { who: "a", cmd: "SADD users 7 → 回“抢到了”", eff: { add: "7" } },
+    { who: "b", cmd: "SADD users 9 → 回“抢到了”", eff: { add: "9" } }
+  ],
+  lua: [
+    { who: "a", cmd: "EVALSHA：查重 0 · GET 1 · DECR → 0 · SADD 7 → 回 0“抢到了”", eff: { stock: -1, add: "7" } },
+    { who: "b", cmd: "EVALSHA：查重 0 · GET 0 → 回 2“已抢完”", eff: {} }
+  ]
+};
+const NOTES = {
+  naive: ["开始：库存 1，两个人同时点。", "A 查重：没领过。", "B 查重：也没领过。", "A 看库存：还有 1 张。", "B 看库存：也看到 1 张。A 的 DECR 还没执行，B 看到的是旧值。", "A 扣成 0。", "B 也扣：库存变成 -1。B 是根据第 4 步“看到 1”做的决定，那个前提已经不成立了。", "A 记下自己领过。", "B 也记下：两个人都被告知“抢到了”，券只有 1 张。这就是 ⑤ 实验 1 里 100 张券回了 200 次的原因。"],
+  lua: ["开始：库存 1，两个人同时点。", "A 的脚本整段执行完，中间没有别的命令插进来：库存 0，A 抢到。", "B 的脚本开始时库存已经是 0：回“已抢完”。“看”和“扣”之间没有缝，所以不会超发。"]
+};
+function raceState(mode, step) {
+  const s = SCHED[mode];
+  step = Math.max(0, Math.min(s.length, step | 0));
+  let stock = 1; const users = [];
+  const rows = { a: [], b: [] };
+  s.forEach((x, i) => {
+    const st = i < step - 1 ? "done" : (i === step - 1 ? "now" : "todo");
+    rows[x.who].push({ text: x.cmd, st });
+    if (i < step) { if (x.eff.stock) stock += x.eff.stock; if (x.eff.add) users.push(x.eff.add); }
+  });
+  return { step, max: s.length, stock, users, rows, note: NOTES[mode][step] };
+}
+/*SIM-END*/
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const box = $(".race");
+  let mode = "naive", step = 0;
+  function render() {
+    const st = raceState(mode, step);
+    step = st.step;
+    ["a", "b"].forEach(k => {
+      const ol = $("#r-" + k); ol.textContent = "";
+      st.rows[k].forEach(r => { const li = document.createElement("li"); li.textContent = r.text; if (r.st !== "todo") li.className = r.st; ol.append(li); });
+    });
+    const sv = $("#r-stock"); sv.textContent = st.stock; sv.classList.toggle("bad", st.stock < 0);
+    $("#r-users").textContent = "{ " + st.users.join(", ") + " }";
+    $("#r-note").textContent = "第 " + st.step + " / " + st.max + " 步 · " + st.note;
+    $("#r-note").dataset.role = st.stock < 0 ? "bad" : "cg";
+    $("#r-prev").disabled = st.step === 0;
+    $("#r-next").disabled = st.step === st.max;
+  }
+  box.querySelectorAll("[data-mode]").forEach(b => b.addEventListener("click", () => {
+    mode = b.dataset.mode; step = 0;
+    box.querySelectorAll("[data-mode]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    render();
+  }));
+  $("#r-prev").addEventListener("click", () => { step--; render(); });
+  $("#r-next").addEventListener("click", () => { step++; render(); });
+  $("#r-reset").addEventListener("click", () => { step = 0; render(); });
+  box.addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") { step++; render(); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { step--; render(); e.preventDefault(); }
+  });
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
