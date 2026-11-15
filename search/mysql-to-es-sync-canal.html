@@ -1,0 +1,1250 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>MySQL 到 ES 的同步</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, same family as the other notes. Knowledge-point page (learn, mechanism type) for J11 panorama stations 10 and 11: syncing MySQL to Elasticsearch through the binlog: ROW events, Canal posing as a replica (dump, parse, store, get/ack), at-least-once + idempotent + versioned writes, ordering by partition key, latency breakdown, binlog retention and full resync. Roles: of = binlog / Canal sync, bk = Elasticsearch, other = MySQL, pd = Kafka partitions, bad = pitfalls, done = what to keep. One interactive: the ordering bench (seeded sim, checked in node). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+#cb-tiles .tile b{white-space:normal;font-size:20px}
+.strip45{display:grid;grid-template-columns:repeat(45,minmax(0,1fr));gap:2px}
+.strip45 i{display:block;height:26px;border-radius:3px;background:var(--good-tint);border:1px solid var(--good)}
+.strip45 i.o{background:var(--bad-tint);border-color:var(--bad)}
+.strip45 i.h{background:var(--warn-tint);border-color:var(--warn)}
+.strip45 i.n{background:var(--neutral-tint);border-color:var(--neutral)}
+.strip-ax{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.lg-row{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lg-row i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1px solid}
+
+/* sharding-key bench */
+.sk-wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.sk-bars{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;align-items:end;height:160px;padding:4px 6px 0;border-bottom:1.5px solid var(--line-strong)}
+.sk-bars .bar{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;min-width:0;gap:2px}
+.sk-bars .bar i{display:block;width:100%;background:var(--pd);border-radius:6px 6px 0 0;min-height:2px;transition:height .3s}
+.sk-bars .bar.hot i{background:var(--bad)}
+.sk-bars .bar.zero i{background:var(--line-strong)}
+.sk-bars .bar small{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);white-space:nowrap}
+.sk-names{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:2px 6px 0}
+.sk-names span{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);text-align:center}
+.sk-q td.n{font-family:var(--font-mono);white-space:nowrap}
+.sk-q td.one{color:var(--good);font-weight:700}
+.sk-q td.all{color:var(--bad);font-weight:700}
+@media (max-width:700px){.sk-wrap{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.sk-bars .bar i{transition:none}}
+
+/* paging calculator */
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+
+/* inverted-index bench */
+.iv-q{width:100%;font:inherit;font-size:15px;padding:6px 10px;border-radius:10px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+.iv-wrap{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:14px}
+.iv-docs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.iv-docs li{display:grid;grid-template-columns:1.6em minmax(0,1fr);gap:2px 8px;padding:6px 10px;border-radius:10px;border:1.5px solid var(--line);background:var(--card)}
+.iv-docs li.hit{border-color:var(--good);background:var(--good-tint)}
+.iv-docs li b{grid-row:span 2;font-family:var(--font-mono);color:var(--muted)}
+.iv-docs .t{font-size:14.5px}
+.iv-docs .toks{display:flex;flex-wrap:wrap;gap:4px}
+.iv-docs .toks code,.iv-dict code{font-size:12px;padding:0 5px;border-radius:5px;background:var(--neutral-tint)}
+.iv-docs .toks code.on,.iv-dict .row.on code{background:var(--good);color:var(--on-accent)}
+.iv-dict{display:flex;flex-direction:column;gap:2px;max-height:300px;overflow:auto;padding:6px 8px;border-radius:10px;border:1.5px solid var(--line);background:var(--card)}
+.iv-dict .row{display:grid;grid-template-columns:5em minmax(0,1fr);gap:8px;font-size:13px;font-family:var(--font-mono);padding:1px 0}
+.iv-dict .row.on{font-weight:700}
+.iv-dict sub{color:var(--muted);font-size:10px}
+@media (max-width:700px){.iv-wrap{grid-template-columns:1fr}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>搜索</span><span aria-hidden="true">/</span><span class="tb-here">MySQL 到 ES 的同步</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-of"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">应用双写 vs 扫表 vs binlog · ROW 格式 · 前后镜像 · Canal 装成从库 · dump / parse / store / get / ack · 位点 meta · 至少一次 + 幂等 · 按订单号分区 · 外部版本号 · binlog 保留期 · 全量重灌 · MySQL 8.4 + Canal 1.1.8 + ES 9.5 实测</p>
+  <h1>下单 1 秒后商家才搜得到：MySQL 到 ES 的同步（binlog、Canal、一致性）</h1>
+  <p class="lead">ES 里那份订单不是谁“写”进去的，而是从 MySQL 的 <b>binlog</b> 里“抄”过去的：Canal 装成一台从库，向 MySQL 要 binlog，把每一行的变更解析出来交给同步程序，同步程序写进 ES、写成功了再告诉 Canal“这批处理完了”（ack）。这条链路的性质决定了一切：它是<b>异步</b>的（实测提交到搜得到约 1 秒，大头是 ES 的 refresh），<b>至少一次</b>的（没 ack 就重发，所以写 ES 要幂等），<b>只在分区内有序</b>的（并行消费要按订单号分区、写入带版本号）。binlog 被清理掉了就接不上，只能全量重灌。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j11-order-table-sharding.html#s-10">订单表从一张到八张 · 第 10、11 站</a></span><span>地图：<a href="../java/roadmap.html#j11">J11 · MySQL 到 ES 的同步：binlog、Canal、一致性</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>J11 第 5 个知识点，接 <a href="es-inverted-index-shards.html">上一页 ES</a>。订阅 binlog 这件事在 <a href="../redis/cache-consistency.html">缓存一致性</a>（删缓存）里见过第一圈，binlog 本身在 <a href="../database/mysql-redo-undo-binlog.html">redo、undo、binlog</a> 和 <a href="../database/mysql-replication-lag.html">主从复制</a>里讲过。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：ES 里的订单要一直跟着 MySQL 变</h2>
+  </div>
+  <p class="lead">在全景第 10 站，这一步要解决：1024 下单、付款、商家发货，每一次变化都发生在 MySQL 的 8 张分片表里；商家后台搜的是 ES。ES 里的那一份要做到：</p>
+  <div class="design">
+    <div class="card" data-role="of"><h3>不漏</h3><p>订单服务、退款服务、运营脚本、DBA 的手工 SQL 改的，都要过去。</p></div>
+    <div class="card" data-role="of"><h3>不乱</h3><p>同一单先付款后发货，ES 里最后必须是“已发货”，不能被晚到的“已付款”盖回去。</p></div>
+    <div class="card" data-role="of"><h3>不拖累下单</h3><p>ES 慢了、挂了，下单照常；恢复以后自己追上来。</p></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：在代码里顺手写 ES，或者定时扫表</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>疼在哪</th></tr></thead>
+      <tbody>
+        <tr><th>下单代码里同步写 ES</th><td>ES 慢一点，下单就慢一点；ES 挂了，要么下单失败，要么吞掉异常漏写。两个系统没有共同事务：MySQL 回滚了，ES 却写进去了。别的服务和手工 SQL 改的数据，ES 永远不知道。</td></tr>
+        <tr><th>代码里发 MQ，消费者写 ES</th><td>不拖累下单了，但“写库成功、发消息失败”仍然会漏（要本地消息表兜底，见 <a href="../arch/distributed-transactions.html">分布式事务</a>）；同样管不到别的写入方。</td></tr>
+        <tr><th>定时任务按 <code>updated_at</code> 扫表</th><td>延迟是扫描间隔（分钟级）；删除的行扫不到；同一秒内改两次分不清；每次扫描都在线上库跑范围查询；分片以后要扫 8 张表。</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>缺的那一块：<b>一个“已经提交的变更”的可靠来源</b>，覆盖所有写入方、按提交顺序排好、不用改业务代码。MySQL 自己就有：binlog，主从复制靠的就是它。</p>
+  <div class="know" data-role="bad"><b>不懂精华时的典型误用</b><span>同步程序拿到变更就 ack，再异步写 ES：ES 写失败的那些变更 Canal 不会再给，ES 永远少了它们。至少一次的前提是“处理成功了才 ack”。</span></div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：几种读 binlog 的工具</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>形态</th><th>适合</th><th>注意</th></tr></thead>
+      <tbody>
+        <tr><th class="fix">Canal 1.1.8</th><td>阿里开源，独立的 server 装成从库；客户端 TCP 直连，或者 server 直接投递到 Kafka / RocketMQ</td><td>MySQL 为主的国内团队最常见；还有 canal-adapter 能直接写 ES</td><td>只支持 MySQL 系；1.1.8 才认识 MySQL 8.4 的新语法（⑤ 和源码）</td></tr>
+        <tr><th>Debezium</th><td>Kafka Connect 的一组连接器，变更写进 Kafka</td><td>已经有 Kafka Connect；要同时接 MySQL、PostgreSQL、Oracle 等</td><td>绑定 Kafka 生态</td></tr>
+        <tr><th>Flink CDC</th><td>Flink 的源连接器，全量 + 增量一体</td><td>同步途中要做转换、关联、聚合（比如订单拼上商品名再写 ES）</td><td>要养 Flink 集群</td></tr>
+        <tr><th>云厂商 DTS</th><td>托管的同步 / 迁移服务</td><td>不想自己运维同步链路</td><td>按量付费，排查时看不到内部</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="verdict">选择规则：<b>只是 MySQL → ES / Kafka 的搬运 → Canal；已经在 Kafka Connect 上 → Debezium；途中要加工 → Flink CDC。</b>交易靶场用 Canal，生产形态是 Canal → Kafka（按订单号分区）→ 同步程序 → ES；⑤ 为了少一个组件，同步程序用 Canal 的 TCP 客户端直连，机制一样。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：一行变更怎么从 binlog 走到 ES</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <span><b>binlog</b>：MySQL 在事务提交时按提交顺序写的变更日志，从库靠它复制，见 <a href="../database/mysql-redo-undo-binlog.html">redo、undo、binlog</a>。</span>
+    <span><b>从库怎么拿 binlog</b>：从库用一个有 <code>REPLICATION SLAVE</code> 权限的账号连上主库，说“从某个文件的某个位置开始给我”，主库的 dump 线程就一条条推过来，见 <a href="../database/mysql-replication-lag.html">主从复制</a>。</span>
+  </div>
+
+  <h3 id="m-binlog">机制 1：ROW 格式的 binlog 里有什么</h3>
+  <ul class="steps-out" data-role="other">
+    <li><b>一次 UPDATE</b><span><code>UPDATE t_order SET status = 'SHIPPED', version = 3 WHERE id = 20001</code> 提交后，binlog 里是一组事件：<code>Table_map</code>（是哪张表、各列什么类型）、<code>Update_rows</code>（这一行改之前的全部列 + 改之后的全部列）、<code>Xid</code>（事务提交）。</span></li>
+    <li><b>ROW + FULL</b><span><code>binlog_format=ROW</code>、<code>binlog_row_image=FULL</code> 是 MySQL 8.4 的默认值（⑤ 查过），所以同步程序拿到的是完整的行，不用再回库查。如果有人把 row_image 改成 <code>MINIMAL</code>，“改后”只剩被改的列，同步程序就拼不出完整文档。</span></li>
+    <li><b>位点</b><span>“读到哪了”用 binlog 文件名 + 偏移量表示，比如 <code>binlog.000002:1329</code>（开 GTID 时也可以用 GTID 集合）。续传、重放、校验都靠它。</span></li>
+  </ul>
+
+  <h3 id="m-canal">机制 2：Canal 装成一台从库</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="Canal 的工作过程。MySQL 主库的 dump 线程把 binlog 事件推给 Canal server。Canal 里依次是：EventParser 用复制协议连上、请求 binlog 并解析成行变更；Sink 按 order_db.t_order 过滤；Store 是一个内存环形缓冲；同步程序用 getWithoutAck 一批批拿，写进 ES 成功后 ack，失败就 rollback，下次重新拿到同一批。Canal 把每个客户端 ack 到的位置记在 meta 里，文件模式下每秒落一次盘到 conf/orders/meta.dat。生产上 Canal 也可以直接把变更投递到 Kafka，按订单号分区。">
+  <rect x="16" y="64" width="150" height="100" rx="14" class="b-neu"/>
+  <text class="t-b" x="28" y="88">MySQL 8.4 主库</text>
+  <text class="t-xs" x="28" y="108">binlog.000002 …</text>
+  <text class="t-xs" x="28" y="126">dump 线程往外推</text>
+  <text class="t-xs" x="28" y="144">ROW 事件</text>
+  <line x1="168" y1="114" x2="206" y2="114" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="170" y="104">事件流</text>
+  <rect x="210" y="16" width="470" height="196" rx="16" class="b-dash"/>
+  <text class="t-b" x="222" y="38">Canal server 1.1.8（destination = orders）</text>
+  <rect x="222" y="54" width="140" height="62" rx="10" class="b-of"/>
+  <text class="t-b" x="232" y="76">EventParser</text><text class="t-xs" x="232" y="94">复制协议连上、要 binlog</text><text class="t-xs" x="232" y="108">解析成行变更</text>
+  <line x1="364" y1="85" x2="380" y2="85" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="384" y="54" width="130" height="62" rx="10" class="b-of"/>
+  <text class="t-b" x="394" y="76">Sink</text><text class="t-xs" x="394" y="94">过滤：只要</text><text class="t-xs" x="394" y="108">order_db.t_order</text>
+  <line x1="516" y1="85" x2="532" y2="85" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="536" y="54" width="132" height="62" rx="10" class="b-of"/>
+  <text class="t-b" x="546" y="76">Store</text><text class="t-xs" x="546" y="94">内存环形缓冲</text><text class="t-xs" x="546" y="108">默认 16384 条</text>
+  <rect x="222" y="134" width="446" height="64" rx="10" class="b-card"/>
+  <text class="t-b" x="232" y="156">MetaManager：每个客户端 ack 到哪了</text>
+  <text class="t-xs" x="232" y="176">文件模式每秒落盘到 conf/orders/meta.dat：Canal 重启后从这里续传</text>
+  <text class="t-xs" x="232" y="192">8.4 上没记位点时，用 SHOW BINARY LOG STATUS 找当前位置</text>
+  <line x1="682" y1="85" x2="726" y2="85" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="652" y="46">getWithoutAck</text>
+  <rect x="730" y="54" width="214" height="62" rx="12" class="b-bk"/>
+  <text class="t-b" x="742" y="76">同步程序</text><text class="t-xs" x="742" y="94">转成文档、bulk 写 ES</text><text class="t-xs" x="742" y="108">写成功才 ack</text>
+  <path d="M760,118 C760,150 700,165 672,165" class="e-mut" style="stroke-dasharray:4 3" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="752" y="150">ack(batchId) / rollback</text>
+  <text class="t-xs" x="730" y="196">生产：经 Kafka，按订单号分区</text>
+  <text class="t-xs" x="16" y="236">Canal 在 MySQL 眼里就是一台从库：processlist 里能看到它的 Binlog Dump 线程</text>
+</svg>
+  </div>
+  </figure>
+  <p>MySQL 8.4 删除了 <code>SHOW MASTER STATUS</code>（改名为 <code>SHOW BINARY LOG STATUS</code>）。Canal 在没有记录位点、要找“当前位置”时会发这条语句：1.1.8 的源码里先判断 <code>atLeastMySQL84()</code> 再选语法，1.1.7 的同一个方法只会发老语句。⑤ 实测 1.1.8 连 8.4.13 一次连上，日志里是 <code>find start position successfully … binlog.000002</code>。</p>
+
+  <h3 id="m-deliver">机制 3：至少一次，所以要幂等</h3>
+  <ul class="steps-out" data-role="of">
+    <li><b>先写再 ack</b><span>同步程序拿到一批，写进 ES 成功了才 <code>ack(batchId)</code>；写失败就 <code>rollback</code>，下次 Canal 再给同一批。所以不会丢，但会重复：ES 写成功、ack 之前进程挂了，重启后这一批会再来一遍。</span></li>
+    <li><b>幂等</b><span>文档 <code>_id</code> 就用订单号，每次写整行（index 覆盖），重复写一次结果不变；删除也是幂等的。不要用“ES 里 +1”这类增量操作。</span></li>
+    <li><b>先 ack 再写的后果</b><span>就是 ② 的典型误用：写失败的变更再也拿不回来。</span></li>
+  </ul>
+
+  <h3 id="m-order">机制 4：binlog 是有序的，并行消费以后就不一定了</h3>
+  <p>binlog 里 9527 的“已付款（v2）”一定排在“已发货（v3）”前面。只要从头到尾一个线程按顺序写，ES 里最后就是 v3。可吞吐不够时大家会并行：Canal 投递到 Kafka 的多个分区、同步程序开多个线程。同一单的两条变更一旦进了不同分区（或者被不同线程处理），谁先写进 ES 就看运气。两道防线：</p>
+  <div class="design">
+    <div class="card" data-role="pd"><h3>按订单号分区</h3><p>Canal 投递 Kafka 时配 <code>canal.mq.partitionHash=order_db.t_order:id</code>，同一单永远进同一个分区，分区内有序。代价：一个大商家的热点订单会让某个分区更忙。</p></div>
+    <div class="card" data-role="bk"><h3>外部版本号</h3><p>写 ES 时带 <code>version = 行里的 version</code>、<code>version_type = external</code>：只有版本更大的才写得进去，晚到的旧版本被 ES 以 409 拒掉。这是最后一道防线，前提是表里有单调递增的版本列。</p></div>
+  </div>
+
+  <div class="lab" id="od" data-role="of">
+    <h3>乱序演示台</h3>
+    <div class="guess" id="od-guess">
+      <p>先猜：300 单各连改两次，Kafka 4 个分区<b>轮询</b>分配、4 个消费者并行写 ES、不带版本号。最后 ES 里停在旧状态的大约有多少单？</p>
+      <div class="opts" role="group" aria-label="猜一个答案">
+        <button type="button" data-g="none">几乎没有</button><button type="button" data-g="some">百分之几</button><button type="button" data-g="many">将近一半</button><button type="button" class="skip" data-g="skip">不猜，直接看</button>
+      </div>
+      <p class="res" id="od-res" hidden></p>
+    </div>
+    <div class="ctl-grid">
+      <div><p class="lbl">分区怎么分</p><div class="pick2" id="od-p" role="group" aria-label="分区策略">
+        <button type="button" data-v="rr" aria-pressed="true">轮询</button><button type="button" data-v="hash" aria-pressed="false">按订单号哈希</button></div></div>
+      <div><p class="lbl">写 ES</p><div class="pick2" id="od-v" role="group" aria-label="写入方式">
+        <button type="button" data-v="0" aria-pressed="true">不带版本</button><button type="button" data-v="1" aria-pressed="false">外部版本号</button></div></div>
+      <div><p class="lbl">并行消费者</p><div class="pick2" id="od-c" role="group" aria-label="消费者数">
+        <button type="button" data-v="1" aria-pressed="false">1</button><button type="button" data-v="4" aria-pressed="true">4</button></div></div>
+      <div><p class="lbl"><span>每单改几次</span><output id="od-u-o">2</output></p><input type="range" id="od-u" min="1" max="5" step="1" value="2" aria-label="每单改几次"></div>
+    </div>
+    <div class="tiles4" id="od-tiles"></div>
+    <p class="verdict" id="od-verdict"></p>
+    <p class="cap">模拟（固定种子，node 里跑过）：变更按 binlog 顺序产生，同一单的几次变更挨得很近；每个分区内串行，分区之间并行，每条处理耗时随机。⑤ 用真实链路跑了同一件事：同步程序把一批变更打乱顺序写（相当于多线程乱序），不带版本时 300 单里 148 单停在旧状态。</p>
+  </div>
+
+  <h3 id="m-retain">机制 5：binlog 不是永远都在</h3>
+  <ul class="steps-out" data-role="bad">
+    <li><b>保留期</b><span>MySQL 8.4 默认 <code>binlog_expire_logs_seconds = 2592000</code>（30 天），过期的 binlog 文件会被自动删除；磁盘紧张时 DBA 还会手动清。</span></li>
+    <li><b>接不上</b><span>Canal 停的时间超过保留期，或者它记着的那个文件已经被清掉，重启后按 meta 里的位点去要，主库回一个 1236 错误。⑤ 的 purge 演练原样复现了这个错误。</span></li>
+    <li><b>只能全量重灌</b><span>建一个新索引 <code>orders_v2</code>；先记下当前 binlog 位点，再从 MySQL 的 8 张表全量导一遍；导完从记下的位点开始回放增量（写入幂等，重叠部分无害）；校验通过后把别名 <code>orders</code> 切到新索引。和第 3 页“binlog 路线的迁移”是同一个结构。</span></li>
+    <li><b>平时就要对账</b><span>每天比一次 ES 和 MySQL：按天、按商家数行数，抽样比内容。同步链路出过错、被跳过的变更，只有对账能发现。</span></li>
+  </ul>
+
+  <h3>最少的写法</h3>
+  <div class="codebox" data-role="of"><div class="code-bar"><b>同步程序的主循环</b><code>canal.client 1.1.8</code></div>
+<pre><code>CanalConnector c = CanalConnectors.newSingleConnector(new InetSocketAddress("127.0.0.1", 11111), "orders", "", "");
+c.connect();
+c.subscribe("order_db\\.t_order");
+c.rollback();                                          // 从上次 ack 的位置接着拿
+while (running) {
+    Message msg = c.getWithoutAck(1000, 100L, TimeUnit.MILLISECONDS);
+    if (msg.getId() == -1 || msg.getEntries().isEmpty()) continue;
+    try {
+        bulkToEs(toDocs(msg.getEntries()));            // _id = 订单号；version = 行里的 version，version_type = external
+        c.ack(msg.getId());                            // 写成功才 ack
+    } catch (Exception e) {
+        c.rollback(msg.getId());                       // 下次再拿到同一批
+    }
+}</code></pre></div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：MySQL 8.4 → Canal 1.1.8 → ES 9.5，四组实验</h2>
+  </div>
+  <p class="lead">MySQL 8.4.13 和 Elasticsearch 9.5.5 各一个容器，Canal 1.1.8 deployer 在本机用 JDK 17 跑（实例 <code>orders</code>，只订阅 <code>order_db.t_order</code>），同步程序 <code>SyncLab</code> 用 canal.client 1.1.8 直连 Canal、bulk 写 ES、写成功再 ack。</p>
+  <div class="codebox" data-role="of"><div class="code-bar"><b>怎么跑</b><code>JDK 17 · 2 核 ARM 虚拟机 · 全部约 3 分钟</code></div>
+<pre><code>cd study-labs/java/search/mysql-to-es-sync-canal
+DOCKER="sudo docker" ./run.sh new all     # 第一次会下 canal.deployer-1.1.8（117 MB）到 data/；跑 e2e order outage purge
+./run.sh clean                            # 停 Canal、删两个容器</code></pre></div>
+  <p><a href="https://github.com/archeu/study-labs/tree/main/java/search/mysql-to-es-sync-canal">完整代码 →</a></p>
+  <div class="codebox" data-role="of"><div class="code-bar"><b>SyncLab + run.sh 的真实输出（节选）</b><code>Canal 日志里的那一行也是原样</code></div>
+<pre><code>find start position successfully, EntryPosition[included=false,journalName=binlog.000002,position=1329,…]
+==== e2e：写 100 单（每 40 ms 一单），从 MySQL 提交到商家在 ES 里搜得到
+   提交 → Canal 交给同步程序：中位 90 ms，p90 267 ms，最大 627 ms
+   同步程序 bulk 写 ES：      中位 42 ms，p90 240 ms，最大 240 ms
+   ES 写完 → 搜得到（refresh）：中位 585 ms，p90 1076 ms，最大 1100 ms
+   合计：                     中位 821 ms，p90 1242 ms，最大 1599 ms（100 单都搜到了）
+==== order（同步程序打乱一批里的顺序，不带版本，后写的覆盖先写的）
+   300 单各改两次，同步了 1000 条变更，分 27 批；被 ES 以版本冲突（409）拒掉 0 条
+   最后 ES 和 MySQL 不一致的单：148
+==== order（同步程序打乱一批里的顺序，带外部版本号 version_type=external）
+   300 单各改两次，同步了 1200 条变更，分 37 批；被 ES 以版本冲突（409）拒掉 144 条
+   最后 ES 和 MySQL 不一致的单：0
+==== outage：同步程序停 10 秒（Canal server 还在），期间每秒约 20 次更新
+   停之前已同步 529 条；停了 10000 ms；恢复后第一批拿到 166 条积压变更
+   恢复后 429 ms 内 ES 和 MySQL 完全一致（总共改了 201 次）
+==== purge：停 Canal，MySQL 切一个新 binlog、把旧的都清掉，再启 Canal
+   Canal 停着的时候，改 10 单的状态为 LOST_IN_PURGE（这些变更只在即将被清掉的 binlog 里）
+   Canal 记住的位点（conf/orders/meta.dat）：… "journalName":"binlog.000002","position":1074827 …
+   probe：写入订单 40001，10 秒后 ES 里没有；同步程序这 10 秒收到 0 条变更
+   ES 里那 10 单的状态："value":0
+   Canal 日志里的错误：
+java.io.IOException: Received error packet: errno = 1236, sqlstate = HY000
+                     errmsg = Could not find first log file name in binary log index file</code></pre></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>实验</th><th>看到了什么</th><th>对应</th></tr></thead>
+      <tbody>
+        <tr><th>e2e</th><td>提交到搜得到：中位 0.8 秒，最慢 1.6 秒；其中 Canal 那一段中位 90 ms，ES refresh 那一段中位 585 ms，是大头</td><td><a href="#m-canal">机制 2</a>、<a href="es-inverted-index-shards.html#m-write">上一页机制 4</a></td></tr>
+        <tr><th>order</th><td>同步程序打乱写入顺序：不带版本 <b class="bad">148 / 300</b> 单停在旧状态；带外部版本号 <b class="fix">0</b> 单，ES 拒掉了 144 次晚到的旧版本</td><td><a href="#m-order">机制 4</a></td></tr>
+        <tr><th>outage</th><td>同步程序停 10 秒，Canal 替它攒着：恢复后第一批就拿到 166 条积压，429 ms 追平</td><td><a href="#m-deliver">机制 3</a></td></tr>
+        <tr><th>purge</th><td>Canal 停着时改的 10 单、所在的 binlog 被清掉：Canal 每隔十几秒重试同一个位点，一直报 1236；之后新写的订单也同步不过来，那 10 单的变更永久丢了</td><td><a href="#m-retain">机制 5</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="verdict"><b>到这里已经能交差了</b>：商家下单后约 1 秒能搜到；同步程序挂了、重启了都能接上；写入带版本，乱序也不怕。<b>已知还没处理的</b>：binlog 被清理就只能全量重灌（<a href="#p-purge">坑 4</a>）；删除留下的版本“墓碑”（<a href="#p-tomb">坑 5</a>）；表结构变了同步程序跟不上（<a href="#p-ddl">坑 6</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节</h2>
+  </div>
+  <h3>第一圈 · 不知道就会出事</h3>
+  <div class="pits">
+    <div class="pit" id="p-ack"><b><em>1</em>拿到就 ack，写失败的变更永远丢了<a class="rootmark" href="#m-deliver">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>ES 抖了一下，那几秒的 bulk 失败了；同步程序已经 ack，Canal 不会再给，这些订单在 ES 里永远是旧的。</dd><dt>根源</dt><dd>ack 的含义是“这批我处理完了，可以丢了”。</dd><dt>做法</dt><dd class="fix">写成功才 ack，失败 rollback；写入做成幂等（_id = 订单号、写整行）。走 Kafka 时同理：处理成功才提交 offset。</dd></dl>
+    </div>
+    <div class="pit" id="p-order"><b><em>2</em>并行消费，旧状态盖住新状态<a class="rootmark" href="#m-order">← ④ 机制 4</a></b>
+      <dl><dt>现象</dt><dd>⑤ order：打乱顺序写，300 单里 148 单停在“已付款”，实际已发货。</dd><dt>根源</dt><dd>binlog 全局有序，但同一单的变更一旦跨分区、跨线程，到达 ES 的顺序就不确定。</dd><dt>做法</dt><dd class="fix">Kafka 按订单号分区（<code>canal.mq.partitionHash</code>）；写 ES 带外部版本号（⑤：148 → 0）；表里要有单调递增的 version 列。</dd></dl>
+    </div>
+    <div class="pit" id="p-image"><b><em>3</em>binlog 格式被改成了 STATEMENT 或 MINIMAL<a class="rootmark" href="#m-binlog">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>（按文档）STATEMENT 格式下 binlog 里只有 SQL 文本，Canal 拿不到行；MINIMAL 下“改后”只有被改的列，同步程序写进 ES 的文档缺字段。</dd><dt>根源</dt><dd>行级同步依赖 ROW + FULL 的前后镜像。</dd><dt>做法</dt><dd class="fix">把 <code>binlog_format=ROW</code>、<code>binlog_row_image=FULL</code> 写进数据库规范和巡检；同步程序启动时自检这两个变量。</dd></dl>
+    </div>
+    <div class="pit" id="p-purge"><b><em>4</em>Canal 停太久，binlog 被清掉，静悄悄地停摆<a class="rootmark" href="#m-retain">← ④ 机制 5</a></b>
+      <dl><dt>现象</dt><dd>⑤ purge：Canal 一直报 <code>errno = 1236 … Could not find first log file name in binary log index file</code>，同步程序收不到任何变更，ES 不再更新；Canal 停机期间那 10 单的变更找不回来了。进程活着、端口通着，只看存活探针发现不了。</dd><dt>根源</dt><dd>Canal 只能从它记住的位点续传，那个文件已经不在主库上了。</dd><dt>做法</dt><dd class="fix">监控“同步延迟”（最新一条变更的提交时间到现在）而不只是进程存活；binlog 保留期远大于最长可能的停机时间；接不上就按机制 5 全量重灌，别手工把位点改到最新（那等于承认中间的变更丢了）。</dd></dl>
+    </div>
+    <div class="pit" id="p-tomb"><b><em>5</em>带外部版本号时，删除留下“墓碑”，同一个 id 重建写不进去<a class="rootmark" href="#m-order">← ④ 机制 4</a></b>
+      <dl><dt>现象</dt><dd>⑤ 第一次跑 order 时踩到的：两轮实验复用了同一批订单号。上一轮的 DELETE 带着 version 3 写进 ES（文档本来不在，也记下了“这个 id 删到了版本 3”），新一轮的 v1、v2、v3 全被 409 拒掉，900 次冲突、300 单一单都没写进去。</dd><dt>根源</dt><dd>ES 会把删除的版本号保留一段时间（<code>index.gc_deletes</code> 默认 60 秒），用来拒绝比它旧的写入；外部版本号要求严格更大。</dd><dt>做法</dt><dd class="fix">版本号在一个 id 的整个生命周期里只增不减，删除后重建不要从 1 重新开始；订单号这类本身就不复用的 id 不受影响。</dd></dl>
+    </div>
+    <div class="pit" id="p-ddl"><b><em>6</em>表加了一列，同步程序和 ES mapping 没跟上<a class="rootmark" href="#m-binlog">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>（按机制推演）DBA 给 <code>t_order</code> 加了 <code>remark</code>，binlog 里的行多了一列；同步程序如果按位置取列就错位，ES 用 strict mapping 就整批写失败、反复 rollback 卡住。</dd><dt>根源</dt><dd>同步链路两端都有一份“表结构”，DDL 只改了源头。</dd><dt>做法</dt><dd class="fix">同步程序按列名取值、忽略不认识的列；DDL 流程里加一步“先改 ES mapping 和同步程序，再改表”；Canal 的 <code>tsdb</code> 用来记录表结构历史，回放老位点时能用当时的结构解析。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 团队里怎么做</h3>
+  <ul class="steps-out" data-role="done">
+    <li><b>同步延迟当一等指标</b><span>同步程序每处理一批，就上报“这批里最早一条的提交时间到现在”；超过 10 秒告警。防的是坑 4 这种“进程活着但不干活”。</span></li>
+    <li><b>每天对账</b><span>按天、按商家比 MySQL 和 ES 的单数，抽样比内容；差异自动补（按订单号回 MySQL 读，重写 ES）。防的是任何一环漏掉的变更。</span></li>
+    <li><b>全量重灌是常备脚本</b><span>建新索引、记位点、全量导出、回放增量、校验、切别名，写成一键脚本并定期演练。防的是坑 4 发生时临时手写。</span></li>
+    <li><b>Canal 账号最小权限</b><span>只给 <code>REPLICATION SLAVE, REPLICATION CLIENT, SELECT</code>，只订阅需要的库表。防的是同步链路变成数据泄露的口子。</span></li>
+  </ul>
+
+  <h3>第三圈 · 深处</h3>
+  <ul class="steps-out" data-role="of">
+    <li><b>延迟都花在哪</b><span>⑤ 的 0.8 秒里，MySQL 推 binlog 加 Canal 解析中位 90 ms，同步程序批量写 ES 中位 42 ms，剩下的都是 ES 等 refresh。想更快，先看 refresh（代价见上一页），再看同步程序的批大小和等待时间（<code>getWithoutAck</code> 的批 1000 条、超时 100 ms）。</span></li>
+    <li><b>分片库怎么接</b><span>交易靶场的订单在 2 个库 8 张表，要么一个 Canal 实例订阅一个库（两个实例），用正则 <code>order_db\.t_order_\d+</code> 匹配同一个库里的多张表；要么用 ShardingSphere 的 CDC 功能按逻辑表输出。同一单只会在一张表里变化，所以按订单号分区依然成立。</span></li>
+    <li><b>主从切换以后</b><span>位点是“文件名 + 偏移量”，换了主库就不认了；开启 GTID 后 Canal 可以用 GTID 续传（<code>canal.instance.gtidon=true</code>），主从切换不丢位置。</span></li>
+    <li><b>canal-adapter</b><span>Canal 官方的 adapter 能按配置把表直接映射到 ES 索引（含简单的关联），不用自己写同步程序；复杂转换还是自己写或用 Flink CDC。</span></li>
+  </ul>
+  <h3>下一圈</h3>
+  <ul class="steps-out" data-role="other">
+    <li><b>Kafka 在中间</b><span>Canal → Kafka 的分区、消费位点、积压时的追赶速度，接 <a href="../kafka/kafka-idempotent-ordering.html">Kafka 的幂等与顺序</a>。</span></li>
+    <li><b>换成分布式数据库以后</b><span>TiDB 用 TiCDC、OceanBase 用 OMS 输出变更流，位点、顺序、幂等的问题一样存在：下两页。</span></li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>先 ack 后写</b>：把 <code>c.ack(batchId)</code> 挪到 bulk 之前，bulk 时随机抛异常（10%），跑 e2e，数 ES 里少了几单。（坑 1）</li>
+    <li><b>单线程不打乱</b>：order 里把 <code>shuffle</code> 关掉、也不带版本，看不一致是不是变成 0。（机制 4：binlog 本来是有序的）</li>
+    <li><b>全量重灌</b>：purge 之后，写一个脚本：删掉 meta.dat、记当前位点、从 MySQL 全量导进 <code>orders_sync_v2</code>、从位点回放、切别名，让那 10 单回来。（机制 5）</li>
+    <li><b>加一列</b>：<code>ALTER TABLE t_order ADD COLUMN remark VARCHAR(64)</code>，看同步程序和 ES 会怎样；把 mapping 改成 strict 再试一次。（坑 6）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>MySQL 到 ES 的同步是“抄 binlog”：Canal 装成从库读 ROW 事件，同步程序写成功才 ack（至少一次，所以写入要幂等），并行时按订单号分区、写入带版本号防乱序；它是异步的（约 1 秒），binlog 被清理就只能全量重灌，平时要监控延迟、每天对账。</p></details>
+    <details><summary>2. 在下单代码里顺手写 ES，疼在哪？</summary><p>ES 慢或挂会拖累、甚至搞挂下单；两边没有共同事务，回滚、失败都会不一致；别的服务和手工 SQL 改的数据同步不到。</p></details>
+    <details><summary>3. 坑 2 的根源是 ④ 的哪条？为什么外部版本号能解决？</summary><p>机制 4：binlog 有序，但跨分区、跨线程后到达 ES 的顺序不确定。外部版本号让 ES 只接受比当前更大的版本，晚到的旧变更被 409 拒掉，不管到达顺序如何，最后停在最大版本。</p></details>
+    <details><summary>4. 预测：⑤ 的 outage 如果停的不是同步程序，而是 Canal server 本身（停 10 秒再启动），结果有什么不同？</summary><p>基本一样：Canal 的位点在 meta.dat 里（每秒落盘），重启后从同步程序最后 ack 的位置附近续传，最多重复几条（幂等写入无害）。只要这 10 秒里 binlog 没被清理，就能追平。区别是重启 Canal 要多花几秒建立复制连接。</p></details>
+    <details><summary>5. 预测：DBA 为了省磁盘，把 <code>binlog_expire_logs_seconds</code> 从 30 天改成 1 小时。平时没事，哪天会出事？</summary><p>Canal 或同步链路停超过 1 小时的那天（比如周末出故障、升级 Canal 时卡住）：重启后它记住的 binlog 已经被删，就是 ⑤ 的 purge，只能全量重灌。保留期是同步链路的“最长可停机时间”。</p></details>
+    <details><summary>6. 放回全景：第 10 站前后各发生了什么？第 4 站搬运 1.2 亿行时，如果 ES 是从新库的 binlog 同步的，会怎样？</summary><p>之前：订单写进 MySQL 的分片表、产生 binlog；之后：第 11 站 ES 把文档 refresh 成可搜的 segment，第 9 站商家搜到。搬运 1.2 亿行会在新库产生 1.2 亿条 INSERT 的 binlog，Canal 和同步程序要全部消化，ES 的同步延迟会飙到小时级，商家搜不到新订单。所以迁移期间 ES 继续从旧库同步，切写那天再把同步源切到新库（或者搬运期间暂停同步、事后全量重灌）。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM 虚拟机，JDK 17，MySQL 8.4.13 容器，Canal 1.1.8 deployer，canal.client 1.1.8，Elasticsearch 9.5.5 容器）：⑤ 的四组实验在修好脚本后完整跑了 1 次；“墓碑”那条是第一次跑时实际踩到的。乱序演示台是模拟（node 里跑过）。坑 3、6 按文档和机制推演。</p>
+  <p>按源码：Canal 1.1.8 <code>MysqlEventParser.findEndPosition</code>（<code>atLeastMySQL84()</code> 时发 <code>show binary log status</code>，1.1.7 只发 <code>show master status</code>）；canal.properties 默认 <code>canal.file.flush.period = 1000</code>、<code>canal.instance.memory.buffer.size = 16384</code>。按文档：MySQL 8.4 默认 <code>binlog_format=ROW</code>、<code>binlog_row_image=FULL</code>（实测也是）、<code>binlog_expire_logs_seconds=2592000</code>，<code>SHOW MASTER STATUS</code> 在 8.4 中移除；ES <code>version_type=external</code> 要求新版本严格更大，<code>index.gc_deletes</code> 默认 60 s。</p>
+  <p>相关：<a href="../java/pano-j11-order-table-sharding.html">全景：订单表从一张到八张</a> · <a href="es-inverted-index-shards.html">上一页：Elasticsearch</a> · <a href="../database/online-data-migration.html">不停机数据迁移</a> · <a href="../redis/cache-consistency.html">缓存一致性</a> · <a href="../java/roadmap.html#j11">Java 地图 J11</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 乱序演示台：N 单订单各连改几次（版本 1 → 2 → 3…），变更按 binlog 顺序产生，
+// 经过 Kafka 分区和若干消费者写进 ES。每个消费者处理一条要随机花一点时间（固定种子）。
+// 分区策略：按订单号哈希（同一单永远进同一个分区）/ 轮询（同一单的几次变更可能进不同分区）。
+// 写 ES：不带版本（后写覆盖先写）/ 外部版本号（只有版本更大的才写得进去）。
+function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function simulate(opts) {
+  const { orders = 300, updates = 2, partitions = 4, consumers = 4, partitioner = "hash", versioned = false, seed = 1024 } = opts;
+  const r = rng(seed);
+  // 1. 按 binlog 顺序产生变更：每单先插入（v1），再连改 updates 次；不同订单的变更交错出现（随机挑一单发它的下一次变更）
+  const events = [];
+  const next = new Array(orders).fill(1);
+  const open = Array.from({ length: orders }, (_, o) => o);
+  while (open.length) {
+    const i = Math.floor(r() * Math.min(open.length, 8));   // 只在最早的几单里挑：同一单的几次变更挨得很近
+    const o = open[i];
+    events.push({ o, v: next[o]++ });
+    if (next[o] > updates + 1) open.splice(i, 1);
+  }
+  // 2. 分区：同一分区内保持顺序
+  const parts = Array.from({ length: partitions }, () => []);
+  events.forEach((e, i) => { const p = partitioner === "hash" ? e.o % partitions : i % partitions; parts[p].push(e); });
+  // 3. 消费者：每个分区只被一个消费者按顺序处理；消费者数 < 分区数时一个消费者轮流处理多个分区
+  //    每条处理耗时随机 1～10 个单位；写入 ES 的时刻 = 该分区上一条完成时刻 + 处理耗时（分区内串行，分区间并行）
+  const c = Math.max(1, Math.min(consumers, partitions));
+  const busy = new Array(c).fill(0);
+  const writes = [];
+  const cursor = new Array(partitions).fill(0);
+  let left = events.length;
+  while (left > 0) {
+    for (let p = 0; p < partitions; p++) {
+      if (cursor[p] >= parts[p].length) continue;
+      const who = p % c;
+      const e = parts[p][cursor[p]++];
+      busy[who] += 1 + Math.floor(r() * 10);
+      writes.push({ t: busy[who] + r() * 0.01, o: e.o, v: e.v });
+      left--;
+    }
+  }
+  writes.sort((a, b) => a.t - b.t);
+  // 4. 按时间顺序写 ES
+  const es = new Map();
+  let rejected = 0, stale = 0;
+  for (const w of writes) {
+    const cur = es.get(w.o);
+    if (versioned && cur !== undefined && w.v <= cur) { rejected++; continue; }
+    es.set(w.o, w.v);
+  }
+  const finalV = updates + 1;
+  for (let o = 0; o < orders; o++) if (es.get(o) !== finalV) stale++;
+  return { events: events.length, rejected, stale, staleRatio: stale / orders, finalV };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const st = { partitioner: "rr", versioned: false, consumers: 4, updates: 2 };
+
+  function render() {
+    $("#od-u-o").textContent = st.updates;
+    const r = simulate({ orders: 300, updates: st.updates, partitions: 4, consumers: st.consumers, partitioner: st.partitioner, versioned: st.versioned });
+    const pct = Math.round(r.staleRatio * 100);
+    const tiles = [
+      { k: "变更条数", v: r.events, sub: `300 单 × (1 次插入 + ${st.updates} 次修改)`, role: "other" },
+      { k: "ES 停在旧状态的单", v: r.stale, sub: `${pct}%`, role: r.stale ? "bad" : "done" },
+      { k: "被 ES 以 409 拒掉的旧版本", v: r.rejected, sub: st.versioned ? "晚到的旧版本写不进去" : "不带版本，不会拒", role: st.versioned ? "bk" : "other" },
+      { k: "同一单的变更", v: st.partitioner === "hash" ? "同一分区" : "可能跨分区", sub: st.partitioner === "hash" ? "分区内串行，天然有序" : "两个分区谁先处理看运气", role: st.partitioner === "hash" ? "done" : "bad" }
+    ];
+    $("#od-tiles").innerHTML = tiles.map(t => `<div class="tile" data-role="${t.role}"><small>${t.k}</small><b>${t.v}</b><span>${t.sub}</span></div>`).join("");
+    let v;
+    if (r.stale === 0 && st.partitioner === "hash") v = "按订单号分区：同一单的变更永远在同一个分区里按顺序处理，乱序不会发生，版本号只是备用。";
+    else if (r.stale === 0 && st.versioned) v = `同一单的变更会跨分区乱序到达，但晚到的旧版本被拒掉了 ${r.rejected} 次，最后都停在最新版本。`;
+    else if (r.stale === 0) v = "只有 1 个消费者时，几个分区被轮流按顺序处理，碰巧没有乱；一并行就会出问题。";
+    else v = `${r.stale} 单（${pct}%）停在旧状态：同一单的新旧两次变更进了不同分区，新的先写、旧的后写把它盖了回去。改成按订单号分区，或者带上外部版本号。`;
+    $("#od-verdict").textContent = v;
+  }
+
+  function wire(id, key, conv) {
+    $$("#" + id + " button").forEach(b => b.addEventListener("click", () => {
+      $$("#" + id + " button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      st[key] = conv(b.dataset.v);
+      render();
+    }));
+  }
+  wire("od-p", "partitioner", v => v);
+  wire("od-v", "versioned", v => v === "1");
+  wire("od-c", "consumers", v => +v);
+  $("#od-u").addEventListener("input", e => { st.updates = +e.target.value; render(); });
+
+  const base = simulate({ orders: 300, updates: 2, partitions: 4, consumers: 4, partitioner: "rr", versioned: false });
+  const answer = base.staleRatio < 0.01 ? "none" : (base.staleRatio < 0.2 ? "some" : "many");
+  $$("#od-guess .opts button").forEach(b => b.addEventListener("click", () => {
+    $$("#od-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", String(x === b)); });
+    const g = b.dataset.g;
+    if (g !== "skip") b.classList.add(g === answer ? "right" : "wrong");
+    $$("#od-guess .opts button").forEach(x => { if (x.dataset.g === answer) x.classList.add("right"); });
+    const res = $("#od-res");
+    res.hidden = false;
+    res.innerHTML = (g === "skip" ? "" : (g === answer ? "猜对了。" : "没猜中。")) +
+      ` 模拟结果 <b>${base.stale} 单</b>（${Math.round(base.staleRatio * 100)}%）。⑤ 的真实链路里，同步程序打乱一批的顺序写，不带版本时是 300 单里 148 单。两次变更挨得很近，进了不同分区就各凭运气（④ 机制 4）。`;
+    Object.assign(st, { partitioner: "rr", versioned: false, consumers: 4, updates: 2 });
+    $$("#od-p button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === "rr")));
+    $$("#od-v button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === "0")));
+    $$("#od-c button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === "4")));
+    $("#od-u").value = 2;
+    render();
+  }));
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
