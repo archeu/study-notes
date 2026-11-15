@@ -92,6 +92,7 @@
 | 12 | [订单表一行没加，PG 里却胖了一倍：PostgreSQL 的多版本、VACUUM、索引类型和 JSONB](https://archeu.github.io/study-notes/database/pg-mvcc-vacuum-jsonb.html) | PG 不原地改行、旧版本留在表里、可见性与回滚、页内修剪 / VACUUM / autovacuum / VACUUM FULL、长事务挡住清理、HOT 与 fillfactor、xid 冻结、B-tree / BRIN / GIN / 部分索引与表达式索引、JSONB 与 GIN，全部在 PG 18.7 上实测，堆表实验台 |
 | 13 | [工单库要加“找相似故障”：MySQL 还是 PostgreSQL，pgvector 凭什么](https://archeu.github.io/study-notes/database/mysql-vs-pg-pgvector.html) | MySQL 和 PG 逐项对比、向量放哪的五种方案和选择规则、PG 扩展的四个插槽（类型、运算符、运算符类、索引访问方法）、带过滤查询的执行路径、为什么 MySQL 社区版做不出向量索引、本机实测带条件少行和三种补法，过滤 HNSW 实验台 |
 | 14 | [订单表拆成 8 张：分库分表与 ShardingSphere](https://archeu.github.io/study-notes/database/sharding-shardingsphere.html) | J11 知识点 1：2000 万口诀从哪来（B+ 树层数估算）、真正逼着拆的是写入和运维时间、便宜的招各解决什么、垂直 / 单库分表 / 分库分表、取模 / 范围 / 映射、分片键三条标准、库表同源（实测 2500/0 vs 1250）、ShardingSphere-JDBC 5.5.3 五步与 12 条 SQL 的真实改写、5.5.3 依赖拆包的四种报错，分片键试验台 |
+| 15 | [9527 在哪张表：分片以后的跨片查询、分页与全局表](https://archeu.github.io/study-notes/database/sharding-cross-shard-query.html) | J11 知识点 2：四种查询各碰几张表、订单号基因的复合分片算法与老单号广播、跨片深分页的全局视野改写和内存归并（实测 offset 100000 时 2.4 s / 2.7 GB，游标 23 ms）、LIMIT 0,1020 起 MySQL 改走 filesort、AVG 与 GROUP BY 改写、绑定表 32 → 8 条、唯一索引只管一张表，跨片分页代价计算器 |
 
 ## 性能
 

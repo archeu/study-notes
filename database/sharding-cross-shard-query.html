@@ -1,0 +1,1302 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>9527 在哪张表：跨片查询、分页与全局表</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, same family as the other notes. Knowledge-point page (learn, mechanism type) for J11 panorama stations 7, 8, 9: queries without the sharding key (order-id gene, legacy ids), cross-shard pagination and merging (memory vs stream, filesort), aggregate rewrite, binding and broadcast tables. Roles: pd = routing, of = merging / cost, bk = alternatives that move the query elsewhere (ES, mapping table), bad = pitfalls, done = what to keep. One interactive: cross-shard paging cost calculator (pure function, checked in node, anchored on measured numbers). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+#cb-tiles .tile b{white-space:normal;font-size:20px}
+.strip45{display:grid;grid-template-columns:repeat(45,minmax(0,1fr));gap:2px}
+.strip45 i{display:block;height:26px;border-radius:3px;background:var(--good-tint);border:1px solid var(--good)}
+.strip45 i.o{background:var(--bad-tint);border-color:var(--bad)}
+.strip45 i.h{background:var(--warn-tint);border-color:var(--warn)}
+.strip45 i.n{background:var(--neutral-tint);border-color:var(--neutral)}
+.strip-ax{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.lg-row{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lg-row i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1px solid}
+
+/* sharding-key bench */
+.sk-wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.sk-bars{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;align-items:end;height:160px;padding:4px 6px 0;border-bottom:1.5px solid var(--line-strong)}
+.sk-bars .bar{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;min-width:0;gap:2px}
+.sk-bars .bar i{display:block;width:100%;background:var(--pd);border-radius:6px 6px 0 0;min-height:2px;transition:height .3s}
+.sk-bars .bar.hot i{background:var(--bad)}
+.sk-bars .bar.zero i{background:var(--line-strong)}
+.sk-bars .bar small{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);white-space:nowrap}
+.sk-names{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:2px 6px 0}
+.sk-names span{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);text-align:center}
+.sk-q td.n{font-family:var(--font-mono);white-space:nowrap}
+.sk-q td.one{color:var(--good);font-weight:700}
+.sk-q td.all{color:var(--bad);font-weight:700}
+@media (max-width:700px){.sk-wrap{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.sk-bars .bar i{transition:none}}
+
+/* paging calculator */
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>数据库</span><span aria-hidden="true">/</span><span class="tb-here">跨片查询、分页与全局表</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">没有分片键的查询 · 订单号基因 · 老订单号 · 映射表 · 全局视野分页 · 游标分页 · 内存归并 · 聚合改写 · 绑定表 · 全局表 · 跨表唯一 · ShardingSphere 5.5.3 · 80 万行实测</p>
+  <h1>9527 在哪张表：分片以后的跨片查询、分页与全局表</h1>
+  <p class="lead">拆完以后，每张表只知道自己那一份。所以凡是“需要全局视野”的事都变难了：<b>不带分片键的查询</b>要问遍所有表，<b>跨片分页</b>要每张表都多取前面那些行再在内存里比，<b>聚合和 JOIN</b> 要改写或者干脆做不了，<b>唯一约束</b>只在一张表里有效。办法只有两类：让查询重新带上分片信息（基因、映射表、绑定表、全局表），或者把这类查询挪出分片库（游标分页、ES、离线数仓）。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j11-order-table-sharding.html#s-7">订单表从一张到八张 · 第 7、8、9 站</a></span><span>地图：<a href="../java/roadmap.html#j11">J11 · 分片以后的难题：跨片查询、分页、全局表</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>J11 第 2 个知识点，接 <a href="sharding-shardingsphere.html">上一页</a>：路由只看得见分片条件，看不见就全路由。这一页把全路由的代价量出来，再看每一种查询各有什么办法。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：拆完以后，四种查询各碰几张表</h2>
+  </div>
+  <p class="lead">在全景第 7、8、9 站，这一步要解决：分片键是 <code>user_id</code>，可业务里不是每个查询都带着它。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 268" role="img" aria-label="四种查询各碰几张表。1024 看订单详情 9527，带着 user_id，只碰 t_order_0。客服只拿着订单号 9527，没有分片键，8 张表都要问。运营后台按时间倒序翻第 5001 页，8 张表每张都要取前 100020 行。商家 301 看本店订单，shop_id 不是分片键，8 张表都要问。">
+  <text class="t-xs" x="380" y="18">t_0</text><text class="t-xs" x="420" y="18">t_1</text><text class="t-xs" x="460" y="18">t_2</text><text class="t-xs" x="500" y="18">t_3</text><text class="t-xs" x="540" y="18">t_4</text><text class="t-xs" x="580" y="18">t_5</text><text class="t-xs" x="620" y="18">t_6</text><text class="t-xs" x="660" y="18">t_7</text>
+  <g>
+    <rect x="16" y="28" width="340" height="50" rx="10" class="b-card"/>
+    <text class="t-b" x="28" y="50">1024 看订单详情 9527</text><text class="t-xs" x="28" y="68">WHERE id = 9527 AND user_id = 1024</text>
+    <rect x="376" y="40" width="30" height="26" rx="6" class="b-good"/>
+    <rect x="416" y="40" width="30" height="26" rx="6" class="b-neu"/><rect x="456" y="40" width="30" height="26" rx="6" class="b-neu"/><rect x="496" y="40" width="30" height="26" rx="6" class="b-neu"/><rect x="536" y="40" width="30" height="26" rx="6" class="b-neu"/><rect x="576" y="40" width="30" height="26" rx="6" class="b-neu"/><rect x="616" y="40" width="30" height="26" rx="6" class="b-neu"/><rect x="656" y="40" width="30" height="26" rx="6" class="b-neu"/>
+    <text class="t-good" x="706" y="58">1 张：带着分片键</text>
+  </g>
+  <g>
+    <rect x="16" y="90" width="340" height="50" rx="10" class="b-card"/>
+    <text class="t-b" x="28" y="112">客服只拿着订单号 9527</text><text class="t-xs" x="28" y="130">WHERE id = 9527（全景第 7 站）</text>
+    <rect x="376" y="102" width="30" height="26" rx="6" class="b-bad"/><rect x="416" y="102" width="30" height="26" rx="6" class="b-bad"/><rect x="456" y="102" width="30" height="26" rx="6" class="b-bad"/><rect x="496" y="102" width="30" height="26" rx="6" class="b-bad"/><rect x="536" y="102" width="30" height="26" rx="6" class="b-bad"/><rect x="576" y="102" width="30" height="26" rx="6" class="b-bad"/><rect x="616" y="102" width="30" height="26" rx="6" class="b-bad"/><rect x="656" y="102" width="30" height="26" rx="6" class="b-bad"/>
+    <text class="t-bad" x="706" y="120">8 张：只有 1 张有它</text>
+  </g>
+  <g>
+    <rect x="16" y="152" width="340" height="50" rx="10" class="b-card"/>
+    <text class="t-b" x="28" y="174">运营后台按时间翻第 5001 页</text><text class="t-xs" x="28" y="192">ORDER BY created_at DESC LIMIT 100000, 20（第 8 站）</text>
+    <rect x="376" y="164" width="30" height="26" rx="6" class="b-bad"/><rect x="416" y="164" width="30" height="26" rx="6" class="b-bad"/><rect x="456" y="164" width="30" height="26" rx="6" class="b-bad"/><rect x="496" y="164" width="30" height="26" rx="6" class="b-bad"/><rect x="536" y="164" width="30" height="26" rx="6" class="b-bad"/><rect x="576" y="164" width="30" height="26" rx="6" class="b-bad"/><rect x="616" y="164" width="30" height="26" rx="6" class="b-bad"/><rect x="656" y="164" width="30" height="26" rx="6" class="b-bad"/>
+    <text class="t-bad" x="706" y="182">8 张 × 100020 行进 JVM</text>
+  </g>
+  <g>
+    <rect x="16" y="214" width="340" height="50" rx="10" class="b-card"/>
+    <text class="t-b" x="28" y="236">商家 301 看本店订单</text><text class="t-xs" x="28" y="254">WHERE shop_id = 301（第 9 站）</text>
+    <rect x="376" y="226" width="30" height="26" rx="6" class="b-bad"/><rect x="416" y="226" width="30" height="26" rx="6" class="b-bad"/><rect x="456" y="226" width="30" height="26" rx="6" class="b-bad"/><rect x="496" y="226" width="30" height="26" rx="6" class="b-bad"/><rect x="536" y="226" width="30" height="26" rx="6" class="b-bad"/><rect x="576" y="226" width="30" height="26" rx="6" class="b-bad"/><rect x="616" y="226" width="30" height="26" rx="6" class="b-bad"/><rect x="656" y="226" width="30" height="26" rx="6" class="b-bad"/>
+    <text class="t-bad" x="706" y="244">8 张：交给 ES（第 4 页）</text>
+  </g>
+</svg>
+  </div>
+  </figure>
+  <p>第一行是分片想要的样子；后三行都是“全局视野”的查询。它们功能上都对，只是成本被放大了：客服那条是 8 倍的查询次数，运营那条是几十万行被拉进应用内存。这一页要做的，是让后三行尽量变回第一行，变不回来的就挪走。</p>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：全路由的四种代价</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>什么查询</th><th>不处理会怎样（⑤ 实测，80 万行、8 张表）</th></tr></thead>
+      <tbody>
+        <tr><th>只拿订单号</th><td>问遍 8 张表才找到 1 行；如果对老单号硬套基因，去 <code>t_order_7</code> 找 9527，0 行，返回“订单不存在”。</td></tr>
+        <tr><th>跨片深分页</th><td class="bad">翻到 offset 100000：每张表取 100020 行，<b>一次查询 2.4 秒、JVM 分配 2.7 GB</b>；同一页用游标翻，23 ms、0.7 MB。</td></tr>
+        <tr><th>聚合</th><td><code>AVG</code> 不能把 8 个平均数再平均，要改写成 <code>SUM</code> 和 <code>COUNT</code>；<code>GROUP BY … ORDER BY cnt LIMIT 3</code> 每张表都去掉了 LIMIT，所有分组全拉回来。</td></tr>
+        <tr><th>JOIN 和唯一约束</th><td>订单和明细没配绑定表，一次 JOIN 变成 32 条 SQL；两个用户各插一单 <code>order_no = 'DUP-1'</code>，都成功了：唯一索引只管自己那张表。</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="know" data-role="bad"><b>不懂精华时的典型误用</b><span>以为 ShardingSphere “支持分页”就万事大吉，运营后台照旧给一个能跳到任意页的分页条。测试环境每张表几千行，一切正常；上线后有人翻到几千页，订单服务的堆被一个查询吃掉几个 GB，Full GC 拖慢了所有下单请求。</span></div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：每种难题都有“带回分片信息”和“挪出去”两类办法</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>难题</th><th>带回分片信息</th><th>挪出分片库</th><th>交易靶场的选择</th></tr></thead>
+      <tbody>
+        <tr><th>只有订单号</th><td><b>基因法</b>：订单号最低几位放 <code>user_id % 8</code>；<b>映射表</b>：订单号 → user_id，按订单号再分片</td><td>ES 里按订单号搜</td><td class="fix">新单号用基因；老单号走广播（低频），量大了再建映射表</td></tr>
+        <tr><th>跨片分页</th><td>按用户的列表本来就带分片键，只碰一张表</td><td><b>游标</b>（<code>created_at &lt;</code> 上一页最后一条）；ES <code>search_after</code>；离线数仓</td><td class="fix">运营后台不许跳页，只有“下一页”；报表走数仓</td></tr>
+        <tr><th>按商家查</th><td><b>异构索引表</b>：按 <code>shop_id</code> 再存一份（只存订单号和排序字段）</td><td>ES</td><td class="fix">ES（第 4、5 页）</td></tr>
+        <tr><th>JOIN</th><td><b>绑定表</b>（同一个分片键）；<b>全局表</b>（每库一份）；冗余字段</td><td>应用里查两次再拼；联邦查询（ShardingSphere <code>sql-federation</code>）</td><td class="fix">订单和明细配绑定表，地区、类目配全局表</td></tr>
+        <tr><th>全局唯一</th><td>唯一键里带分片键，或者唯一值本身就带分片信息（基因）</td><td>单独一张按该值分片的唯一表，或者用 Redis 先占位</td><td class="fix">订单号全局唯一靠号段 / 雪花发号，不靠索引</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="verdict">选择规则：<b>高频的查询让它带回分片信息，低频的允许全路由，重的（深分页、全文、聚合报表）挪出分片库。</b></p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：路由看得见什么、结果怎么归并、哪些 SQL 会被改写</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <span><b>路由</b>：上一页机制 1，ShardingSphere 只能用解析出来的分片条件算出去哪几张表，看不见就全路由。</span>
+    <span><b>雪花号</b>：时间戳 + 机器号 + 序列号拼成的 64 位整数，见 <a href="../arch/distributed-id.html">分布式 ID</a>。它的低位是序列号，所以原样取模分布很差。</span>
+  </div>
+
+  <h3 id="m-gene">机制 1：订单号基因，让“只有订单号”也能算出表</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 218" role="img" aria-label="订单号基因。新订单号是一个雪花号左移 3 位，再把最低 3 位填成 user_id % 8。用户 1024 的新订单号 8000480000，最低 3 位是 000，对 8 取余是 0，就是 t_order_0。复合分片算法的规则：条件里有 user_id 就用 user_id % 8；只有订单号、而且订单号大于等于基因起点，就用订单号 % 8；只有老订单号，比如 9527，没有基因，只能广播到 8 张表。如果对 9527 也照算，9527 % 8 = 7，会去 t_order_7 找，实际它在 t_order_0。">
+  <text class="t-h" x="20" y="24">新订单号的 64 位</text>
+  <rect x="20" y="36" width="560" height="40" rx="8" class="b-neu"/>
+  <text class="t-s" x="34" y="61">雪花号（时间戳 + 机器 + 序列），左移 3 位</text>
+  <rect x="584" y="36" width="120" height="40" rx="8" class="b-pd"/>
+  <text class="t-b" x="596" y="54">最低 3 位</text><text class="t-xs" x="596" y="70">= user_id % 8</text>
+  <text class="t-mono" x="20" y="100">1024 的新单：8000480000 = …0000000 000（二进制末 3 位）→ % 8 = 0 → t_order_0</text>
+
+  <text class="t-h" x="20" y="136">复合分片算法（⑤ 的 GeneShardingAlgorithm）</text>
+  <rect x="20" y="148" width="290" height="58" rx="10" class="b-good"/>
+  <text class="t-b" x="32" y="170">有 user_id</text><text class="t-xs" x="32" y="190">user_id % 8 → 1 张</text>
+  <rect x="326" y="148" width="290" height="58" rx="10" class="b-good"/>
+  <text class="t-b" x="338" y="170">只有新订单号（≥ 基因起点）</text><text class="t-xs" x="338" y="190">id % 8 → 1 张</text>
+  <rect x="632" y="148" width="310" height="58" rx="10" class="b-bad"/>
+  <text class="t-b" x="644" y="170">只有老订单号 9527</text><text class="t-xs" x="644" y="190">没有基因 → 广播 8 张；硬算会去 t_order_7（错）</text>
+</svg>
+  </div>
+  </figure>
+  <p>基因法的本质是<b>把分片键的一部分信息编进另一个常用的查询键里</b>。它只对拆分以后新发的号有效：老订单号是按顺序发的，<code>9527 % 8 = 7</code>，可 9527 属于用户 1024，在 <code>t_order_0</code>。所以算法里一定要有一条“老号段走另一条路”的分支：广播、映射表，或者在迁移时给老订单补一张“订单号 → user_id”的映射。</p>
+
+  <h3 id="m-merge">机制 2：结果怎么归并，为什么深分页会吃内存</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 236" role="img" aria-label="归并。ds_0 只给这次查询 1 个连接，却要查 t_order_0、2、4、6 四张表，只能一条接一条地执行；前一条的结果必须整个读进内存，连接才能去执行下一条。这叫连接限制模式。8 份结果都在内存里，每份已经按 created_at 倒序排好，归并时用一个优先队列每次取 8 个队头里最新的那条，先跳过 offset 条，再取 20 条。翻到 offset 100000 时，8 份结果一共 800160 行。">
+  <rect x="16" y="16" width="300" height="200" rx="14" class="b-dash"/>
+  <text class="t-b" x="28" y="38">ds_0：这次查询只有 1 个连接</text>
+  <rect x="28" y="50" width="130" height="30" rx="8" class="b-pd"/><text class="t-mono" x="38" y="70">t_order_0 ↓</text>
+  <rect x="28" y="88" width="130" height="30" rx="8" class="b-pd"/><text class="t-mono" x="38" y="108">t_order_2 ↓</text>
+  <rect x="28" y="126" width="130" height="30" rx="8" class="b-pd"/><text class="t-mono" x="38" y="146">t_order_4 ↓</text>
+  <rect x="28" y="164" width="130" height="30" rx="8" class="b-pd"/><text class="t-mono" x="38" y="184">t_order_6 ↓</text>
+  <text class="t-xs" x="170" y="70">一条接一条执行；</text>
+  <text class="t-xs" x="170" y="88">执行下一条之前，</text>
+  <text class="t-xs" x="170" y="106">这一条的结果要</text>
+  <text class="t-bad" x="170" y="126">整个读进内存</text>
+  <text class="t-xs" x="170" y="146">（CONNECTION_</text>
+  <text class="t-xs" x="170" y="162">STRICTLY）</text>
+  <text class="t-xs" x="28" y="208">ds_1 同样：t_order_1、3、5、7</text>
+
+  <line x1="320" y1="116" x2="372" y2="116" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="324" y="106">8 份结果</text>
+
+  <rect x="378" y="40" width="250" height="152" rx="14" class="b-card"/>
+  <text class="t-b" x="390" y="62">内存里：8 个已排序的结果</text>
+  <g>
+    <rect x="390" y="74" width="24" height="100" rx="4" class="b-neu"/><rect x="418" y="74" width="24" height="100" rx="4" class="b-neu"/><rect x="446" y="74" width="24" height="100" rx="4" class="b-neu"/><rect x="474" y="74" width="24" height="100" rx="4" class="b-neu"/>
+    <rect x="502" y="74" width="24" height="100" rx="4" class="b-neu"/><rect x="530" y="74" width="24" height="100" rx="4" class="b-neu"/><rect x="558" y="74" width="24" height="100" rx="4" class="b-neu"/><rect x="586" y="74" width="24" height="100" rx="4" class="b-neu"/>
+    <rect x="390" y="74" width="220" height="14" rx="4" class="b-pd"/>
+    <text class="t-xs" x="394" y="85" style="fill:var(--ink)">8 个队头</text>
+  </g>
+  <text class="t-xs" x="390" y="186">每份 offset + 20 行</text>
+
+  <line x1="630" y1="116" x2="682" y2="116" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="688" y="40" width="256" height="152" rx="14" class="b-pd"/>
+  <text class="t-b" x="700" y="62">优先队列归并</text>
+  <text class="t-s" x="700" y="86">每次取 8 个队头里最新的一条</text>
+  <text class="t-s" x="700" y="108">先扔掉 offset 条</text>
+  <text class="t-s" x="700" y="130">再留下 20 条</text>
+  <text class="t-bad" x="700" y="160">offset 100000：</text>
+  <text class="t-bad" x="700" y="178">进内存 800160 行，用 20 行</text>
+</svg>
+  </div>
+  </figure>
+  <p>归并本身很省：8 份结果各自已经按 <code>created_at</code> 排好，优先队列每次只比 8 个队头（<code>OrderByStreamMergedResult</code>）。贵在“8 份结果从哪来”：ShardingSphere 默认每个库只给一次查询 1 个连接（<code>max-connections-size-per-query = 1</code>），而 <code>ds_0</code> 要查 4 张表，只能一条接一条执行；为了让连接腾出来，前一条的结果要整个读进内存（源码里的 <code>CONNECTION_STRICTLY</code> → <code>JDBCMemoryQueryResult</code>）。这就是 ⑤ 里 2.7 GB 的来历。</p>
+
+  <h3 id="m-page">机制 3：全局视野法的代价，和游标为什么便宜</h3>
+  <ul class="steps-out" data-role="of">
+    <li><b>改写</b><span>谁是全局第 100001 名，只看每张表的前 100020 名就够，少看一行都可能漏，所以 <code>LIMIT 100000, 20</code> 被改写成每张表 <code>LIMIT 0, 100020</code>。代价 = 分片数 × (offset + size)，随页码线性涨，随分片数线性涨。</span></li>
+    <li><b>MySQL 那边也变了</b><span>每张表的 <code>LIMIT 0, 20</code> 走 <code>idx_created</code> 倒序扫描，读 20 行就停；到了 <code>LIMIT 0, 1020</code>，优化器判断回表 1020 次不如全表扫描加排序，改成了 <code>Using filesort</code>（⑤ 的 EXPLAIN）。所以第 51 页就已经比第 1 页慢十几倍。</span></li>
+    <li><b>游标</b><span><code>WHERE created_at &lt; '上一页最后一条' ORDER BY created_at DESC LIMIT 20</code>：每张表从索引的这个位置往后读 20 行，和翻到第几页无关。代价是不能跳页，只能一页一页往后翻；排序字段要唯一（不唯一就带上 id 一起比）。</span></li>
+  </ul>
+
+  <div class="lab" id="pc" data-role="of">
+    <h3>跨片分页代价计算器</h3>
+    <div class="guess" id="pc-guess">
+      <p>先猜：8 张表、每页 20 条，运营翻到第 5001 页（offset 100000）。这一个查询，订单服务的 JVM 要分配多少内存？</p>
+      <div class="opts" role="group" aria-label="猜一个答案">
+        <button type="button" data-g="mb">几 MB</button><button type="button" data-g="hmb">几百 MB</button><button type="button" data-g="gb">几 GB</button><button type="button" class="skip" data-g="skip">不猜，直接看</button>
+      </div>
+      <p class="res" id="pc-res" hidden></p>
+    </div>
+    <div class="ctl-grid">
+      <div><p class="lbl"><span>分片（真实表）数</span><output id="pc-s-o">8</output></p><input type="range" id="pc-s" min="2" max="64" step="1" value="8" aria-label="分片数"></div>
+      <div><p class="lbl"><span>翻到第几页</span><output id="pc-p-o">1</output></p><input type="range" id="pc-p" min="0" max="100" step="1" value="0" aria-label="页码"></div>
+      <div><p class="lbl"><span>每页条数</span><output id="pc-z-o">20</output></p><input type="range" id="pc-z" min="10" max="100" step="10" value="20" aria-label="每页条数"></div>
+      <div style="grid-column:1 / -1"><p class="lbl">翻页方式</p><div class="pick2" id="pc-m" role="group" aria-label="翻页方式">
+        <button type="button" data-v="global" aria-pressed="true">LIMIT offset, size（全局视野）</button><button type="button" data-v="cursor" aria-pressed="false">游标：created_at &lt; 上一页最后一条</button></div></div>
+    </div>
+    <div class="tiles4" id="pc-tiles"></div>
+    <p class="verdict" id="pc-verdict"></p>
+    <p class="cap">换算系数来自 ⑤ 的实测（JDK 17、ShardingSphere 5.5.3）：每拉进 JVM 一行，分配约 3.5 KB（2743 MB ÷ 800160 行；是累计分配量，包括很快变成垃圾的部分）。“走 filesort”的门槛 1020 行是本机 10 万行一张表时的实测，表越大门槛越不一样。页码滑块按对数刻度，从第 1 页到第 50000 页。</p>
+  </div>
+
+  <h3 id="m-agg">机制 4：聚合和排序会被改写（⑤ 的真实 SQL）</h3>
+  <ul class="steps-out" data-role="pd">
+    <li><b>AVG</b><span>8 个平均数不能再平均（每张表行数不同）。<code>AVG(amount_cents)</code> 被改写成同时取 <code>COUNT(amount_cents) AS AVG_DERIVED_COUNT_0</code> 和 <code>SUM(amount_cents) AS AVG_DERIVED_SUM_0</code>，归并时用总和除以总数。</span></li>
+    <li><b>GROUP BY + LIMIT</b><span><code>GROUP BY shop_id ORDER BY cnt DESC LIMIT 3</code>：每张表的前 3 名合起来不一定是全局前 3 名（一个商家可能在每张表都排第 4），所以每张表的 LIMIT 被改成了 <code>LIMIT 2147483647</code>，所有分组都拉回来，在内存里合并计数再排序。分组多时，这就是第二个吃内存的地方。</span></li>
+    <li><b>COUNT</b><span><code>COUNT(*)</code> 各表相加即可，最便宜；<code>COUNT(DISTINCT x)</code> 要看 <code>x</code> 和分片键的关系，不同表里可能有同一个值。</span></li>
+  </ul>
+
+  <h3 id="m-join">机制 5：JOIN 只能在同一个库里做，绑定表把组合数从 4 × 4 降到 1 × 1</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 196" role="img" aria-label="JOIN 的路由。左边没配绑定表：ds_0 里 t_order 有 4 张、t_order_item 有 4 张，ShardingSphere 不知道它们一一对应，只能两两组合，4 乘 4 等于 16 条，两个库一共 32 条，实测就是 32。右边配了绑定表：t_order_0 只和 t_order_item_0 JOIN，每个库 4 条，一共 8 条，实测 8。全局表每个库都有完整一份，任何分片表都能在本库里和它 JOIN。">
+  <text class="t-h" x="20" y="24">没配绑定表：两两组合</text>
+  <text class="t-xs" x="20" y="44">ds_0：t_order × t_order_item</text>
+  <g>
+    <text class="t-xs" x="96" y="62">i_0</text><text class="t-xs" x="130" y="62">i_2</text><text class="t-xs" x="164" y="62">i_4</text><text class="t-xs" x="198" y="62">i_6</text>
+    <text class="t-xs" x="54" y="82">o_0</text><text class="t-xs" x="54" y="110">o_2</text><text class="t-xs" x="54" y="138">o_4</text><text class="t-xs" x="54" y="166">o_6</text>
+  </g>
+  <g>
+    <rect x="90" y="68" width="28" height="22" rx="4" class="b-bad"/><rect x="124" y="68" width="28" height="22" rx="4" class="b-bad"/><rect x="158" y="68" width="28" height="22" rx="4" class="b-bad"/><rect x="192" y="68" width="28" height="22" rx="4" class="b-bad"/>
+    <rect x="90" y="96" width="28" height="22" rx="4" class="b-bad"/><rect x="124" y="96" width="28" height="22" rx="4" class="b-bad"/><rect x="158" y="96" width="28" height="22" rx="4" class="b-bad"/><rect x="192" y="96" width="28" height="22" rx="4" class="b-bad"/>
+    <rect x="90" y="124" width="28" height="22" rx="4" class="b-bad"/><rect x="124" y="124" width="28" height="22" rx="4" class="b-bad"/><rect x="158" y="124" width="28" height="22" rx="4" class="b-bad"/><rect x="192" y="124" width="28" height="22" rx="4" class="b-bad"/>
+    <rect x="90" y="152" width="28" height="22" rx="4" class="b-bad"/><rect x="124" y="152" width="28" height="22" rx="4" class="b-bad"/><rect x="158" y="152" width="28" height="22" rx="4" class="b-bad"/><rect x="192" y="152" width="28" height="22" rx="4" class="b-bad"/>
+  </g>
+  <text class="t-bad" x="240" y="110">每库 16 条</text>
+  <text class="t-bad" x="240" y="130">共 32 条（实测）</text>
+
+  <line x1="360" y1="16" x2="360" y2="186" class="e-mut" style="stroke-dasharray:4 4"/>
+  <text class="t-h" x="380" y="24">配了绑定表：一一对应</text>
+  <text class="t-xs" x="380" y="44">ds_0：同号的表才 JOIN</text>
+  <g>
+    <rect x="450" y="68" width="28" height="22" rx="4" class="b-good"/><rect x="484" y="68" width="28" height="22" rx="4" class="b-neu"/><rect x="518" y="68" width="28" height="22" rx="4" class="b-neu"/><rect x="552" y="68" width="28" height="22" rx="4" class="b-neu"/>
+    <rect x="450" y="96" width="28" height="22" rx="4" class="b-neu"/><rect x="484" y="96" width="28" height="22" rx="4" class="b-good"/><rect x="518" y="96" width="28" height="22" rx="4" class="b-neu"/><rect x="552" y="96" width="28" height="22" rx="4" class="b-neu"/>
+    <rect x="450" y="124" width="28" height="22" rx="4" class="b-neu"/><rect x="484" y="124" width="28" height="22" rx="4" class="b-neu"/><rect x="518" y="124" width="28" height="22" rx="4" class="b-good"/><rect x="552" y="124" width="28" height="22" rx="4" class="b-neu"/>
+    <rect x="450" y="152" width="28" height="22" rx="4" class="b-neu"/><rect x="484" y="152" width="28" height="22" rx="4" class="b-neu"/><rect x="518" y="152" width="28" height="22" rx="4" class="b-neu"/><rect x="552" y="152" width="28" height="22" rx="4" class="b-good"/>
+  </g>
+  <text class="t-good" x="600" y="110">每库 4 条</text>
+  <text class="t-good" x="600" y="130">共 8 条（实测）</text>
+
+  <line x1="720" y1="16" x2="720" y2="186" class="e-mut" style="stroke-dasharray:4 4"/>
+  <text class="t-h" x="740" y="24">全局表</text>
+  <rect x="740" y="44" width="200" height="40" rx="8" class="b-dash"/><text class="t-xs" x="752" y="68">ds_0：t_region 完整一份</text>
+  <rect x="740" y="94" width="200" height="40" rx="8" class="b-dash"/><text class="t-xs" x="752" y="118">ds_1：t_region 完整一份</text>
+  <text class="t-xs" x="740" y="158">写入时每个库都写一遍</text>
+  <text class="t-xs" x="740" y="176">任何分片表都能本库 JOIN</text>
+</svg>
+  </div>
+  </figure>
+  <p>为什么 ShardingSphere 不自己看出 <code>t_order_0</code> 只和 <code>t_order_item_0</code> 有关？因为两张逻辑表的分片规则只是“碰巧长得一样”，框架不能假定同一个 <code>user_id</code> 一定落在同号的表上。<code>bindingTables</code> 就是你向它保证：这两张表分片键相同、规则相同、表号一一对应。跨库的 JOIN（比如按 <code>user_id</code> 分的订单表 JOIN 按 <code>shop_id</code> 分的商家表）在 SQL 层做不了，要么冗余字段，要么应用里查两次，要么打开联邦查询（<code>sql-federation</code>，把数据拉到 ShardingSphere 里算，慢，适合低频）。</p>
+
+  <h3>最少的写法：基因的复合分片</h3>
+  <div class="codebox" data-role="pd"><div class="code-bar"><b>gene.yaml（节选）</b><code>CLASS_BASED + COMPLEX，库和表各一份</code></div>
+<pre><code>t_order:
+  actualDataNodes: ds_0.t_order_${[0,2,4,6]},ds_1.t_order_${[1,3,5,7]}
+  databaseStrategy: { complex: { shardingColumns: user_id,id, shardingAlgorithmName: gene_db } }
+  tableStrategy:    { complex: { shardingColumns: user_id,id, shardingAlgorithmName: gene_table } }
+shardingAlgorithms:
+  gene_table:
+    type: CLASS_BASED
+    props: { strategy: COMPLEX, algorithmClassName: labs.….GeneShardingAlgorithm, target: table }</code></pre></div>
+  <div class="codebox" data-role="pd"><div class="code-bar"><b>GeneShardingAlgorithm.doSharding（核心）</b><code>ComplexKeysShardingAlgorithm</code></div>
+<pre><code>Collection&lt;Comparable&lt;?&gt;&gt; users = m.get("user_id"), ids = m.get("id");
+if (users != null)        users.forEach(u -&gt; slots.add(((Number) u).longValue() % 8));
+else if (ids != null) for (Comparable&lt;?&gt; i : ids) {
+    long id = ((Number) i).longValue();
+    if (id &lt; GENE_MIN) return available;          // 老单号没有基因：广播
+    slots.add(id % 8);
+}
+else return available;                            // 两个都没有：全路由</code></pre></div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：80 万行订单上的五组实验</h2>
+  </div>
+  <p class="lead">一个 MySQL 8.4.13 容器、两个库、8 张表各 10 万行：每张表前 5 万行是老订单号（连续编号），后 5 万行是带基因的新订单号；9527 属于用户 1024。全部通过 ShardingSphere-JDBC 5.5.3 执行，<code>sql-show</code> 打开。</p>
+  <div class="codebox" data-role="pd"><div class="code-bar"><b>怎么跑</b><code>JDK 17 · 2 核 ARM 虚拟机 · 灌数据约 18 s</code></div>
+<pre><code>cd study-labs/java/database/sharding-cross-shard-query
+DOCKER="sudo docker" ./run.sh new all          # load gene page agg join unique
+./run.sh again page                            # 数据留着，只重跑分页
+./run.sh clean</code></pre></div>
+  <p><a href="https://github.com/archeu/study-labs/tree/main/java/database/sharding-cross-shard-query">完整代码 →</a></p>
+
+  <h3>A. 订单号基因</h3>
+  <div class="codebox" data-role="pd"><div class="code-bar"><b>gene</b><code>真实输出</code></div>
+<pre><code>==== gene 1. 只拿新订单号 8000480000（最低 3 位 = 0）
+Actual SQL: ds_0 ::: SELECT id, user_id FROM t_order_0 WHERE id = ? ::: [8000480000]
+   → 结果 1 行：8000480000,1024
+==== gene 2. 只拿老订单号 9527：没有基因 → 广播
+Actual SQL: ds_0 ::: SELECT … FROM t_order_0 WHERE id = ? UNION ALL … t_order_2 … t_order_4 … t_order_6
+Actual SQL: ds_1 ::: SELECT … FROM t_order_1 WHERE id = ? UNION ALL … t_order_3 … t_order_5 … t_order_7
+   → 结果 1 行：9527,1024
+==== gene 3. 老订单号 + user_id：又是 1 张表
+Actual SQL: ds_0 ::: SELECT id, user_id FROM t_order_0 WHERE id = ? AND user_id = ? ::: [9527, 1024]
+==== gene 4. 如果对老单号也照用基因：9527 % 8 = 7，去 t_order_7 找
+   → t_order_7 里 id = 9527 的行数：0（它其实在 t_order_0）</code></pre></div>
+
+  <h3>B. 跨片分页：页码越深，越贵</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>翻页方式</th><th class="num">offset</th><th class="num">每张表取</th><th class="num">进 JVM 的行</th><th class="num">耗时</th><th class="num">JVM 分配</th></tr></thead>
+      <tbody>
+        <tr><th>LIMIT offset, 20</th><td class="num">0</td><td class="num">20</td><td class="num">160</td><td class="num">17.6 ms</td><td class="num">0.8 MB</td></tr>
+        <tr><th>LIMIT offset, 20</th><td class="num">1 000</td><td class="num">1 020</td><td class="num">8 160</td><td class="num">293 ms</td><td class="num">30 MB</td></tr>
+        <tr><th>LIMIT offset, 20</th><td class="num">10 000</td><td class="num">10 020</td><td class="num">80 160</td><td class="num">340 ms</td><td class="num">275 MB</td></tr>
+        <tr><th class="bad">LIMIT offset, 20</th><td class="num">100 000</td><td class="num">100 020</td><td class="num">800 160</td><td class="num bad">2 411 ms</td><td class="num bad">2 743 MB</td></tr>
+        <tr><th class="fix">游标 created_at &lt; ?</th><td class="num">（同一页）</td><td class="num">20</td><td class="num">160</td><td class="num">23 ms</td><td class="num">0.7 MB</td></tr>
+        <tr><th>对照：单表直连 LIMIT 100000, 20</th><td class="num">100 000</td><td class="num">—</td><td class="num">20</td><td class="num">61 ms</td><td class="num">≈ 0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">每格是 4 次里去掉第 1 次预热、剩下 3 次最快的那次。JVM 分配是所有线程的累计分配字节数（<code>ThreadMXBean.getThreadAllocatedBytes</code>）。offset 0 到 1000 耗时跳了十几倍，是因为 MySQL 换了执行计划：</p>
+  <div class="codebox" data-role="of"><div class="code-bar"><b>同一张 10 万行的表，EXPLAIN</b><code>MySQL 8.4.13</code></div>
+<pre><code>LIMIT 0, 20     key=idx_created  rows=20     Backward index scan
+LIMIT 0, 1020   key=NULL         rows=99429  Using filesort
+LIMIT 0, 10020  key=NULL         rows=99429  Using filesort</code></pre></div>
+
+  <h3>C. 聚合改写 · D. JOIN · E. 唯一键</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>逻辑 SQL</th><th>真实 SQL（实测）</th></tr></thead>
+      <tbody>
+        <tr><td><code>SELECT AVG(amount_cents) … WHERE shop_id = 301</code></td><td>每个库一条 UNION ALL，列变成 <code>AVG(amount_cents), COUNT(amount_cents) AS AVG_DERIVED_COUNT_0, SUM(amount_cents) AS AVG_DERIVED_SUM_0</code>；结果 45220.0000</td></tr>
+        <tr><td><code>GROUP BY shop_id ORDER BY cnt DESC, shop_id LIMIT 3</code></td><td>8 条，每条都是 <code>… LIMIT 2147483647</code>；结果 301、302、303 各 16000</td></tr>
+        <tr><td>订单 JOIN 明细，<code>user_id IN (1024, 1025)</code></td><td>没配绑定表 <b class="bad">8 条</b>（条件只写在 <code>o.user_id</code> 上，明细表看不到分片条件，每个库 1 张订单表 × 4 张明细表）；配了绑定表 <b class="fix">2 条</b></td></tr>
+        <tr><td>订单 JOIN 明细，<code>shop_id = 301</code></td><td>没配绑定表 <b class="bad">32 条</b>；配了绑定表 <b class="fix">8 条</b></td></tr>
+        <tr><td>1024、1025 各插一单 <code>order_no = 'DUP-1'</code>（表上有 <code>UNIQUE KEY uk_order_no</code>）</td><td>两次都成功，分别进了 <code>t_order_0</code>、<code>t_order_1</code>；<code>COUNT(*) WHERE order_no = 'DUP-1'</code> = <b class="bad">2</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="verdict"><b>到这里已经能交差了</b>：新单号按基因只碰一张表，老单号能查到（广播），运营后台改成游标翻页，订单和明细配成绑定表。<b>已知还没处理的</b>：老单号多了以后广播太贵（<a href="#p-legacy">坑 1</a>）、按商家查还是 8 张表（交给 ES，第 4 页）、订单号唯一不能靠索引（<a href="#p-uniq">坑 4</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节</h2>
+  </div>
+  <h3>第一圈 · 不知道就会出事</h3>
+  <div class="pits">
+    <div class="pit" id="p-legacy"><b><em>1</em>老订单号没有基因，硬算会查错表<a class="rootmark" href="#m-gene">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>⑤ A：9527 按基因去 <code>t_order_7</code>，0 行，用户看到“订单不存在”。</dd><dt>根源</dt><dd>基因只对拆分后新发的号成立；老号是顺序发的，低位和用户无关。</dd><dt>做法</dt><dd class="fix">算法里按号段区分新老（⑤ 用 <code>GENE_MIN</code>）；老号低频就广播，高频就在迁移时建一张“订单号 → user_id”的映射表，先查映射再按 user_id 路由。</dd></dl>
+    </div>
+    <div class="pit" id="p-deep"><b><em>2</em>深分页一个查询吃掉几 GB 内存<a class="rootmark" href="#m-merge">← ④ 机制 2、3</a></b>
+      <dl><dt>现象</dt><dd>⑤ B：offset 100000 时一次查询分配 2.7 GB、2.4 秒；同时 MySQL 那边每张表都在 filesort 10 万行。几个人同时翻，订单服务就开始 Full GC。</dd><dt>根源</dt><dd>全局视野法每张表都要取 offset + size 行；每个库 1 个连接查 4 张表时，结果要整个读进内存再归并。</dd><dt>做法</dt><dd class="fix">产品上不提供跳页，只有“下一页”（游标）；必须跳页的，限制最大页码；导出、报表走离线数仓；全文和组合条件的翻页交给 ES 的 <code>search_after</code>。</dd></dl>
+    </div>
+    <div class="pit" id="p-groupby"><b><em>3</em>GROUP BY + LIMIT 把所有分组拉回来<a class="rootmark" href="#m-agg">← ④ 机制 4</a></b>
+      <dl><dt>现象</dt><dd>⑤ C：“销量前 3 的商家”，每张表的 LIMIT 被改成 2147483647。商家有 2 万个时，每张表回 2 万行，内存里合并 16 万行。</dd><dt>根源</dt><dd>局部前 3 名合起来不等于全局前 3 名，只能全拿。</dd><dt>做法</dt><dd class="fix">这类统计不要在线上分片库实时算：预聚合到一张按商家分片的统计表，或者交给 OLAP。</dd></dl>
+    </div>
+    <div class="pit" id="p-uniq"><b><em>4</em>唯一索引只在一张表里唯一<a class="rootmark" href="#s2">← ② 每张表只知道自己</a></b>
+      <dl><dt>现象</dt><dd>⑤ E：两个用户各插一单 <code>order_no = 'DUP-1'</code>，都成功，全局有两行。</dd><dt>根源</dt><dd><code>UNIQUE KEY</code> 是每张真实表自己的 B+ 树，表和表之间不检查。</dd><dt>做法</dt><dd class="fix">全局唯一的值由发号器保证（号段、雪花），不依赖索引；必须靠数据库保证的（比如手机号注册），按这个值单独建一张分片表来占位。</dd></dl>
+    </div>
+    <div class="pit" id="p-bind"><b><em>5</em>忘了配绑定表，JOIN 变成笛卡尔积路由<a class="rootmark" href="#m-join">← ④ 机制 5</a></b>
+      <dl><dt>现象</dt><dd>⑤ D：订单 JOIN 明细，32 条 SQL，其中 24 条注定查不到数据。</dd><dt>根源</dt><dd>两张逻辑表的规则一样，框架也不能假定它们一一对应。</dd><dt>做法</dt><dd class="fix">同一个分片键、同样规则的主子表，一律配 <code>bindingTables</code>；字典表配全局表。</dd></dl>
+    </div>
+    <div class="pit" id="p-batch"><b><em>6</em>一条 INSERT 带多个用户，被拆到两个库，不再是原子的<a class="rootmark" href="sharding-shardingsphere.html#m-pipe">← 上一页机制 1 路由</a></b>
+      <dl><dt>现象</dt><dd>（按机制推演，没单独跑）<code>INSERT … VALUES (用户 1024 …), (用户 1025 …)</code> 被改写成两条，分别发往 <code>ds_0</code> 和 <code>ds_1</code>；一边成功一边失败时，没有本地事务能把两边一起回滚。</dd><dt>根源</dt><dd>两个库是两个 MySQL 实例，各自提交。</dd><dt>做法</dt><dd class="fix">批量写按分片键分组，每组一个本地事务；真的要跨库原子，走 J09 的分布式事务方案，或者 ShardingSphere 的 XA（有性能代价）。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 团队里怎么写</h3>
+  <ul class="steps-out" data-role="done">
+    <li><b>列表接口</b><span>面向用户的列表都带 <code>user_id</code>；面向运营的列表只给“下一页”，返回游标（最后一条的 <code>created_at</code> 和 id）。防的是坑 2。</span></li>
+    <li><b>新老号段</b><span>拆分那天起发的号都大于一个固定值，代码里用常量 <code>GENE_MIN</code> 区分，并写进分片算法的单元测试。防的是坑 1。</span></li>
+    <li><b>绑定表清单</b><span>新增一张跟着订单走的子表（明细、物流、评价），评审时检查是否加进 <code>bindingTables</code>。防的是坑 5。</span></li>
+    <li><b>报表不走在线库</b><span>聚合排序、导出全量订单走离线数仓或 OLAP，在线分片库只做按 key 的读写。防的是坑 2、3。</span></li>
+  </ul>
+
+  <h3>第三圈 · 深处</h3>
+  <ul class="steps-out" data-role="of">
+    <li><b>连接数换内存</b><span>把 <code>max-connections-size-per-query</code> 调到 ≥ 4，每张表各用一个连接，结果就能流式读取（<code>MEMORY_STRICTLY</code> → <code>JDBCStreamQueryResult</code>），归并时只在内存里放 8 个队头。代价是一次查询占 8 个连接；而且 MySQL 驱动默认会把整个结果集读进客户端，要配合 <code>useCursorFetch</code> 或 <code>fetchSize = Integer.MIN_VALUE</code> 才真正流式。线上更稳的做法仍是不让深分页发生。</span></li>
+    <li><b>二次查询法</b><span>一种减少深分页传输量的技巧：先每张表 <code>LIMIT offset/N, size</code> 找到最小时间，再用这个时间到每张表取一个范围，算出精确位置。实现复杂、对数据分布敏感，ShardingSphere 没有内置；知道有这条路即可。</span></li>
+    <li><b>异构索引表</b><span>按 <code>shop_id</code> 再分一套表，只存 <code>(shop_id, created_at, order_id)</code>：商家查询先在这里分页拿订单号，再按订单号（基因）回主表取详情。写入时要同时维护两份，常用 binlog 异步同步（和第 5 页 ES 的同步同一个套路）。</span></li>
+  </ul>
+  <h3>下一圈</h3>
+  <ul class="steps-out" data-role="other">
+    <li><b>不停机迁移</b><span>把 1.2 亿行搬进 8 张表，搬之前先把这一页的查询都改好：第 3 页。</span></li>
+    <li><b>ES 的分页</b><span>ES 里也有“from + size 越翻越贵”，默认上限 1 万条，<code>search_after</code> 就是 ES 版的游标：第 4 页。</span></li>
+    <li><b>联邦查询</b><span>打开 ShardingSphere 的 <code>sql-federation</code>，跨库 JOIN 能跑了，看它把多少数据拉进内存。</span></li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>映射表</b>：给老单号建一张 <code>t_order_index(order_id, user_id)</code>（按 order_id 分片），改写 gene 2，让 9527 先查映射、再查 1 张表。（坑 1）</li>
+    <li><b>流式</b>：在 <code>gene-quiet.yaml</code> 里把 <code>max-connections-size-per-query</code> 设成 4，重跑 page，看 offset 100000 的 JVM 分配变不变；再给 JDBC URL 加 <code>useCursorFetch=true&amp;defaultFetchSize=1000</code> 跑一次。（第三圈）</li>
+    <li><b>强制走索引</b>：把分页 SQL 改成 <code>FORCE INDEX(idx_created)</code>（ShardingSphere 能透传吗？），比较 offset 1000 的耗时。（机制 3）</li>
+    <li><b>唯一占位</b>：建 <code>t_order_no(order_no PRIMARY KEY)</code> 按 order_no 分片，插订单前先插它，重跑 unique。（坑 4）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>拆完以后每张表只知道自己那一份，凡是要全局视野的查询（无分片键、深分页、聚合、JOIN、唯一）都会被放大；高频的让它带回分片信息（基因、映射表、绑定表、全局表），低频的允许全路由，重的挪出分片库（游标、ES、数仓）。</p></details>
+    <details><summary>2. 为什么 <code>LIMIT 100000, 20</code> 要改写成每张表 <code>LIMIT 0, 100020</code>，不能每张表 <code>LIMIT 12500, 20</code>？</summary><p>全局第 100001 名可能全部来自同一张表（比如那段时间的订单恰好都在 t_order_3），每张表只取均摊的一段就可能漏掉；只有每张表都把前 100020 名交出来，才能保证归并结果正确。</p></details>
+    <details><summary>3. 坑 2 的 2.7 GB 是 ④ 的哪两条机制叠出来的？</summary><p>机制 3：全局视野法每张表取 offset + size 行，一共 80 万行；机制 2：每个库 1 个连接查 4 张表，结果要整个读进内存（CONNECTION_STRICTLY）。</p></details>
+    <details><summary>4. 预测：把 8 张表扩到 64 张（库不变），同样翻到 offset 100000，JVM 分配大约多少？游标呢？</summary><p>全局视野：64 × 100020 ≈ 640 万行，按每行 3.5 KB 约 21 GB，基本等于 OOM。游标：64 × 20 = 1280 行，约 4 MB。分片越多，全局视野法越不可用。（计算器里拖到 64 试试。）</p></details>
+    <details><summary>5. 预测：<code>SELECT COUNT(DISTINCT user_id) FROM t_order</code> 在靶场的规则下，各表的结果直接相加对不对？换成 <code>COUNT(DISTINCT shop_id)</code> 呢？</summary><p>user_id 对：分片键相同的行一定在同一张表，不同表里不会有同一个用户，各表去重后相加就是全局去重数。shop_id 不对：同一个商家的订单散在 8 张表，相加会重复计数。能不能直接加，取决于去重的字段和分片键的关系。</p></details>
+    <details><summary>6. 放回全景：第 8 站前后各发生了什么？运营后台的深分页没改，迁移切读那天会怎样？</summary><p>之前：第 7 站按订单号查（基因 / 广播）；之后：第 9 站商家查询交给 ES。没改深分页：切读前它查的是旧单表，<code>LIMIT 100000, 20</code> 只在 MySQL 里数行（实测单表 61 ms）；切读到新表后，同一个查询变成 8 × 100020 行进 JVM，订单服务的内存和 GC 突然恶化，而这时最容易误判成“新库有问题”去回滚。所以跨片查询要在迁移前改好。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM 虚拟机，JDK 17，ShardingSphere-JDBC 5.5.3，MySQL 8.4.13 容器，8 张表 × 10 万行）：⑤ 的 A～E 各跑 1 次，分页每格取 3 次里最快的；EXPLAIN 也是同一个容器。计算器是用实测系数的纯函数（node 里跑过）。坑 6 按机制推演，没单独跑。</p>
+  <p>按源码（ShardingSphere 5.5.3）：<code>AbstractExecutionPrepareEngine</code>（每个库的 SQL 数大于 <code>max-connections-size-per-query</code> 时用 <code>CONNECTION_STRICTLY</code>）、<code>ExecuteQueryCallback</code>（连接限制模式用 <code>JDBCMemoryQueryResult</code>，否则 <code>JDBCStreamQueryResult</code>）、<code>OrderByStreamMergedResult</code>、<code>ComplexKeysShardingAlgorithm</code> 和 <code>ClassBasedShardingAlgorithm</code>。</p>
+  <p>相关：<a href="../java/pano-j11-order-table-sharding.html">全景：订单表从一张到八张</a> · <a href="sharding-shardingsphere.html">上一页：分库分表与 ShardingSphere</a> · <a href="../arch/distributed-id.html">分布式 ID</a> · <a href="mysql-explain-tuning.html">执行计划与 SQL 调优</a> · <a href="../java/roadmap.html#j11">Java 地图 J11</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 跨片分页代价：全局视野法（ShardingSphere 默认的改写）每个分片取 offset + size 行，全部进 JVM 再归并；
+// 游标法（WHERE created_at < 上一页最后一条）每个分片只取 size 行。
+// 锚点是本页 ⑤ 的实测（8 张表 × 10 万行，JDK 17，ShardingSphere 5.5.3）：JVM 分配 ≈ 3.5 KB / 行（2743 MB ÷ 800160 行）；
+// MySQL 8.4 在这张 10 万行的表上，LIMIT 0, 20 走 idx_created 倒序扫描，LIMIT 0, 1020 起改走全表扫描 + filesort。
+const KB_PER_ROW = 2743.3 * 1024 / 800160;
+const FILESORT_FROM = 1020;
+function pageCost(shards, page, size, method) {
+  shards = Math.max(1, shards | 0); page = Math.max(1, page | 0); size = Math.max(1, size | 0);
+  const offset = (page - 1) * size;
+  const perShard = method === "cursor" ? size : offset + size;
+  const rowsIn = perShard * shards;
+  const mb = rowsIn * KB_PER_ROW / 1024;
+  const filesort = perShard >= FILESORT_FROM;
+  return { offset, perShard, rowsIn, mb, filesort, wasted: rowsIn - size, ratio: rowsIn / size };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  let method = "global";
+  const MAX_PAGE = 50000;
+  const pageOf = v => Math.max(1, Math.round(Math.pow(10, (+v / 100) * Math.log10(MAX_PAGE))));
+  const fmt = n => n.toLocaleString("en-US");
+  const fmtMB = mb => mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : (mb >= 10 ? mb.toFixed(0) : mb.toFixed(1)) + " MB";
+
+  function render() {
+    const shards = +$("#pc-s").value, page = pageOf($("#pc-p").value), size = +$("#pc-z").value;
+    $("#pc-s-o").textContent = shards;
+    $("#pc-p-o").textContent = fmt(page);
+    $("#pc-z-o").textContent = size;
+    const r = pageCost(shards, page, size, method);
+    const tiles = [
+      { k: "每张表要取", v: fmt(r.perShard) + " 行", sub: method === "cursor" ? "和页码无关" : `offset ${fmt(r.offset)} + ${size}`, bad: r.perShard > 1000 },
+      { k: "拉进 JVM 的行", v: fmt(r.rowsIn), sub: `用到的只有 ${size} 行（${fmt(Math.round(r.ratio))} 倍）`, bad: r.ratio > 100 },
+      { k: "JVM 分配（按实测系数）", v: fmtMB(r.mb), sub: r.mb > 1024 ? "一次查询就可能触发 Full GC" : (r.mb > 100 ? "几个人同时翻就危险" : "可以接受"), bad: r.mb > 100 },
+      { k: "每张表在 MySQL 里", v: r.filesort ? "filesort" : "索引倒序", sub: r.filesort ? "全表扫描再排序（本机 ≥ 1020 行）" : "读几行就停", bad: r.filesort }
+    ];
+    $("#pc-tiles").innerHTML = tiles.map(t => `<div class="tile" data-role="${t.bad ? "bad" : "done"}"><small>${t.k}</small><b>${t.v}</b><span>${t.sub}</span></div>`).join("");
+    let v;
+    if (method === "cursor") v = `游标翻页：不管翻到第 ${fmt(page)} 页，每张表都只取 ${size} 行，${shards} 张表一共 ${fmt(r.rowsIn)} 行。代价是不能跳页。`;
+    else if (r.mb > 1024) v = `第 ${fmt(page)} 页：${shards} 张表各取 ${fmt(r.perShard)} 行，一共 ${fmt(r.rowsIn)} 行进 JVM，约 ${fmtMB(r.mb)}，只为了 ${size} 行。这一页不该在线上提供。`;
+    else if (r.filesort) v = `第 ${fmt(page)} 页：内存还扛得住（约 ${fmtMB(r.mb)}），但每张表已经在 MySQL 里全表排序了；再往后翻代价按页码线性涨。`;
+    else v = `第 ${fmt(page)} 页：每张表取 ${fmt(r.perShard)} 行，走索引，很便宜。全局视野法只在前几页便宜。`;
+    $("#pc-verdict").innerHTML = v;
+  }
+
+  ["#pc-s", "#pc-p", "#pc-z"].forEach(id => $(id).addEventListener("input", render));
+  $$("#pc-m button").forEach(b => b.addEventListener("click", () => {
+    $$("#pc-m button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    method = b.dataset.v;
+    render();
+  }));
+
+  // 先猜：8 张表、每页 20、第 5001 页
+  const truth = pageCost(8, 5001, 20, "global").mb;
+  const answer = truth < 50 ? "mb" : (truth < 1024 ? "hmb" : "gb");
+  $$("#pc-guess .opts button").forEach(b => b.addEventListener("click", () => {
+    $$("#pc-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", String(x === b)); });
+    const g = b.dataset.g;
+    if (g !== "skip") b.classList.add(g === answer ? "right" : "wrong");
+    $$("#pc-guess .opts button").forEach(x => { if (x.dataset.g === answer) x.classList.add("right"); });
+    const res = $("#pc-res");
+    res.hidden = false;
+    res.innerHTML = (g === "skip" ? "" : (g === answer ? "猜对了。" : "没猜中。")) +
+      ` ⑤ 实测 <b>2743 MB</b>，2.4 秒：8 张表各取 100020 行，一共 800160 行进 JVM 再归并（④ 机制 2、3）。滑块已经拨到这一页附近（页码滑块是对数刻度）。`;
+    $("#pc-s").value = 8; $("#pc-z").value = 20;
+    // 找到最接近第 5001 页的滑块位置
+    let best = 0;
+    for (let x = 0; x <= 100; x++) if (Math.abs(pageOf(x) - 5001) < Math.abs(pageOf(best) - 5001)) best = x;
+    $("#pc-p").value = best;
+    method = "global";
+    $$("#pc-m button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === "global")));
+    render();
+  }));
+
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
