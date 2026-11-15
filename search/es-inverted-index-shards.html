@@ -1,0 +1,1277 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>Elasticsearch 倒排索引与分片</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, same family as the other notes. Knowledge-point page (learn, tool type) for J11 panorama stations 9 and 11: Elasticsearch inverted index, analyzers, shards and routing, the write path (buffer, translog, refresh, flush, replicas) and query-then-fetch. Roles: bk = Elasticsearch, other = MySQL / old way, of = timing (refresh, near real time), pd = shards and routing, bad = pitfalls, done = what to keep. One interactive: near-real-time timeline (pure sim, checked in node, anchored on measured numbers). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+#cb-tiles .tile b{white-space:normal;font-size:20px}
+.strip45{display:grid;grid-template-columns:repeat(45,minmax(0,1fr));gap:2px}
+.strip45 i{display:block;height:26px;border-radius:3px;background:var(--good-tint);border:1px solid var(--good)}
+.strip45 i.o{background:var(--bad-tint);border-color:var(--bad)}
+.strip45 i.h{background:var(--warn-tint);border-color:var(--warn)}
+.strip45 i.n{background:var(--neutral-tint);border-color:var(--neutral)}
+.strip-ax{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.lg-row{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lg-row i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1px solid}
+
+/* sharding-key bench */
+.sk-wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.sk-bars{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;align-items:end;height:160px;padding:4px 6px 0;border-bottom:1.5px solid var(--line-strong)}
+.sk-bars .bar{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;min-width:0;gap:2px}
+.sk-bars .bar i{display:block;width:100%;background:var(--pd);border-radius:6px 6px 0 0;min-height:2px;transition:height .3s}
+.sk-bars .bar.hot i{background:var(--bad)}
+.sk-bars .bar.zero i{background:var(--line-strong)}
+.sk-bars .bar small{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);white-space:nowrap}
+.sk-names{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:2px 6px 0}
+.sk-names span{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);text-align:center}
+.sk-q td.n{font-family:var(--font-mono);white-space:nowrap}
+.sk-q td.one{color:var(--good);font-weight:700}
+.sk-q td.all{color:var(--bad);font-weight:700}
+@media (max-width:700px){.sk-wrap{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.sk-bars .bar i{transition:none}}
+
+/* paging calculator */
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+
+/* inverted-index bench */
+.iv-q{width:100%;font:inherit;font-size:15px;padding:6px 10px;border-radius:10px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+.iv-wrap{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:14px}
+.iv-docs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.iv-docs li{display:grid;grid-template-columns:1.6em minmax(0,1fr);gap:2px 8px;padding:6px 10px;border-radius:10px;border:1.5px solid var(--line);background:var(--card)}
+.iv-docs li.hit{border-color:var(--good);background:var(--good-tint)}
+.iv-docs li b{grid-row:span 2;font-family:var(--font-mono);color:var(--muted)}
+.iv-docs .t{font-size:14.5px}
+.iv-docs .toks{display:flex;flex-wrap:wrap;gap:4px}
+.iv-docs .toks code,.iv-dict code{font-size:12px;padding:0 5px;border-radius:5px;background:var(--neutral-tint)}
+.iv-docs .toks code.on,.iv-dict .row.on code{background:var(--good);color:var(--on-accent)}
+.iv-dict{display:flex;flex-direction:column;gap:2px;max-height:300px;overflow:auto;padding:6px 8px;border-radius:10px;border:1.5px solid var(--line);background:var(--card)}
+.iv-dict .row{display:grid;grid-template-columns:5em minmax(0,1fr);gap:8px;font-size:13px;font-family:var(--font-mono);padding:1px 0}
+.iv-dict .row.on{font-weight:700}
+.iv-dict sub{color:var(--muted);font-size:10px}
+@media (max-width:700px){.iv-wrap{grid-template-columns:1fr}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>搜索</span><span aria-hidden="true">/</span><span class="tb-here">Elasticsearch 倒排索引与分片</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bk"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">倒排索引 · 分词器 standard / cjk · text vs keyword · 分片与路由 · 内存缓冲 · translog · refresh · segment · flush · 副本 · query then fetch · max_result_window · search_after · Elasticsearch 9.5 实测</p>
+  <h1>商家 301 搜“键盘”：Elasticsearch 的倒排索引、分片、写入和查询</h1>
+  <p class="lead">MySQL 的 B+ 树按“一行的某个字段值”排好序，适合“给我 id = 9527 的那一行”；Elasticsearch 反过来，先把每段文字切成词，再记下<b>每个词出现在哪些文档里</b>（倒排索引），适合“哪些订单的标题里有‘键盘’”，还能按相关度排序、任意字段组合过滤。代价有两个：数据是从 MySQL 同步过来的另一份副本；写进去要等一次 <b>refresh</b>（默认每秒一次）才搜得到，所以它是“近实时”的，只能用来“找”，不能用来做决定。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么学</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>老办法</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>选谁</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>跑起来</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j11-order-table-sharding.html#s-9">订单表从一张到八张 · 第 9、11 站</a></span><span>地图：<a href="../java/roadmap.html#j11">J11 · Elasticsearch：倒排索引、分片、写入和查询过程</a></span><span>AI 地图站 06 的关键词检索（BM25）用的也是这套倒排索引</span></p>
+  <p class="scene"><b>这一页的位置</b><span>J11 第 4 个知识点。前一页解决了“按用户查”，按商家查和全文搜索交给 ES；数据怎么从 MySQL 同步过来，是下一页。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么学：商家 301 要的三种查法，订单库都不擅长</h2>
+  </div>
+  <p class="lead">在全景第 9 站，商家 301 打开后台：</p>
+  <div class="design">
+    <div class="card" data-role="bk"><h3>按商家筛</h3><p>“本店、待发货、最近 7 天”。<code>shop_id</code> 不是分片键，订单库要问遍 8 张表（<a href="../database/sharding-cross-shard-query.html">上上页</a>）。</p></div>
+    <div class="card" data-role="bk"><h3>搜文字</h3><p>“标题里有‘键盘’”“收货人姓张”。MySQL 的 <code>LIKE '%键盘%'</code> 用不上 B+ 树索引，只能一行行扫。</p></div>
+    <div class="card" data-role="bk"><h3>随意组合、按相关度排</h3><p>状态、金额区间、时间、关键词任意组合，再按“最相关”或时间排序，翻几页。MySQL 要为每种组合建联合索引，组合一多就建不过来。</p></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>老办法：LIKE、全文索引、异构索引表</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>老办法</th><th>行不行</th></tr></thead>
+      <tbody>
+        <tr><th><code>WHERE title LIKE '%键盘%'</code></th><td>能用但很慢：前面有 <code>%</code>，B+ 树按值排序帮不上忙，只能全表扫描；分片以后还要扫 8 张表。也没有“相关度”这回事。</td></tr>
+        <tr><th>MySQL <code>FULLTEXT</code> 索引（ngram 解析器）</th><td>能做中文分词和全文检索；但它在订单库里，和下单抢同一台机器的 CPU 和 IO；分片以后同样要 8 张表各查一遍再合并；排序、聚合、高亮的能力弱。</td></tr>
+        <tr><th>按 <code>shop_id</code> 再分一份的异构索引表</th><td>解决“按商家筛”，解决不了“搜文字”和“任意组合”。</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>缺的那一块，就是 ES 的精华：<b>为“找”专门建一份数据结构（倒排索引），和负责“写对”的订单库分开</b>。订单库继续按用户分片、保证事务；ES 按自己的方式分片、保存一份可以随便搜的副本。</p>
+  <div class="know" data-role="bad"><b>不懂精华时的典型误用</b><span>把 ES 当成第二个数据库：发货、退款这些操作直接以 ES 里的状态为准。ES 的数据是异步同步过来的，比 MySQL 晚一两秒，偶尔还会丢一条、乱一次序；它只负责“找到候选的订单号”，做决定之前要回 MySQL 按订单号查一次。</span></div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>选谁：ES、OpenSearch，还是数据库里的全文检索</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>是什么</th><th>适合</th><th>注意</th></tr></thead>
+      <tbody>
+        <tr><th class="fix">Elasticsearch 9.x</th><td>基于 Lucene 的分布式搜索引擎，REST API</td><td>全文检索、多条件过滤、聚合、日志检索；国内电商后台搜索最常见</td><td>许可证在 2021 年改过（现在 AGPL / Elastic License 等可选），云上托管要看厂商</td></tr>
+        <tr><th>OpenSearch</th><td>AWS 主导、从 Elasticsearch 7.10 分出来的开源版本</td><td>同上，用 AWS 托管服务时常见</td><td>API 大体兼容 7.x，新功能两边各走各的</td></tr>
+        <tr><th>MySQL <code>FULLTEXT</code> / PostgreSQL <code>tsvector</code></th><td>数据库自带的倒排索引</td><td>数据量小、不想多养一个系统</td><td>和业务抢资源；分片以后要逐片查；中文分词能力有限</td></tr>
+        <tr><th>ClickHouse / Doris</th><td>列存分析库</td><td>“近 30 天销售额前 10”这类聚合报表</td><td>不擅长按相关度的全文检索</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="verdict">选择规则：<b>要全文检索和多条件组合查询 → 搜索引擎（ES / OpenSearch）；只要聚合报表 → OLAP；数据量小 → 数据库自带的全文索引。</b>交易靶场的商家后台既要搜文字、又要多条件过滤，选 Elasticsearch，本页学它。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：倒排索引、分片、一次写入和一次搜索</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <span><b>Lucene</b>：ES 底下的 Java 搜索库。ES 的一个<b>分片</b>（shard）就是一个完整的 Lucene 索引；ES 在它上面加了分布式：分片、副本、路由、集群。</span>
+    <span><b>文档</b>：ES 存的一条 JSON，比如一单订单。<b>索引</b>（index）是一类文档的集合，相当于一张表；<b>mapping</b> 相当于表结构，规定每个字段怎么建索引。</span>
+  </div>
+
+  <h3 id="m-inv">机制 1：倒排索引，先切词，再记“词 → 哪些文档”</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 236" role="img" aria-label="倒排索引。左边三单订单的标题：1 号是 88 号机械键盘 青轴，2 号是键帽 单个，3 号是机械键盘 键帽套装。中间是 cjk 分词器把它们切成的两字词。右边是倒排索引：词典按字母序排好，每个词后面跟着出现过它的文档号和位置，比如“键盘”出现在 1 号和 3 号，“机械”出现在 1 号和 3 号，“键帽”出现在 2 号和 3 号。搜“键盘”时，先把查询也切成词，在词典里找到“键盘”，直接拿到文档 1 和 3，不用逐行扫描。">
+  <text class="t-h" x="16" y="24">原文</text>
+  <rect x="16" y="36" width="230" height="40" rx="8" class="b-card"/><text class="t-s" x="28" y="61">1 · 88 号机械键盘 青轴</text>
+  <rect x="16" y="84" width="230" height="40" rx="8" class="b-card"/><text class="t-s" x="28" y="109">2 · 键帽 单个</text>
+  <rect x="16" y="132" width="230" height="40" rx="8" class="b-card"/><text class="t-s" x="28" y="157">3 · 机械键盘 键帽套装</text>
+  <line x1="250" y1="104" x2="296" y2="104" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="252" y="96">分词</text>
+  <text class="t-h" x="302" y="24">cjk 分词器切出的词</text>
+  <text class="t-mono" x="302" y="61">88 号机 机械 械键 键盘 青轴</text>
+  <text class="t-mono" x="302" y="109">键帽 单个</text>
+  <text class="t-mono" x="302" y="157">机械 械键 键盘 键帽 帽套 套装</text>
+  <line x1="566" y1="104" x2="606" y2="104" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text class="t-xs" x="566" y="96">按词归并</text>
+  <text class="t-h" x="612" y="24">倒排索引（词典 → 倒排表）</text>
+  <g class="t-mono">
+    <rect x="612" y="36" width="332" height="182" rx="10" class="b-card"/>
+    <text class="t-mono" x="624" y="58">机械  → 1(pos 2)  3(pos 0)</text>
+    <text class="t-mono" x="624" y="80">键盘  → 1(pos 4)  3(pos 2)</text>
+    <text class="t-mono" x="624" y="102">键帽  → 2(pos 0)  3(pos 3)</text>
+    <text class="t-mono" x="624" y="124">青轴  → 1</text>
+    <text class="t-mono" x="624" y="146">套装  → 3</text>
+    <text class="t-mono" x="624" y="168">88    → 1</text>
+    <text class="t-xs" x="624" y="200">词典有序，能二分查找；每个词带着文档号和位置</text>
+  </g>
+  <text class="t-b" x="16" y="214">搜“键盘”：查询也切词 → 词典里找到“键盘” → 直接拿到 1、3，不扫描原文</text>
+</svg>
+  </div>
+  </figure>
+  <p>B+ 树是“按值找行”，倒排索引是“按词找文档”。位置信息让它还能做短语查询：“机械键盘”要求“机械”和“键盘”在同一文档里相邻。<b>分词器决定了词典里有什么</b>：默认的 <code>standard</code> 分词器把中文一个字切一个词，搜“键盘”就变成“键”或“盘”，会混进“键帽”“硬盘”（⑤ 实测 58340 单 vs 41862 单）；内置的 <code>cjk</code> 分词器两个字一组，好得多；生产上常装 IK、smartcn 这类按词典切词的插件。</p>
+
+  <div class="lab" id="iv" data-role="bk">
+    <h3>倒排索引演示台</h3>
+    <div class="guess" id="iv-guess">
+      <p>先猜：用默认的 <code>standard</code> 分词器，搜“键盘”，下面 5 单里会命中几单？</p>
+      <div class="opts" role="group" aria-label="猜一个答案">
+        <button type="button" data-g="2">2 单（只有含“键盘”的）</button><button type="button" data-g="4">4 单</button><button type="button" data-g="5">5 单全中</button><button type="button" class="skip" data-g="skip">不猜，直接看</button>
+      </div>
+      <p class="res" id="iv-res" hidden></p>
+    </div>
+    <div class="ctl-grid">
+      <div><p class="lbl">分词器</p><div class="pick2" id="iv-a" role="group" aria-label="分词器">
+        <button type="button" data-v="standard" aria-pressed="true">standard</button><button type="button" data-v="cjk" aria-pressed="false">cjk</button></div></div>
+      <div><p class="lbl">查询方式</p><div class="pick2" id="iv-m" role="group" aria-label="查询方式">
+        <button type="button" data-v="or" aria-pressed="true">match（任一词）</button><button type="button" data-v="and" aria-pressed="false">match + and</button><button type="button" data-v="phrase" aria-pressed="false">match_phrase</button></div></div>
+      <div><p class="lbl"><label for="iv-q">搜什么</label></p><input id="iv-q" class="iv-q" type="text" value="键盘" maxlength="20"></div>
+    </div>
+    <div class="iv-wrap">
+      <div><p class="lbl">5 单订单的标题（命中的标绿）</p><ol class="iv-docs" id="iv-docs"></ol></div>
+      <div><p class="lbl">词典和倒排表（查询用到的词标绿）</p><div class="iv-dict" id="iv-dict"></div></div>
+    </div>
+    <p class="verdict" id="iv-verdict"></p>
+    <p class="cap">分词是简化模拟，结果和 ES 9.5.5 的 <code>_analyze</code> 实测一致（“88 号机械键盘 青轴”：standard → 88 号 机 械 键 盘 青 轴；cjk → 88 号机 机械 械键 键盘 青轴）。打分（BM25）没有模拟。</p>
+  </div>
+
+  <h3 id="m-type">机制 2：text 和 keyword，查询和过滤</h3>
+  <div class="design">
+    <div class="card" data-role="bk"><h3>text：先分词再建索引</h3><p>标题、收货人、商品描述。用 <code>match</code> 查，查询词也会被同一个分词器切开，结果按相关度（BM25）打分排序。</p></div>
+    <div class="card" data-role="pd"><h3>keyword：整个值当一个词</h3><p><code>shop_id</code>、<code>status</code>、订单号。用 <code>term</code> 精确匹配，放在 <code>filter</code> 里：不打分、结果能缓存，还能排序和聚合（靠列式的 doc values）。</p></div>
+  </div>
+  <p>不建 mapping 直接写，ES 会猜：字符串一律猜成 <code>text</code>（再加一个 <code>.keyword</code> 子字段）。⑤ 实测：<code>status = "WAIT_SHIP"</code> 被切成小写的 <code>wait_ship</code>，<code>term</code> 查 <code>"WAIT_SHIP"</code> 查到 0 条，查 <code>status.keyword</code> 才是 1 条。所以订单索引一定要先建 mapping。</p>
+
+  <h3 id="m-shard">机制 3：分片和路由</h3>
+  <ul class="steps-out" data-role="pd">
+    <li><b>分片</b><span>一个索引拆成几个主分片，分散到不同节点上；每个主分片可以有副本，挂在别的节点。⑤ 建了 3 个主分片（单节点所以 0 副本）。</span></li>
+    <li><b>路由</b><span>文档去哪个主分片：<code>shard = hash(_routing) % 主分片数</code>，<code>_routing</code> 默认是文档 <code>_id</code>。⑤ 写 10 万单，3 个分片各分到 33231、33219、33550 个，很均匀。</span></li>
+    <li><b>主分片数定了就不能直接改</b><span>改了，公式里的除数就变了，每个文档该在哪都变了。要么重建索引（reindex），要么用 <code>_split</code> 按整数倍拆。和订单库“表数一次规划够”是同一个道理（<a href="../database/sharding-shardingsphere.html#m-cap">第 1 页机制 4</a>）。</span></li>
+    <li><b>和订单库分片的区别</b><span>订单库按 <code>user_id</code> 分片，为的是“我的订单”只查一张表；ES 按 <code>_id</code> 散开，搜索默认问所有分片。也可以指定 <code>routing = shop_id</code>，让一个商家的订单都在一个分片，商家查询只问一个分片；代价是大商家会让那个分片变胖（第 1 页试验台里的 47%）。</span></li>
+  </ul>
+
+  <h3 id="m-write">机制 4：一次写入，为什么 1 秒后才搜得到</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="ES 写入一个文档的过程。请求到协调节点，按路由算出主分片，转给主分片。主分片把文档写进内存缓冲，同时追加到 translog（默认每次请求都刷盘），再并行转给副本，副本做同样的事，都完成后返回成功。这时文档还搜不到。每隔 1 秒，refresh 把内存缓冲里的文档写成一个新的 segment（不可变的小倒排索引），从这一刻起才能被搜到。flush 把 segment 真正落盘并清理 translog；后台还会把小 segment 合并成大的。">
+  <rect x="16" y="20" width="140" height="56" rx="12" class="b-card"/><text class="t-b" x="28" y="44">协调节点</text><text class="t-xs" x="28" y="64">按路由找主分片</text>
+  <line x1="158" y1="48" x2="196" y2="48" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="200" y="12" width="330" height="140" rx="14" class="b-dash"/>
+  <text class="t-b" x="212" y="32">主分片</text>
+  <rect x="212" y="44" width="148" height="44" rx="10" class="b-bk"/><text class="t-s" x="222" y="64">内存缓冲</text><text class="t-xs" x="222" y="80">还搜不到</text>
+  <rect x="370" y="44" width="148" height="44" rx="10" class="b-neu"/><text class="t-s" x="380" y="64">translog</text><text class="t-xs" x="380" y="80">追加写，默认每次刷盘</text>
+  <text class="t-xs" x="212" y="112">两边都写完，再并行转给副本；</text>
+  <text class="t-xs" x="212" y="130">副本也写完，才回“成功”</text>
+  <line x1="532" y1="66" x2="566" y2="66" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="570" y="20" width="140" height="56" rx="12" class="b-dash"/><text class="t-b" x="582" y="44">副本分片</text><text class="t-xs" x="582" y="64">同样写缓冲 + translog</text>
+  <line x1="286" y1="152" x2="286" y2="186" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text class="t-of" x="294" y="174">每 1 秒 refresh</text>
+  <rect x="200" y="190" width="330" height="48" rx="10" class="b-good"/><text class="t-b" x="212" y="212">新 segment（不可变的小倒排索引）</text><text class="t-xs" x="212" y="230">从这一刻起能搜到：近实时</text>
+  <line x1="532" y1="214" x2="566" y2="214" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="570" y="190" width="374" height="48" rx="10" class="b-card"/><text class="t-s" x="582" y="210">flush：segment 落盘、清理 translog</text><text class="t-xs" x="582" y="228">merge：后台把小 segment 合并成大的</text>
+  <text class="t-b" x="740" y="44">⑤ 实测（refresh 1 s）</text>
+  <text class="t-xs" x="740" y="64">写入后可见：484～915 ms</text>
+  <text class="t-xs" x="740" y="82">wait_for 写请求：约 870 ms</text>
+  <text class="t-xs" x="740" y="100">空闲 30 s 后：搜索顺带 refresh</text>
+</svg>
+  </div>
+  </figure>
+  <div class="design">
+    <div class="card" data-role="other"><h3>被放弃的设计：每写一条就能搜到</h3><p>每个文档写完立刻生成一个能搜的 segment。segment 是不可变的，这样就会产生海量只有一两条文档的小 segment：每次搜索要挨个查，合并它们又要消耗大量 IO。</p></div>
+    <div class="card" data-role="bk"><h3>ES 的选择：攒一秒，写成一个 segment</h3><p>不可变的 segment 不用加锁、能被操作系统缓存、容易压缩；代价是写入和可见之间有最多约 1 秒的间隔。translog 保证这一秒里的数据宕机不丢，refresh 负责“能搜到”，flush 负责“落盘”，三件事分开。</p></div>
+  </div>
+  <p class="verdict">决定胜负的约束：<b>倒排索引按词组织，改一个文档会牵动很多词的倒排表，原地更新代价太高，所以 Lucene 的 segment 只追加、不修改</b>。“近实时”是这个设计的直接后果；更新一个文档，其实是标记旧版本删除、再写一个新版本。</p>
+
+  <h3 id="m-search">机制 5：一次搜索：先查后取（query then fetch）</h3>
+  <ul class="steps-out" data-role="bk">
+    <li><b>query</b><span>协调节点把查询发给每个分片（主或副本中的一个）。每个分片在自己的 segment 里找出排名前 <code>from + size</code> 的文档，只回文档号和排序值。</span></li>
+    <li><b>归并</b><span>协调节点把各分片的结果合起来排序，挑出全局的第 <code>from</code> 到 <code>from + size</code> 名。和 <a href="../database/sharding-cross-shard-query.html#m-merge">跨片分页</a>一模一样：翻得越深，每个分片要交出来的越多。</span></li>
+    <li><b>fetch</b><span>再去对应分片取这几条文档的内容（<code>_source</code>），返回给客户端。</span></li>
+    <li><b>深分页上限</b><span>所以 ES 默认 <code>from + size</code> 不能超过 10000（<code>index.max_result_window</code>），⑤ 实测超过直接 400；要往后翻用 <code>search_after</code>（ES 版的游标），导出全部用 point in time + search_after。</span></li>
+  </ul>
+
+  <h3>最少的写法</h3>
+  <div class="codebox" data-role="bk"><div class="code-bar"><b>建索引 + mapping</b><code>PUT /orders</code></div>
+<pre><code>{ "settings": { "number_of_shards": 3, "number_of_replicas": 1 },
+  "mappings": { "properties": {
+    "order_id": { "type": "long" },    "shop_id": { "type": "keyword" },  "status": { "type": "keyword" },
+    "title":    { "type": "text", "analyzer": "cjk" },   "receiver": { "type": "text", "analyzer": "cjk" },
+    "amount_cents": { "type": "long" }, "created_at": { "type": "date" } } } }</code></pre></div>
+  <div class="codebox" data-role="bk"><div class="code-bar"><b>商家 301 的查询</b><code>POST /orders/_search</code></div>
+<pre><code>{ "query": { "bool": {
+    "filter": [ { "term": { "shop_id": "301" } }, { "term": { "status": "WAIT_SHIP" } } ],   // 过滤：不打分、可缓存
+    "must":   [ { "match": { "title": "键盘" } } ] } },                                      // 全文：分词、打分
+  "sort": [ { "created_at": "desc" }, { "order_id": "desc" } ],
+  "size": 20 }</code></pre></div>
+  <p class="cap">Java 里可以用官方的 <code>co.elastic.clients:elasticsearch-java</code>（9.x）或 Spring Data Elasticsearch，DSL 结构和上面一样；⑤ 的实验直接用 JDK 的 HttpClient 调 REST，看得更清楚。</p>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>跑起来：单节点 ES，10 万单，七组实验</h2>
+  </div>
+  <p class="lead">Docker 起一个 Elasticsearch 9.5.5 单节点（关掉安全认证，堆 1 GB），建 <code>orders</code> 索引（3 个主分片），bulk 写 10 万单：50 个商家（301～350）、12 种商品标题、4 种状态。下面全是程序的真实输出。</p>
+  <div class="codebox" data-role="bk"><div class="code-bar"><b>怎么跑</b><code>JDK 17 · ES 9.5.5 容器 · 2 核 ARM 虚拟机</code></div>
+<pre><code>cd study-labs/java/search/es-inverted-index-shards
+DOCKER="sudo docker" ./run.sh new all     # 起容器、等 yellow，跑 setup load analyze search nrt deep mapping
+./run.sh again search                     # 容器留着，只重跑某一段
+./run.sh clean</code></pre></div>
+  <p><a href="https://github.com/archeu/study-labs/tree/main/java/search/es-inverted-index-shards">完整代码 →</a></p>
+  <div class="codebox" data-role="bk"><div class="code-bar"><b>EsLab 输出（节选）</b><code>真实输出</code></div>
+<pre><code>==== load：bulk 写 100000 单，11.5 s
+   分片 0（p）：33231 个文档，3.2mb
+   分片 1（p）：33219 个文档，3.2mb
+   分片 2（p）：33550 个文档，3.2mb
+==== analyze：“88 号机械键盘 青轴”被切成哪些词
+   standard：[88, 号, 机, 械, 键, 盘, 青, 轴]
+   cjk：[88, 号机, 机械, 械键, 键盘, 青轴]
+==== search：商家 301 + 待发货 + 标题含“键盘”，按时间倒序取 5 条
+   took 28 ms（ES 内部），往返 34.2 ms；命中 213（eq）；问了 3 个分片
+   10083820  88 号机械键盘 红轴  2026-11-14T23:59:35Z
+   10052090  88 号机械键盘 青轴  2026-11-14T17:55:13Z
+   …
+   全店：标题含“键盘”41862 单；短语“机械键盘”25020 单
+   同样搜“键盘”，standard 分词的 title.std：58340 单（混进了“键帽”“硬盘”）；operator=and：41862 单
+==== nrt 1：默认 refresh（1 s），写入后每 20 ms 搜一次，多久能搜到（10 次）
+   最快 484 ms，中位 877 ms，最慢 915 ms
+==== nrt 2：写入时带 ?refresh=wait_for，写请求本身要等多久（10 次）
+   写请求耗时：最快 858 ms，中位 871 ms，最慢 876 ms；返回后立刻搜，都能搜到
+==== nrt 3：35 s 没有任何搜索（分片进入 search idle），再写一单、马上搜一次
+   第一次搜索就搜到了，这次搜索耗时 12 ms
+   相关设置：{"orders":{"defaults":{"index":{"search":{"idle":{"after":"30s"}},"refresh_interval":"1s"}}}}
+==== deep：from = 10000, size = 10
+   → 400 Result window is too large, from + size must be less than or equal to: [10000] but was [10010]. …
+==== deep：search_after 一页一页往后翻（每页 1000，翻 12 页）
+   翻过 12000 条，1070 ms；最后一页的游标：[1794554517000,10091790]
+==== mapping：不建 mapping 直接写一单，status = "WAIT_SHIP"
+   动态映射出来的 status：{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":256}}}
+   term status = "WAIT_SHIP" → 0 条
+   term status.keyword = "WAIT_SHIP" → 1 条
+   status 字段里实际存的词：[wait_ship]</code></pre></div>
+  <p class="cap">nrt 3 跑了 3 次：两次第一次搜索就搜到（12 ms、16 ms，这次搜索顺带触发了 refresh），一次第一次没搜到。没有追查原因，结论写保守：空闲以后的第一次搜索通常会触发 refresh，但别依赖它。</p>
+  <p class="verdict"><b>到这里已经能交差了</b>：mapping 建好、商家查询用 filter + match，几十毫秒出结果；深分页改成 search_after。<b>已知还没处理的</b>：数据怎么从 MySQL 过来、晚多少、丢了怎么办（下一页）；刚下的单商家要等约 1 秒才搜到（<a href="#p-nrt">坑 4</a>）；中文分词还是 bigram（<a href="#p-cn">坑 2</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <h3>第一圈 · 不知道就会出事</h3>
+  <div class="pits">
+    <div class="pit" id="p-dyn"><b><em>1</em>没建 mapping，精确字段被猜成了 text<a class="rootmark" href="#m-type">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>⑤：<code>term status = "WAIT_SHIP"</code> 查到 0 条。字段已经建好就不能改类型，只能重建索引。</dd><dt>根源</dt><dd>动态映射把字符串都当 text，分词时转了小写。</dd><dt>做法</dt><dd class="fix">先建 mapping；用索引模板（index template）统一管理；生产索引设 <code>"dynamic": "strict"</code>，多一个没声明的字段就报错。</dd></dl>
+    </div>
+    <div class="pit" id="p-cn"><b><em>2</em>中文用默认分词器，搜出一堆不相干的<a class="rootmark" href="#m-inv">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>⑤：搜“键盘”，standard 分词命中 58340 单，比 cjk 的 41862 多出 1.6 万，全是“键帽”“硬盘”。</dd><dt>根源</dt><dd>standard 一个字一个词，“键盘”被拆成“键”或“盘”。</dd><dt>做法</dt><dd class="fix">至少用 <code>cjk</code>；商品、地址这类要按词切的，装 IK / smartcn 插件并维护自定义词典；改分词器要重建索引。</dd></dl>
+    </div>
+    <div class="pit" id="p-deep"><b><em>3</em>翻页超过 1 万条直接报错<a class="rootmark" href="#m-search">← ④ 机制 5</a></b>
+      <dl><dt>现象</dt><dd>⑤：<code>from = 10000, size = 10</code> 返回 400 <code>Result window is too large</code>。</dd><dt>根源</dt><dd>每个分片要交出 from + size 条，越深越贵，所以默认封顶 10000。</dd><dt>做法</dt><dd class="fix">页面上只给“下一页”，用 <code>search_after</code>；导出用 point in time + search_after。不要靠调大 <code>max_result_window</code> 解决。</dd></dl>
+    </div>
+    <div class="pit" id="p-nrt"><b><em>4</em>写完马上搜，搜不到<a class="rootmark" href="#m-write">← ④ 机制 4</a></b>
+      <dl><dt>现象</dt><dd>⑤：写入后要 0.5～0.9 秒才搜得到。商家刚改完备注、刷新列表，看到的还是旧的。</dd><dt>根源</dt><dd>refresh 每秒一次，之前的文档还在内存缓冲里。</dd><dt>做法</dt><dd class="fix">“刚改完要看到”的场景，在前端先展示本地结果，或者这一次直接查 MySQL；确实需要时单次写入带 <code>refresh=wait_for</code>（⑤：每次写要多等约 0.87 秒）。不要每次写都带 <code>refresh=true</code>，那会产生大量小 segment。</dd></dl>
+    </div>
+    <div class="pit" id="p-truth"><b><em>5</em>拿 ES 里的数据做决定<a class="rootmark" href="#s2">← ② 精华</a></b>
+      <dl><dt>现象</dt><dd>根据 ES 里“已支付”去发货，可这一单一秒前刚退款，ES 还没同步到。</dd><dt>根源</dt><dd>ES 是 MySQL 之后的一份异步副本，晚一两秒，还可能因为同步出错而不一致。</dd><dt>做法</dt><dd class="fix">ES 只返回候选订单号；任何写操作（发货、退款、改价）之前，按订单号回 MySQL 读一次再判断。</dd></dl>
+    </div>
+    <div class="pit" id="p-shards"><b><em>6</em>主分片数拍脑袋定，要改只能重建<a class="rootmark" href="#m-shard">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>（按文档）一开始 1 个主分片，数据长到几百 GB 才发现太大；或者一开始 50 个，每个只有几百 MB，集群元数据和搜索开销都很大。</dd><dt>根源</dt><dd>路由公式里除的是主分片数，它变了文档位置就全变了。</dd><dt>做法</dt><dd class="fix">按 3 年数据量估，官方建议单个分片几十 GB 以内；按时间滚动的数据（日志、历史订单）用按月索引 + 别名，新索引可以换分片数。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 团队里怎么用</h3>
+  <ul class="steps-out" data-role="done">
+    <li><b>索引模板 + 别名</b><span>业务代码只认别名 <code>orders</code>，背后是 <code>orders_v1</code>；改 mapping 时建 <code>orders_v2</code>、全量重灌、校验，再把别名切过去。防的是坑 1、2、6“只能重建”时要停服。</span></li>
+    <li><b>filter 放能缓存的条件</b><span>商家、状态、时间范围放 <code>filter</code>，只有关键词放 <code>must</code>。防的是给不需要打分的条件也算分，浪费 CPU。</span></li>
+    <li><b>只存要搜和要展示的字段</b><span>订单详情回 MySQL 查，ES 里不放大字段（地址全文、商品快照）。防的是索引膨胀、同步变慢。</span></li>
+    <li><b>不开放任意深度的翻页</b><span>产品上用“加载更多”。防的是坑 3。</span></li>
+  </ul>
+
+  <h3>第三圈 · 优化和深处</h3>
+  <ul class="steps-out" data-role="of">
+    <li><b>相关度：BM25</b><span>默认打分是 BM25：一个词在这单里出现越多、在所有订单里越少见，分越高；标题越短，命中的词分量越重。AI 地图站 06 的关键词检索用的就是它，和向量检索混合（hybrid search）时，BM25 负责“字面一致”。</span></li>
+    <li><b>doc values</b><span>排序、聚合不用倒排索引，用按列存的 doc values（写入时同时生成）。这就是 keyword 和数值字段能高效排序、聚合的原因；text 字段默认没有，不能直接排序。</span></li>
+    <li><b>批量写入调优</b><span>全量重灌时临时把 <code>refresh_interval</code> 设成 <code>-1</code>、副本数设成 0，灌完再改回来；bulk 每批几 MB。⑤ 单节点 bulk 10 万单用了 11.5 秒。</span></li>
+    <li><b>更新 = 删除 + 新增</b><span>改一单的状态，旧版本在 segment 里标记删除，新版本写进新 segment，合并时才真正清掉。订单状态变化频繁时，索引里会有不少“已删除”的文档，看 <code>_cat/indices</code> 的 <code>docs.deleted</code>。</span></li>
+  </ul>
+  <h3>下一圈</h3>
+  <ul class="steps-out" data-role="other">
+    <li><b>MySQL 到 ES 的同步</b><span>binlog → Canal → Kafka → ES：延迟多大、乱序怎么防、丢了怎么重灌：下一页。</span></li>
+    <li><b>集群</b><span>3 节点、1 副本：主分片挂了副本怎么升主，<code>wait_for_active_shards</code>，脑裂怎么防（ES 7 起的新选主算法）。</span></li>
+    <li><b>向量检索</b><span>ES 的 <code>dense_vector</code> 和 kNN，和 BM25 混合检索：接 AI 地图站 06。</span></li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>按商家路由</b>：建 <code>orders_by_shop</code>，写入时带 <code>?routing=商家号</code>，商家查询也带 routing，看 <code>_shards.total</code> 从 3 变成几；再看 3 个分片的文档数还均不均匀。（机制 3）</li>
+    <li><b>关掉 refresh 再灌</b>：<code>refresh_interval: -1</code>、灌 10 万单，比较 load 的耗时；灌完不 refresh 直接搜，能搜到几条？（第三圈）</li>
+    <li><b>strict mapping</b>：给 <code>orders</code> 加 <code>"dynamic": "strict"</code>，写一单多带一个 <code>remark</code> 字段，看报什么错。（坑 1）</li>
+    <li><b>更新</b>：把 1000 单的状态改一遍，看 <code>_cat/indices/orders?v</code> 里 <code>docs.deleted</code> 的变化，再 <code>_forcemerge</code> 一次。（第三圈）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>ES 先分词、再记“词 → 哪些文档”（倒排索引），专门用来“找”；它按 _id 把文档路由到分片，写入先进内存缓冲和 translog，每秒 refresh 成一个不可变的 segment 才能搜到，搜索先查各分片的前 N 名再取内容；它是订单库之后的一份近实时副本，只负责找，不负责做决定。</p></details>
+    <details><summary>2. MySQL 的 <code>LIKE '%键盘%'</code> 疼在哪？</summary><p>前缀是通配符，B+ 树按值排序帮不上，只能全表扫；没有相关度；分片以后还要每张表各扫一遍。</p></details>
+    <details><summary>3. 坑 4（写完搜不到）的根源是 ④ 的哪条？为什么 ES 不做成写完立刻可见？</summary><p>机制 4：文档先进内存缓冲，refresh（默认 1 秒）才生成能搜的 segment。segment 不可变，每写一条就生成一个会产生海量小 segment，搜索和合并都扛不住，所以攒一秒写一个。</p></details>
+    <details><summary>4. 预测：把 <code>orders</code> 的主分片从 3 个改成 6 个（不重建），会发生什么？</summary><p>不允许直接改（主分片数是建索引时定的）。假设能改，<code>hash(_id) % 6</code> 和 <code>% 3</code> 的结果不同，大部分文档按新公式应该在别的分片，按 id 取文档会找不到。所以只能 reindex，或者用 <code>_split</code> 拆成 3 的整数倍（每个旧分片拆成两个，文档位置可推算）。</p></details>
+    <details><summary>5. 预测：商家查询改成 <code>"from": 9990, "size": 20</code>，会怎样？如果 3 个分片换成 30 个，同样 <code>from: 9000, size: 20</code>，协调节点要处理多少条？</summary><p>第一个：from + size = 10010 &gt; 10000，直接 400。第二个：每个分片交出 9020 条的文档号和排序值，30 个分片共 27 万条在协调节点归并，只为 20 条：和订单库跨片分页同一个问题，分片越多越贵。</p></details>
+    <details><summary>6. 放回全景：第 11 站前后各发生了什么？ES 的 refresh 被人误设成 30 s，商家会看到什么？</summary><p>之前：第 10 站 Canal 把 binlog 转成消息，同步程序 bulk 写进 ES；之后：第 9 站商家后台查到订单号，再回 MySQL 取详情。refresh 30 s：同步链路照常，但写进去的订单最多要 30 秒才搜得到，商家看到“新订单迟迟不出现”；排查时会先怀疑 Canal 和 Kafka 延迟，其实同步早就完成了，卡在 ES 的可见性上。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM 虚拟机，JDK 17，Elasticsearch 9.5.5 单节点容器，堆 1 GB）：⑤ 的七组实验各跑 1 次，nrt 3 跑了 3 次；页面上的分片文档数、分词结果、命中数、可见延迟、报错信息都来自这些输出。倒排索引演示台是简化模拟（node 里跑过，分词结果和 <code>_analyze</code> 实测对过）。坑 5、6 按文档和机制推演。</p>
+  <p>按文档（Elasticsearch 9.x）：<code>index.refresh_interval</code> 默认 1 s，<code>index.search.idle.after</code> 默认 30 s（实测 <code>include_defaults</code> 也是这两个值）；<code>index.max_result_window</code> 默认 10000；<code>index.translog.durability</code> 默认 <code>request</code>；文档路由 <code>shard = hash(_routing) % 主分片数</code>，<code>_routing</code> 默认 <code>_id</code>；默认打分 BM25；主分片数建索引后不能改，可用 <code>_split</code> / <code>_shrink</code> / reindex。</p>
+  <p>相关：<a href="../java/pano-j11-order-table-sharding.html">全景：订单表从一张到八张</a> · <a href="../database/sharding-cross-shard-query.html">跨片查询与分页</a> · <a href="../database/mysql-index-bplustree.html">索引与 B+ 树</a> · <a href="../java/roadmap.html#j11">Java 地图 J11</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 倒排索引演示台：用两种分词器（简化模拟 standard 和 cjk）给几条订单标题建倒排索引，再跑 match / match_phrase。
+// standard：中日韩字符一个字一个词，英文和数字按单词切、转小写。
+// cjk：中日韩字符两两相邻组成一个词（bigram，单独一个字时保留单字），英文和数字同上。
+// 两种分词的结果已经和 ES 9.5.5 的 _analyze 实测对过（见 ⑤）。
+function isCJK(ch) { return /[㐀-鿿豈-﫿]/.test(ch); }
+function tokenize(text, analyzer) {
+  const out = [];
+  let pos = 0, i = 0;
+  const s = String(text);
+  while (i < s.length) {
+    const ch = s[i];
+    if (isCJK(ch)) {
+      let j = i;
+      while (j < s.length && isCJK(s[j])) j++;
+      const run = s.slice(i, j);
+      if (analyzer === "standard" || run.length === 1) {
+        for (const c of run) out.push({ t: c, pos: pos++ });
+      } else {
+        for (let k = 0; k + 1 < run.length; k++) out.push({ t: run.slice(k, k + 2), pos: pos++ });
+      }
+      i = j;
+    } else if (/[A-Za-z0-9]/.test(ch)) {
+      let j = i;
+      while (j < s.length && /[A-Za-z0-9]/.test(s[j])) j++;
+      out.push({ t: s.slice(i, j).toLowerCase(), pos: pos++ });
+      i = j;
+    } else {
+      i++;
+    }
+  }
+  return out;
+}
+function buildIndex(docs, analyzer) {
+  const dict = new Map();   // 词 → [{doc, positions}]
+  docs.forEach((d, id) => {
+    tokenize(d, analyzer).forEach(({ t, pos }) => {
+      if (!dict.has(t)) dict.set(t, new Map());
+      const p = dict.get(t);
+      if (!p.has(id)) p.set(id, []);
+      p.get(id).push(pos);
+    });
+  });
+  return [...dict.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1)
+    .map(([t, p]) => ({ term: t, postings: [...p.entries()].map(([doc, positions]) => ({ doc, positions })) }));
+}
+function search(docs, analyzer, q, mode) {
+  const index = buildIndex(docs, analyzer);
+  const byTerm = new Map(index.map(e => [e.term, e.postings]));
+  const qt = tokenize(q, analyzer);
+  const hits = new Set();
+  if (qt.length === 0) return { qt, hits: [], index };
+  if (mode === "phrase") {
+    const first = byTerm.get(qt[0].t) || [];
+    first.forEach(({ doc, positions }) => {
+      if (positions.some(p0 => qt.every((x, k) => (byTerm.get(x.t) || []).some(e => e.doc === doc && e.positions.includes(p0 + k))))) hits.add(doc);
+    });
+  } else if (mode === "and") {
+    docs.forEach((_, doc) => { if (qt.every(x => (byTerm.get(x.t) || []).some(e => e.doc === doc))) hits.add(doc); });
+  } else {
+    qt.forEach(x => (byTerm.get(x.t) || []).forEach(e => hits.add(e.doc)));
+  }
+  return { qt, hits: [...hits].sort((a, b) => a - b), index };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const DOCS = ["88 号机械键盘 青轴", "键帽 单个", "移动硬盘 1TB", "无线鼠标 静音", "机械键盘 键帽套装"];
+  let analyzer = "standard", mode = "or";
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  function render() {
+    const q = $("#iv-q").value;
+    const r = search(DOCS, analyzer, q, mode);
+    const qset = new Set(r.qt.map(x => x.t));
+    $("#iv-docs").innerHTML = DOCS.map((d, i) => {
+      const toks = tokenize(d, analyzer).map(x => `<code class="${qset.has(x.t) ? "on" : ""}">${esc(x.t)}</code>`).join("");
+      return `<li class="${r.hits.includes(i) ? "hit" : ""}"><b>${i + 1}</b><span class="t">${esc(d)}</span><span class="toks">${toks}</span></li>`;
+    }).join("");
+    $("#iv-dict").innerHTML = r.index.map(e =>
+      `<div class="row ${qset.has(e.term) ? "on" : ""}"><code>${esc(e.term)}</code><span>${e.postings.map(p => (p.doc + 1) + "<sub>" + p.positions.join(",") + "</sub>").join(" ")}</span></div>`).join("");
+    const modeName = mode === "or" ? "match（任一个词命中就算）" : (mode === "and" ? "match + operator=and（每个词都要有）" : "match_phrase（每个词都要有，而且位置相邻）");
+    let v = `“${esc(q)}”用 <b>${analyzer}</b> 切成 ${r.qt.length ? r.qt.map(x => "<code>" + esc(x.t) + "</code>").join(" ") : "（没有词）"}；${modeName}：命中 <b>${r.hits.length}</b> 单（${r.hits.map(h => h + 1).join("、") || "无"}）。`;
+    if (analyzer === "standard" && mode === "or" && r.qt.length > 1) v += " 一个字一个词，再按“任一词”匹配，所以混进了只含其中一个字的订单。";
+    if (analyzer === "cjk" && r.qt.length === 1) v += " 两字一组，查询本身就是词典里的一个词，只拿到真正含它的订单。";
+    $("#iv-verdict").innerHTML = v;
+  }
+
+  function wire(id, set) {
+    $$("#" + id + " button").forEach(b => b.addEventListener("click", () => {
+      $$("#" + id + " button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      set(b.dataset.v);
+      render();
+    }));
+  }
+  wire("iv-a", v => { analyzer = v; });
+  wire("iv-m", v => { mode = v; });
+  $("#iv-q").addEventListener("input", render);
+
+  const answer = String(search(DOCS, "standard", "键盘", "or").hits.length);
+  $$("#iv-guess .opts button").forEach(b => b.addEventListener("click", () => {
+    $$("#iv-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", String(x === b)); });
+    const g = b.dataset.g;
+    if (g !== "skip") b.classList.add(g === answer ? "right" : "wrong");
+    $$("#iv-guess .opts button").forEach(x => { if (x.dataset.g === answer) x.classList.add("right"); });
+    const res = $("#iv-res");
+    res.hidden = false;
+    res.innerHTML = (g === "skip" ? "" : (g === answer ? "猜对了。" : "没猜中。")) +
+      ` 命中 ${answer} 单：standard 把“键盘”切成“键”“盘”两个词，match 默认任一个词命中就算，于是“键帽”“移动硬盘”也进来了。把分词器换成 cjk 看看（④ 机制 1）。`;
+    analyzer = "standard"; mode = "or"; $("#iv-q").value = "键盘";
+    $$("#iv-a button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === "standard")));
+    $$("#iv-m button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === "or")));
+    render();
+  }));
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

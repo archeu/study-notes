@@ -230,3 +230,9 @@
 | 05 | [inventory-2 慢了，下单怎么还能降级：限流、熔断、降级与 Sentinel](https://archeu.github.io/study-notes/cloud/sentinel-circuit-breaker.html) | 雪崩怎么传上去、只有超时吞吐掉到 6% 实测、Hystrix / Sentinel / Resilience4j / 网格对比、熔断器状态机源码细节、按资源挡不按实例、限流和降级各算什么、半开放 1 个和放 10 个、交易靶场熔断开关三轮实测、六个误用，熔断调参台 |
 | 06 | [1024 先用上新版：灰度发布与流量治理](https://archeu.github.io/study-notes/cloud/gray-release.html) | 全量发布和只换一台疼在哪、滚动 / 蓝绿 / 金丝雀 / 功能开关 / 泳道对比、入口打一次标、hint 挑实例与找不到就退回全部、过滤层和缓存层的顺序、标记透传、先下线等缓存再停、五实例实测（写反顺序灰度失效、kill 失败 295 次对 0 次），发版计算器 |
 | 07 | [五个部件来自两个家族：Spring Cloud 与 Spring Cloud Alibaba 怎么选](https://archeu.github.io/study-notes/cloud/spring-cloud-vs-alibaba.html) | 全景每个部件来自哪个家族、Netflix 组件退场、纯 Spring Cloud / 混用 SCA / K8s 原生三种组合、Commons 定接口 SCA 填实现、Boot 牵头的版本对应表、为什么是版本列车、五种组合实测（只升一条线就找不到类、Boot 4.1 配 2025.1 能用）、五个坑与老组件迁移，版本对照器 |
+
+## 搜索
+
+| # | 页面 | 内容 |
+|---|------|------|
+| 01 | [商家 301 搜“键盘”：Elasticsearch 的倒排索引、分片、写入和查询](https://archeu.github.io/study-notes/search/es-inverted-index-shards.html) | J11 知识点 4：商家查询订单库为什么不擅长、LIKE / FULLTEXT / 异构索引表、ES vs OpenSearch vs OLAP、倒排索引与分词器（standard 把“键盘”拆成两个字，实测多命中 1.6 万单）、text vs keyword（动态映射 term 查不到）、分片路由、缓冲 + translog + 每秒 refresh 的近实时（实测 0.5～0.9 s 可见）、query then fetch 与 1 万条上限，倒排索引演示台 |
