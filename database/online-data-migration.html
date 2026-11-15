@@ -1,0 +1,1269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>不停机数据迁移</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, same family as the other notes. Knowledge-point page (learn, design-thought type) for J11 panorama stations 3, 4, 5: online migration from one table to 8 shards without downtime: dual write, backfill, chunk checksum verify, gray read switch, write switch with reverse dual write, rollback at every phase. Roles: other = old table, pd = new shards, cg = migration machinery (dual write, backfill, switch), of = verification, bad = races and pitfalls, done = safe choices. One interactive: the rollback bench (pure function over phases x incidents, checked in node). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+#cb-tiles .tile b{white-space:normal;font-size:20px}
+.strip45{display:grid;grid-template-columns:repeat(45,minmax(0,1fr));gap:2px}
+.strip45 i{display:block;height:26px;border-radius:3px;background:var(--good-tint);border:1px solid var(--good)}
+.strip45 i.o{background:var(--bad-tint);border-color:var(--bad)}
+.strip45 i.h{background:var(--warn-tint);border-color:var(--warn)}
+.strip45 i.n{background:var(--neutral-tint);border-color:var(--neutral)}
+.strip-ax{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.lg-row{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lg-row i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1px solid}
+
+/* sharding-key bench */
+.sk-wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.sk-bars{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;align-items:end;height:160px;padding:4px 6px 0;border-bottom:1.5px solid var(--line-strong)}
+.sk-bars .bar{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;min-width:0;gap:2px}
+.sk-bars .bar i{display:block;width:100%;background:var(--pd);border-radius:6px 6px 0 0;min-height:2px;transition:height .3s}
+.sk-bars .bar.hot i{background:var(--bad)}
+.sk-bars .bar.zero i{background:var(--line-strong)}
+.sk-bars .bar small{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);white-space:nowrap}
+.sk-names{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:2px 6px 0}
+.sk-names span{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);text-align:center}
+.sk-q td.n{font-family:var(--font-mono);white-space:nowrap}
+.sk-q td.one{color:var(--good);font-weight:700}
+.sk-q td.all{color:var(--bad);font-weight:700}
+@media (max-width:700px){.sk-wrap{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.sk-bars .bar i{transition:none}}
+
+/* paging calculator */
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>数据库</span><span aria-hidden="true">/</span><span class="tb-here">不停机数据迁移</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">停机迁移 vs 不停机 · 应用双写 · binlog 增量同步 · 分批搬运 · 版本保护 · INSERT IGNORE · 分块校验 BIT_XOR(CRC32) · 影子读 · 灰度切读 · 反向双写 · 回滚点 · MySQL 8.4 实测</p>
+  <h1>1.2 亿行搬进 8 张表，App 不停：不停机数据迁移</h1>
+  <p class="lead">不停机迁移的核心只有一句话：<b>在任何时刻，都有一边保存着完整、最新的数据，而且读写开关能拨回去</b>。为此把迁移拆成几个可以单独回退的阶段：先双写（旧表为主），再分批搬历史，再校验到差 0，然后先切读、后切写，切写以后旧表还要被反向双写一段时间。最容易出事的不是哪个阶段本身，而是阶段之间的<b>竞态</b>：搬运读到的旧值覆盖了双写刚写好的新值，两次更新到达新表的顺序反了。所以写新表要带版本保护，搬运永远不覆盖，最后靠校验兜底。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j11-order-table-sharding.html#s-3">订单表从一张到八张 · 第 3、4、5 站</a></span><span>地图：<a href="../java/roadmap.html#j11">J11 · 不停机数据迁移：双写、校验、灰度切换、回滚</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>J11 第 3 个知识点。前两页定好了新表的规则、改好了不带分片键的 SQL；这一页把 1.2 亿行老数据和源源不断的新流量一起搬过去。同样的思路在 <a href="mysql-online-ddl.html">Online DDL</a>（gh-ost 的影子表）和 <a href="mysql-84-upgrade.html">MySQL 升级</a>里都出现过。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：数据要搬，流量不能停，错了要能退</h2>
+  </div>
+  <p class="lead">在全景第 3～5 站，这一步要解决三件事同时成立：</p>
+  <div class="design">
+    <div class="card" data-role="cg"><h3>1. 不停服</h3><p>迁移要好几周（搬 1.2 亿行、校验、灰度），这期间每秒都有人下单、付款、发货。不能挂“系统维护中”。</p></div>
+    <div class="card" data-role="cg"><h3>2. 不丢、不错</h3><p>搬的时候旧表还在变：一单从“待支付”变成“已支付”，新表最后也必须是“已支付”，不能停在搬运那一刻的旧值。</p></div>
+    <div class="card" data-role="cg"><h3>3. 随时能退</h3><p>新表、新代码、新的分片 SQL 都可能有没测到的问题。任何一步发现不对，都要能在几秒内回到旧表，而且回去时数据是完整的。</p></div>
+  </div>
+  <p>地图上这一站“怎么算过关”的第一条就是它：<b>迁移的任何时刻都能回滚，说出靠什么</b>。</p>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>不用它会怎样：停机迁移算一笔账</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>停机迁移的一步</th><th>要多久 / 风险</th></tr></thead>
+      <tbody>
+        <tr><th>停写、导出 1.2 亿行</th><td id="m-downtime">按 ⑤ 里实测的搬运速度（4000～6500 行/秒，批间限速、2 核虚拟机、同时有业务流量）粗算，1.2 亿行光搬就要 <b>5～8 小时</b>；生产机器快几倍，也还是小时级的停服。</td></tr>
+        <tr><th>校验</th><td>停着机校验，越仔细停得越久；为了赶时间往往只比行数。</td></tr>
+        <tr><th>切换</th><td>一次全切：新代码、新表、新 SQL 同时上线，任何一处有问题都影响所有人。</td></tr>
+        <tr><th>回滚</th><td class="bad">切过去以后新产生的订单只在新表里，回到旧表就丢了这部分。所以实际上“切了就回不去”，只能硬着头皮修。</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>停机迁移的问题不只是停多久，更在于<b>它把所有风险压在一个不可逆的时刻</b>。不停机迁移把这个时刻拆成很多个小步，每一步都可逆，每一步都有数据说明能不能往下走。</p>
+  <div class="know" data-role="bad"><b>不懂精华时的典型误用</b><span>把“双写”当成迁移的全部：代码里写两遍，搬完数据就切。双写本身不保证一致（两个库没有共同的事务），搬运和双写之间还有竞态；没有校验和回滚开关的双写，只是把停机迁移的风险换了个时间点爆发。</span></div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种流派：增量怎么跟上</h2>
+  </div>
+  <p class="lead">搬历史数据（全量）的做法都差不多：按主键分批读、写。差别在<b>搬运期间的变化（增量）怎么同步过去</b>。</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>增量同步</th><th>怎么做</th><th>好处</th><th>代价</th></tr></thead>
+      <tbody>
+        <tr><th>应用双写</th><td>写旧表的代码后面再写一遍新表（经过 ShardingSphere）</td><td>完全可控；切写以后改成“新为主、反向写旧”就是现成的回滚通道</td><td>要改所有写入点；漏一个写入点（批处理、运维脚本）就漏数据；两库没有共同事务</td></tr>
+        <tr><th>binlog 增量同步（CDC）</th><td>读旧库的 binlog，按新规则写进 8 张表（Canal、阿里云 DTS、Debezium）</td><td>业务代码不用改；所有写入（包括手工 SQL）都会被捕获；顺序和 binlog 一致</td><td>多一套同步链路要运维；切写以后的反向同步要再搭一条；延迟要盯</td></tr>
+        <tr><th>中间件自带的迁移</th><td>ShardingSphere-Proxy：<code>MIGRATE TABLE</code> → <code>CHECK MIGRATION</code> → <code>COMMIT MIGRATION</code>（全量 + 增量 + 校验）</td><td>一条命令串起全量、增量和校验</td><td>要上 Proxy 和它的集群模式；切换窗口里要短暂停写</td></tr>
+        <tr><th>停机迁移</th><td>停写、导出、导入、切换</td><td>最简单，没有一致性问题</td><td>停服小时级，切了就回不去（②）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="verdict">选择规则：<b>写入点集中、团队能改代码 → 应用双写；写入点分散、多个服务和脚本都写这张表 → binlog 同步。</b>交易靶场的订单写入都在 <code>order-svc</code> 的一个 Repository 里，用应用双写，本页学它；binlog 那条路的机制在第 5 页（MySQL 到 ES 的同步）细讲，两者的竞态和校验思路是一样的。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>核心取舍：每一步都有一边是完整的，开关能拨回去</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <span><b>新表的规则</b>：<code>user_id % 8</code>，2 库 8 表，见 <a href="sharding-shardingsphere.html">第 1 页</a>。迁移的写入都经过 ShardingSphere，校验直接查 8 张真实表。</span>
+    <span><b>主键由应用生成</b>：两边用同一个 id，才能逐行对上。如果新表自己 AUTO_INCREMENT，迁移就无从比对，见 <a href="../arch/distributed-id.html">分布式 ID</a>。</span>
+    <span><b>配置中心</b>：读写开关放在 Nacos 这类配置中心，所有实例同时生效，见 <a href="../cloud/nacos-registry-config.html">Nacos</a>。</span>
+  </div>
+
+  <h3 id="m-phase">机制 1：七个阶段，谁是主、读哪边、怎么退</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="迁移的七个阶段。第 0 阶段旧表独占。第 1 阶段双写，旧表为主，新表跟着写。第 2 阶段搬运历史数据，第 3 阶段校验修复到差 0，这三个阶段读写的主都是旧表，回滚就是关掉双写。第 4 阶段灰度切读，部分用户读新表，写的主仍是旧表，回滚是把读开关拨回 0。第 5 阶段切写，新表为主，旧表被反向双写，回滚是把写主拨回旧表，旧表数据仍完整。第 6 阶段停写旧表，从这里开始没有回头路。">
+  <g>
+    <text class="t-b" x="16" y="58">写的主</text><text class="t-b" x="16" y="104">读</text><text class="t-b" x="16" y="150">另一边</text><text class="t-b" x="16" y="214">回滚</text>
+  </g>
+  <g>
+    <text class="t-h" x="96" y="26">0 旧表独占</text>
+    <rect x="96" y="40" width="112" height="28" rx="6" class="b-neu"/><text class="t-s" x="108" y="59">旧</text>
+    <rect x="96" y="86" width="112" height="28" rx="6" class="b-neu"/><text class="t-s" x="108" y="105">旧</text>
+    <text class="t-xs" x="96" y="150">新表为空</text>
+    <text class="t-xs" x="96" y="214">—</text>
+  </g>
+  <g>
+    <text class="t-h" x="220" y="26">1 双写</text>
+    <rect x="220" y="40" width="112" height="28" rx="6" class="b-neu"/><text class="t-s" x="232" y="59">旧</text>
+    <rect x="220" y="86" width="112" height="28" rx="6" class="b-neu"/><text class="t-s" x="232" y="105">旧</text>
+    <text class="t-xs" x="220" y="144">新表跟着写</text><text class="t-xs" x="220" y="160">失败只记日志</text>
+    <text class="t-good" x="220" y="214">关双写</text>
+  </g>
+  <g>
+    <text class="t-h" x="344" y="26">2 搬运</text>
+    <rect x="344" y="40" width="112" height="28" rx="6" class="b-neu"/><text class="t-s" x="356" y="59">旧</text>
+    <rect x="344" y="86" width="112" height="28" rx="6" class="b-neu"/><text class="t-s" x="356" y="105">旧</text>
+    <text class="t-xs" x="344" y="144">新表跟着写</text><text class="t-xs" x="344" y="160">+ 补老数据</text>
+    <text class="t-good" x="344" y="214">关双写</text>
+  </g>
+  <g>
+    <text class="t-h" x="468" y="26">3 校验</text>
+    <rect x="468" y="40" width="112" height="28" rx="6" class="b-neu"/><text class="t-s" x="480" y="59">旧</text>
+    <rect x="468" y="86" width="112" height="28" rx="6" class="b-neu"/><text class="t-s" x="480" y="105">旧</text>
+    <text class="t-xs" x="468" y="144">比对到差 0</text><text class="t-xs" x="468" y="160">以旧为准修</text>
+    <text class="t-good" x="468" y="214">关双写</text>
+  </g>
+  <g>
+    <text class="t-h" x="592" y="26">4 灰度切读</text>
+    <rect x="592" y="40" width="112" height="28" rx="6" class="b-neu"/><text class="t-s" x="604" y="59">旧</text>
+    <rect x="592" y="86" width="52" height="28" rx="6" class="b-pd"/><text class="t-xs" x="598" y="105">新 10%</text>
+    <rect x="648" y="86" width="56" height="28" rx="6" class="b-neu"/><text class="t-xs" x="654" y="105">旧</text>
+    <text class="t-xs" x="592" y="144">影子读：同时读旧</text><text class="t-xs" x="592" y="160">对比结果</text>
+    <text class="t-good" x="592" y="214">读拨回 0%</text>
+  </g>
+  <g>
+    <text class="t-h" x="716" y="26">5 切写</text>
+    <rect x="716" y="40" width="112" height="28" rx="6" class="b-pd"/><text class="t-s" x="728" y="59">新</text>
+    <rect x="716" y="86" width="112" height="28" rx="6" class="b-pd"/><text class="t-s" x="728" y="105">新</text>
+    <text class="t-xs" x="716" y="144">旧表被反向双写</text><text class="t-xs" x="716" y="160">（回滚通道）</text>
+    <text class="t-of" x="716" y="214">写主拨回旧</text><text class="t-xs" x="716" y="232">先补反向失败的行</text>
+  </g>
+  <g>
+    <text class="t-h" x="840" y="26">6 停旧</text>
+    <rect x="840" y="40" width="104" height="28" rx="6" class="b-pd"/><text class="t-s" x="852" y="59">新</text>
+    <rect x="840" y="86" width="104" height="28" rx="6" class="b-pd"/><text class="t-s" x="852" y="105">新</text>
+    <text class="t-xs" x="840" y="144">旧表只读备份</text>
+    <text class="t-bad" x="840" y="214">没有回头路</text>
+  </g>
+  <rect x="96" y="250" width="732" height="36" rx="10" class="b-good"/>
+  <text class="t-b" x="110" y="273">0～5 阶段：任何时刻都有一边完整、最新，开关能拨回去</text>
+  <rect x="840" y="250" width="104" height="36" rx="10" class="b-bad"/>
+  <text class="t-b" x="850" y="273">回滚点之后</text>
+</svg>
+  </div>
+  <figcaption class="cap">灰色是旧表，蓝色是新表。全景时间线：D-14 进 1，D-3 搬完，D-2 校验到 0，D 日切读，D+3 切写，D+14 停旧。</figcaption>
+  </figure>
+  <p>为什么先切读、后切写：读没有副作用，切错了拨回去，什么都没坏；写一旦以新表为主，新表上产生的数据就要想办法回到旧表。为什么切写以后还要反向双写：它让“回到旧表”在 D+3 到 D+14 之间仍然是无损的。停写旧表是整个迁移<b>唯一不可逆的一步</b>，所以放在最后，而且要等新表在全量流量下稳定跑过一段时间。</p>
+
+  <h3 id="m-race">机制 2：搬运和双写之间的竞态</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="竞态时间线。T1：搬运任务读出 id 9001 到 14000 这一批，其中 9527 是 PAID，版本 2，这批数据在应用内存里待着。T2：用户 1024 确认收货，旧表 9527 改成 SHIPPED 版本 3，双写把新表也写成 SHIPPED 版本 3。T3：搬运任务把内存里那批写进新表。如果用 upsert 覆盖，9527 变回 PAID 版本 2，状态倒退。如果用 INSERT IGNORE，新表已经有 9527，跳过，保持 SHIPPED 版本 3。另一种竞态：两次更新 v3、v4 先后提交到旧表，但写新表时 v4 先到、v3 后到；没有版本保护，新表停在 v3；带版本保护，只有更新的版本才覆盖，新表是 v4。">
+  <text class="t-b" x="16" y="40">搬运任务</text>
+  <text class="t-b" x="16" y="104">改状态请求</text>
+  <text class="t-b" x="16" y="168">新表里的 9527</text>
+  <line x1="120" y1="20" x2="120" y2="196" class="e-mut" style="stroke-dasharray:3 3"/><text class="t-xs" x="114" y="214">T1</text>
+  <line x1="400" y1="20" x2="400" y2="196" class="e-mut" style="stroke-dasharray:3 3"/><text class="t-xs" x="394" y="214">T2</text>
+  <line x1="680" y1="20" x2="680" y2="196" class="e-mut" style="stroke-dasharray:3 3"/><text class="t-xs" x="674" y="214">T3</text>
+  <rect x="124" y="22" width="270" height="32" rx="8" class="b-card"/><text class="t-s" x="134" y="43">读出一批：9527 = PAID v2（在内存里）</text>
+  <rect x="404" y="86" width="270" height="32" rx="8" class="b-card"/><text class="t-s" x="414" y="107">旧表 → SHIPPED v3，双写新表同样</text>
+  <rect x="404" y="150" width="270" height="32" rx="8" class="b-good"/><text class="t-s" x="414" y="171">SHIPPED v3 ✓</text>
+  <rect x="684" y="22" width="262" height="32" rx="8" class="b-card"/><text class="t-s" x="694" y="43">把内存里那批写进新表</text>
+  <rect x="684" y="134" width="262" height="28" rx="8" class="b-bad"/><text class="t-xs" x="694" y="152">upsert 覆盖 → PAID v2：状态倒退</text>
+  <rect x="684" y="168" width="262" height="28" rx="8" class="b-good"/><text class="t-xs" x="694" y="186">INSERT IGNORE → 已存在，跳过 ✓</text>
+  <text class="t-b" x="16" y="240">另一种：同一单两次更新 v3、v4，写新表时 v4 先到 → 不带版本保护停在 v3；带版本保护（版本更大才覆盖）停在 v4</text>
+</svg>
+  </div>
+  </figure>
+  <div class="design">
+    <div class="card" data-role="bad"><h3>naive：谁后到谁算</h3><p>双写用普通 upsert，搬运也用 upsert 覆盖。⑤ 实测：迁移期间改了 7024 次状态，校验找出 <b>95 行状态倒退</b>。</p></div>
+    <div class="card" data-role="done"><h3>safe：新的才算，搬运不碰已有的</h3><p>双写带版本保护：<code>IF(VALUES(version) &gt; version, …)</code>；搬运用 <code>INSERT IGNORE</code>：新表已经有这一行，说明双写写过，比搬运手里的更新。⑤ 实测：<b>状态倒退 0 行</b>。</p></div>
+  </div>
+  <p class="verdict">决定胜负的约束：<b>两个库之间没有共同的事务，写入到达新表的顺序不可控</b>。所以不能靠“先后顺序”保证正确，只能让每次写入自己判断“我是不是更新的那个”：版本号（或更新时间）就是这个判断的依据，搬运则干脆约定“永远让位于双写”。即便如此，新库写失败这种事还会发生，只能靠机制 3 的校验兜底。</p>
+
+  <h3 id="m-verify">机制 3：分块校验，先粗后细</h3>
+  <ul class="steps-out" data-role="of">
+    <li><b>分块</b><span>按主键切成块（⑤ 每块 1 万个 id），每块在旧表算一次 <code>COUNT(*)</code> 和 <code>BIT_XOR(CRC32(CONCAT_WS('#', id, user_id, status, version, amount_cents)))</code>。</span></li>
+    <li><b>新表合并</b><span>同一个 id 范围在新库的 8 张真实表各算一次：行数相加，校验和再异或一次。异或满足交换律和结合律，8 份结果怎么合都等于“把这些行放在一张表里算”，所以两边能直接比，不用把行拉出来。</span></li>
+    <li><b>逐行比</b><span>只有对不上的块才把两边的行拉出来逐行比，分出“缺行”“版本更旧”“其他不一致”，以旧表为准修复，再校验一遍。</span></li>
+    <li><b>流量还在跑时</b><span>正在被改的行两边可能暂时不一致（双写还没到）。生产上对不上的块隔几秒再比一次，两次都对不上的才算真问题；⑤ 为了数字干净，是停了流量再校验的。</span></li>
+    <li><b>只比行数不够</b><span>⑤ 里状态倒退的行，行数一点不差，只有校验和能发现。</span></li>
+  </ul>
+
+  <h3 id="m-switch">机制 4：开关怎么做</h3>
+  <ul class="steps-out" data-role="cg">
+    <li><b>放在配置中心</b><span><code>migration.read.newPercent</code>、<code>migration.write.primary</code> 两个开关放在 Nacos，所有实例几百毫秒内同时变；不要放在各实例的本地配置里，否则会有实例读新、有实例读旧。</span></li>
+    <li><b>按用户灰度</b><span><code>user_id % 100 &lt; 读比例</code> 的用户读新表。同一个用户每次落在同一边，不会这次看到新表、下次看到旧表。</span></li>
+    <li><b>影子读</b><span>灰度用户读新表的同时，再读一次旧表对比，不一致就打点报警（结果仍以新表返回，或者干脆先以旧表返回）。⑤ 切读 10% 时对比了 209 次，不一致 0 次。</span></li>
+    <li><b>切写</b><span>写主拨到新表以后，代码变成“先写新表，再反向写旧表”。反向写失败同样只记日志、靠校验补。</span></li>
+  </ul>
+
+  <div class="lab" id="rb" data-role="cg">
+    <h3>回滚推演台</h3>
+    <div class="guess" id="rb-guess">
+      <p>先猜：D+5，已经切写（新表为主），这时发现新表上有一批订单金额算错了。能无损回到旧表吗？</p>
+      <div class="opts" role="group" aria-label="猜一个答案">
+        <button type="button" data-g="yes">能，拨一下开关就行</button><button type="button" data-g="fix">能回，但要先修数据</button><button type="button" data-g="no">回不去了</button><button type="button" class="skip" data-g="skip">不猜，直接看</button>
+      </div>
+      <p class="res" id="rb-res" hidden></p>
+    </div>
+    <div class="ctl-grid">
+      <div style="grid-column:1 / -1"><p class="lbl">现在处在哪个阶段</p><div class="pick2" id="rb-p" role="group" aria-label="阶段"></div></div>
+      <div style="grid-column:1 / -1"><p class="lbl">发生了什么</p><div class="pick2" id="rb-i" role="group" aria-label="事故"></div></div>
+    </div>
+    <div class="tiles4" id="rb-tiles"></div>
+    <div class="lab-res" id="rb-out"></div>
+  </div>
+
+  <h3>最少的写法：带开关的 Repository</h3>
+  <div class="codebox" data-role="cg"><div class="code-bar"><b>OrderRepository（迁移期间）</b><code>开关来自配置中心</code></div>
+<pre><code>void updateStatus(Order o) {                      // o.version 已经 +1
+    if (sw.writePrimary() == OLD) {
+        oldDao.update(o);                         // 主：失败就抛，下单失败
+        try { newDao.upsertIfNewer(o); }          // 跟随：版本更大才覆盖
+        catch (Exception e) { compensationLog.add(o.getId(), e); }   // 只记，不影响用户
+    } else {
+        newDao.upsertIfNewer(o);                  // 切写以后反过来
+        try { oldDao.upsertIfNewer(o); } catch (Exception e) { compensationLog.add(o.getId(), e); }
+    }
+}
+List&lt;Order&gt; listMine(long userId) {
+    if (userId % 100 &lt; sw.readNewPercent()) {
+        List&lt;Order&gt; n = newDao.listByUser(userId);
+        shadowCompare(n, () -&gt; oldDao.listByUser(userId));   // 不一致就报警
+        return n;
+    }
+    return oldDao.listByUser(userId);
+}</code></pre></div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>套进场景：一次带流量的迁移演练，两种写法各跑一遍</h2>
+  </div>
+  <p class="lead">旧表 <code>order_db.t_order</code> 20 万行（1.2 亿行的缩小版），目标是 2 库 8 表。打开双写以后，4 个线程不停地改状态（30% 打在 200 个热点订单上，模拟同一单被连着改），1 个线程不停地下新单；写新库时随机注入千分之二的失败（只记日志、不重放）。搬运每批 5000 行、批间停 30 ms。搬完停流量，分块校验、逐行比对、修复、再校验，最后按用户灰度 10% 切读并对比。</p>
+  <div class="codebox" data-role="cg"><div class="code-bar"><b>怎么跑</b><code>JDK 17 · ShardingSphere 5.5.3 · MySQL 8.4.13 · 2 核 ARM 虚拟机</code></div>
+<pre><code>cd study-labs/java/database/online-data-migration
+DOCKER="sudo docker" ./run.sh new all      # naive 和 safe 各跑一遍完整演练，约 2 分钟
+./run.sh clean</code></pre></div>
+  <p><a href="https://github.com/archeu/study-labs/tree/main/java/database/online-data-migration">完整代码 →</a></p>
+  <div class="codebox" data-role="cg"><div class="code-bar"><b>MigrationLab 的真实输出（naive 那一轮）</b><code>时间是从这一轮开始算的秒数</code></div>
+<pre><code>[  6.10 s] D-14 之前：旧表 200000 行，新表 8 张、空
+[  6.11 s] D-14：双写开关打开（旧表为主），4 个线程改状态、1 个线程下新单
+[ 55.22 s] 搬运完成：200000 行，49.1 s，4073 行/秒（每批 5000 行，批间停 30 ms 限速）
+[ 56.24 s] 停流量：迁移期间改状态 7024 次、下新单 2044 单、新库写失败 18 次（只记日志，不重放）
+[ 56.76 s] 第 1 次分块校验：21 块里 16 块对不上
+[ 57.31 s] 逐行比对：缺行 3，状态倒退（新表版本更旧）95，其他不一致 0
+[ 57.75 s] 以旧表为准修复 98 行
+[ 58.24 s] 第 2 次分块校验：21 块里 0 块对不上
+[ 58.77 s] 切读 10%：2000 次读里 209 次落到新表，和旧表对比不一致 0 次
+[ 58.77 s] 回滚演练：读开关拨回 0%，所有读回到旧表；旧表一直是主，数据完整</code></pre></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th class="num">改状态</th><th class="num">下新单</th><th class="num">新库写失败</th><th class="num">搬运速度</th><th class="num">对不上的块</th><th class="num">缺行</th><th class="num">状态倒退</th><th class="num">修复后</th></tr></thead>
+      <tbody>
+        <tr><th class="bad">naive：upsert 覆盖</th><td class="num">7 024</td><td class="num">2 044</td><td class="num">18</td><td class="num">4 073 行/秒</td><td class="num">16 / 21</td><td class="num">3</td><td class="num bad">95</td><td class="num">0 / 21</td></tr>
+        <tr><th class="fix">safe：版本保护 + INSERT IGNORE</th><td class="num">4 967</td><td class="num">1 460</td><td class="num">7</td><td class="num">6 532 行/秒</td><td class="num">1 / 21</td><td class="num">2</td><td class="num fix">0</td><td class="num">0 / 21</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">两轮的流量不完全一样（各跑一次，线程调度不同，naive 那轮搬得更慢、改状态更多），所以看量级：naive 的 95 行倒退来自机制 2 的两种竞态，safe 是 0；两轮的“缺行”都来自注入的写失败，只有校验能找出来。注入了 18 次和 7 次失败，最后只缺 3 行和 2 行，是因为很多失败的行后来又被改了一次或被搬运补上了。</p>
+  <p class="verdict"><b>到这里已经能交差了</b>：双写带版本保护、搬运不覆盖、分块校验修到差 0、读开关能拨回去。<b>已知还没处理的</b>：校验时流量还在跑（<a href="#p-inflight">坑 5</a>）、搬运打满主库（<a href="#p-throttle">坑 6</a>）、写入点不止一个（<a href="#p-writers">坑 7</a>）、切写和停旧的时机（<a href="#p-early">坑 4</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>反例和误用</h2>
+  </div>
+  <h3>第一圈 · 不知道就会出事</h3>
+  <div class="pits">
+    <div class="pit" id="p-overwrite"><b><em>1</em>搬运用旧值覆盖了双写写好的新值<a class="rootmark" href="#m-race">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>⑤ naive：95 行订单在新表里停在更早的状态（比如已发货变回已支付）。行数一点不差。</dd><dt>根源</dt><dd>搬运读出一批到写进去之间有时间差，这期间旧表上的行被改了，双写已经把新值写进新表，搬运又用手里的旧值覆盖。</dd><dt>做法</dt><dd class="fix">搬运只插不改（<code>INSERT IGNORE</code>）：新表已有的行一定是双写写的，比搬运手里的新。</dd></dl>
+    </div>
+    <div class="pit" id="p-reorder"><b><em>2</em>同一单两次更新，到达新表的顺序反了<a class="rootmark" href="#m-race">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>旧表上 v3、v4 依次提交，写新表时 v4 先到、v3 后到，新表停在 v3。⑤ naive 的 95 行倒退里有一部分是这种（热点订单被连着改），另一部分是坑 1；这一轮没有把两者分开计数，↺ 练习 1 可以分开量。</dd><dt>根源</dt><dd>两个库没有共同事务，旧表提交和写新表之间有网络抖动，两个线程的写入在新表上的先后不可控。</dd><dt>做法</dt><dd class="fix">新表写入带版本保护：<code>ON DUPLICATE KEY UPDATE status = IF(VALUES(version) &gt; version, VALUES(status), status), …, version = GREATEST(version, VALUES(version))</code>，version 放最后改。</dd></dl>
+    </div>
+    <div class="pit" id="p-fail"><b><em>3</em>以为“写失败记日志、事后重放”就够了<a class="rootmark" href="#m-verify">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>⑤ 两轮都注入了写失败，最后各缺 3 行、2 行，只有校验找出来了。生产上还会有日志本身没写成功、重放顺序不对、重放时又失败的情况。</dd><dt>根源</dt><dd>补偿日志和业务写入也不在一个事务里，它只能减少不一致，不能消除。</dd><dt>做法</dt><dd class="fix">补偿日志照做，但切换的依据是校验结果，不是“日志都重放完了”。</dd></dl>
+    </div>
+    <div class="pit" id="p-early"><b><em>4</em>读写一起切，或者切写的同时停写旧表<a class="rootmark" href="#m-phase">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>切换后发现新表有问题，想回去，旧表从切换那一刻起就没再更新，回去等于丢掉这段时间的订单。</dd><dt>根源</dt><dd>跳过了“读已切、写未切”和“写已切、旧表被反向双写”两个可回退的阶段。</dd><dt>做法</dt><dd class="fix">先切读、观察；再切写，同时打开反向双写；新表在全量流量下稳定跑一两周、反向双写的旧表校验也一直对得上，才停写旧表。</dd></dl>
+    </div>
+    <div class="pit" id="p-inflight"><b><em>5</em>流量没停时校验，报了一堆“不一致”<a class="rootmark" href="#m-verify">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>（按机制推演）校验读旧表那一刻和读新表那一刻之间，正好有行被改了，看起来对不上，其实双写马上就到。</dd><dt>根源</dt><dd>两边不是在同一个快照上比的。</dd><dt>做法</dt><dd class="fix">对不上的块隔几秒重比，两次都对不上才算；逐行修复前再读一次旧表；或者跳过最近几秒内更新过的行（看 <code>updated_at</code>）。</dd></dl>
+    </div>
+    <div class="pit" id="p-throttle"><b><em>6</em>搬运太快，把主库或从库打满<a class="rootmark" href="#s3">← ③ 全量搬运</a></b>
+      <dl><dt>现象</dt><dd>搬运按主键全速扫，主库 IO 和 CPU 冲高，下单变慢；从库回放跟不上，读从库的接口读到旧数据。</dd><dt>根源</dt><dd>搬运和业务共用同一个库。</dd><dt>做法</dt><dd class="fix">从从库读、往新库写；每批之间停顿（⑤ 停 30 ms），盯着主从延迟和主库负载动态调速，大促期间暂停。</dd></dl>
+    </div>
+    <div class="pit" id="p-writers"><b><em>7</em>漏了一个写入点<a class="rootmark" href="#s3">← ③ 应用双写的代价</a></b>
+      <dl><dt>现象</dt><dd>订单服务双写了，可还有一个对账任务、一个运维脚本直接 <code>UPDATE t_order</code>，这些修改只进了旧表。</dd><dt>根源</dt><dd>应用双写只覆盖改过的那段代码。</dd><dt>做法</dt><dd class="fix">迁移前用 binlog 或 <code>performance_schema</code> 统计有哪些账号、哪些应用在写这张表；收拢写入点，收不拢的改用 binlog 增量同步。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 团队里怎么做</h3>
+  <ul class="steps-out" data-role="done">
+    <li><b>迁移手册</b><span>每个阶段写清：进入条件（比如“校验差 0 且持续 24 小时”）、操作、观察指标、回滚动作、谁有权拍板。防的是凭感觉往下走。</span></li>
+    <li><b>开关演练</b><span>正式切换前，在预发和生产各演练一次“拨过去、拨回来”，确认所有实例同时生效。防的是关键时刻开关不灵。</span></li>
+    <li><b>持续校验</b><span>校验不是做一次：从开始双写到停写旧表，每天跑全量分块校验，切读后加上影子读对比。防的是坑 3、5。</span></li>
+    <li><b>迁移期间冻结表结构</b><span>两边都不做 DDL；必须做的，新旧两边一起做、校验字段一起改。防的是 <code>CONCAT_WS</code> 里少了一列、校验悄悄失效。</span></li>
+  </ul>
+
+  <h3>第三圈 · 深处</h3>
+  <ul class="steps-out" data-role="of">
+    <li><b>为什么是版本号而不是时间</b><span>用 <code>updated_at</code> 比较也行，但两个应用实例的时钟可能差几毫秒，同一毫秒内的两次更新也分不出先后。单调递增的版本号由旧表的行锁保证顺序，更可靠，这和 <a href="../arch/clock-timeout-retry.html">时钟与超时</a>那页讲的是一回事。</span></li>
+    <li><b>binlog 路线怎么防竞态</b><span>按 binlog 顺序回放天然保证了同一行的先后；全量搬运和增量回放之间的衔接，靠“先记下 binlog 位点、再开始全量，全量完成后从位点回放增量，回放要幂等”。gh-ost、ShardingSphere 的迁移任务、各家 DTS 都是这个结构。</span></li>
+    <li><b>反向双写的另一个用处</b><span>切写以后，旧表还能继续服务那些暂时没改造完的报表、对账程序，让它们慢慢迁。</span></li>
+  </ul>
+  <h3>下一圈</h3>
+  <ul class="steps-out" data-role="other">
+    <li><b>8 张扩到 64 张</b><span>源头已经是分片表，同时迁几十张，校验和开关都要按分片粒度做。</span></li>
+    <li><b>binlog 同步</b><span>Canal 读 binlog、按位点续传、乱序和幂等：第 5 页，同步到 ES 的那条链路就是同一个机制。</span></li>
+    <li><b>换库迁移</b><span>从 MySQL 迁到 TiDB / OceanBase：不改分片规则，改的是数据库，用它们自带的同步工具（TiDB DM 等）：第 6、7 页。</span></li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改演练</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>只改一半</b>：safe 模式里双写保留版本保护、搬运改回 upsert 覆盖，再跑一次，倒退的行是多了还是少了？反过来呢？（坑 1、2 各自贡献多少）</li>
+    <li><b>只比行数</b>：把校验的 SUM 改成只算 <code>COUNT(*)</code>，naive 那一轮第 1 次校验会报几块对不上？（坑 1 为什么“行数一点不差”）</li>
+    <li><b>不停流量校验</b>：把校验挪到停流量之前，看第 1 次报出来的块数，再隔 2 秒重比一次。（坑 5）</li>
+    <li><b>切写</b>：给 Repository 加上 <code>writePrimary = NEW</code> 的分支（先写新表、反向写旧表），切写以后再跑一轮校验。（机制 1 第 5 阶段）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>任何时刻都有一边完整、最新，读写开关能拨回去：双写（旧为主）→ 搬历史 → 校验到差 0 → 先切读 → 再切写（旧表被反向双写）→ 最后才停写旧表；写新表带版本保护、搬运只插不改、切换以校验结果为准。</p></details>
+    <details><summary>2. 停机迁移最大的问题是什么？</summary><p>不只是停服几个小时，而是把全部风险压在一个不可逆的时刻：切过去以后新订单只在新表，回到旧表就会丢，等于没有回滚。</p></details>
+    <details><summary>3. 坑 1 的根源是 ④ 的哪条？为什么 INSERT IGNORE 能解决？</summary><p>机制 2：搬运读出和写入之间旧表被改，双写已写入新值，搬运用旧值覆盖。INSERT IGNORE 让搬运在新表已有该行时什么都不做；而新表已有的行只可能是双写写的，一定不比搬运手里的旧。</p></details>
+    <details><summary>4. 预测：safe 模式下，如果双写对“新表里还没有这一行”的情况用的是 <code>UPDATE … WHERE id = ?</code>（不是 upsert），会出什么问题？</summary><p>搬运还没搬到的行，UPDATE 影响 0 行，什么都没写；之后搬运用 INSERT IGNORE 插入它读到的版本。如果搬运是在这次更新之前读的，就插入了旧值，而且以后不会再被纠正（直到下一次更新或校验）。所以双写要用 upsert 写整行：行不存在就插入当前最新值。</p></details>
+    <details><summary>5. 预测：D+5 已经切写，发现新表上一批订单金额算错了（新代码的 bug），回滚到旧表能解决吗？</summary><p>能回，但要先修数据：反向双写把新表上算错的金额也写进了旧表，直接拨回去，旧表上也是错的。要先用校验找出这批行、按正确逻辑修好两边，再决定是否回滚（推演台里选“切写 + 新表数据不对”）。</p></details>
+    <details><summary>6. 放回全景：第 4 站前后各发生了什么？如果第 4 站的校验只比了行数，第 5 站切读时会怎样？</summary><p>之前：第 3 站打开双写（旧表为主）；之后：第 5 站先切读再切写。只比行数：状态倒退的那些行（⑤ naive 是 95 行）不会被发现，切读后灰度用户看到“已发货的订单变回已支付”；影子读能报出来，如果连影子读也没做，就要等用户投诉，这时如果已经切写，问题就更难退回。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM 虚拟机，JDK 17，ShardingSphere-JDBC 5.5.3，MySQL 8.4.13 容器，旧表 20 万行）：⑤ 的 naive、safe 各完整跑 1 次，页面上的计数、速度、校验结果都来自这次输出。回滚推演台是按 ④ 阶段表写的纯函数（node 里跑过）。坑 5、6、7 按机制推演。</p>
+  <p>按文档：ShardingSphere-Proxy 数据迁移（<code>MIGRATE TABLE</code>、<code>CHECK MIGRATION</code>、<code>COMMIT MIGRATION</code>）；MySQL 8.4 的 <code>INSERT … ON DUPLICATE KEY UPDATE</code> 里 <code>VALUES()</code> 仍可用（已标为弃用）；<code>BIT_XOR</code>、<code>CRC32</code>。</p>
+  <p>按设计：迁移日程、灰度比例、批大小和限速、注入的失败率，是交易靶场的设计数字。</p>
+  <p>相关：<a href="../java/pano-j11-order-table-sharding.html">全景：订单表从一张到八张</a> · <a href="sharding-shardingsphere.html">第 1 页：分库分表与 ShardingSphere</a> · <a href="sharding-cross-shard-query.html">第 2 页：跨片查询</a> · <a href="mysql-online-ddl.html">Online DDL</a> · <a href="../arch/idempotency-design.html">幂等设计</a> · <a href="../java/roadmap.html#j11">Java 地图 J11</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 回滚推演台：迁移的 7 个阶段 × 3 种事故 → 回滚动作、数据风险、用户影响。
+// 规则来自本页 ④ 的阶段表：谁是写入的主、读从哪来、另一边是否还在被写。
+const PHASES = [
+  { k: "p0", name: "旧表独占", write: "旧", read: "旧", other: "新表不存在或为空" },
+  { k: "p1", name: "双写：旧为主", write: "旧", read: "旧", other: "新表跟着写，失败只记日志" },
+  { k: "p2", name: "搬运历史", write: "旧", read: "旧", other: "新表跟着写 + 搬运在补老数据" },
+  { k: "p3", name: "校验修复", write: "旧", read: "旧", other: "新表跟着写，比对到差 0" },
+  { k: "p4", name: "灰度切读", write: "旧", read: "部分用户读新", other: "新表跟着写，影子对比" },
+  { k: "p5", name: "切写：新为主", write: "新", read: "新", other: "旧表被反向双写" },
+  { k: "p6", name: "停写旧表", write: "新", read: "新", other: "旧表不再更新" }
+];
+const INCIDENTS = [
+  { k: "data", name: "新表数据不对" },
+  { k: "down", name: "新库宕机或很慢" },
+  { k: "bug", name: "分片后的新 SQL 有 bug" }
+];
+function rollback(phaseKey, incidentKey) {
+  const i = PHASES.findIndex(p => p.k === phaseKey);
+  const P = PHASES[i];
+  const r = { phase: P, level: "ok", action: "", data: "", users: "", primary: P.write };
+  if (i === 0) {
+    r.action = "还没开始迁移，不存在回滚。";
+    r.data = "无";
+    r.users = "无";
+    return r;
+  }
+  if (i <= 3) {
+    r.level = "ok";
+    r.action = incidentKey === "down"
+      ? "什么都不用回滚：新库的写失败只记日志、不影响下单（前提：写新库有短超时）。等新库恢复，靠校验补齐。"
+      : "关掉双写开关，清空新表，修好再从第 1 步重来。";
+    r.data = "无损：旧表一直是唯一的主，用户读的也是旧表。";
+    r.users = incidentKey === "down" && i >= 1 ? "下单每次多等一个写新库的超时（所以超时要短，或者改成异步）。" : "无感。";
+    return r;
+  }
+  if (i === 4) {
+    r.level = "ok";
+    r.action = "把读开关拨回 0%，所有读回到旧表。秒级生效（开关放在配置中心，所有实例同时变）。";
+    r.data = "无损：写入的主还是旧表。";
+    r.users = incidentKey === "down"
+      ? "灰度用户在拨回之前读失败或很慢。"
+      : "灰度用户在拨回之前可能看到错的数据（影子对比就是为了尽早发现）。";
+    return r;
+  }
+  if (i === 5) {
+    r.level = "warn";
+    r.action = "把写主拨回旧表、读也拨回旧表。旧表靠反向双写一直在更新，但反向双写失败的那些行要先用校验找出来补上。";
+    r.data = incidentKey === "data"
+      ? "有风险：新表上已经写错的数据，会通过反向双写一起写进旧表，回滚前要先修。"
+      : "基本无损：只差反向双写失败的那几行，校验能找出来。";
+    r.users = "切换的那几秒里，写入可能失败一次；之后回到迁移前的状态。";
+    return r;
+  }
+  r.level = "bad";
+  r.action = "没有回头路：旧表已经停写，和新表差了 D+14 之后的所有变化。只能在新库上修：用备份 + binlog 恢复，或者写修复脚本。";
+  r.data = incidentKey === "data" ? "要靠新库自己的备份和 binlog 找回。" : "取决于新库自己的高可用（主从切换、备份）。";
+  r.users = "要等新库修好。";
+  return r;
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  let phase = "p4", incident = "data";
+  $("#rb-p").innerHTML = PHASES.map((p, i) => `<button type="button" data-v="${p.k}" aria-pressed="${p.k === phase}">${i} ${p.name}</button>`).join("");
+  $("#rb-i").innerHTML = INCIDENTS.map(x => `<button type="button" data-v="${x.k}" aria-pressed="${x.k === incident}">${x.name}</button>`).join("");
+
+  function render() {
+    const r = rollback(phase, incident);
+    const role = r.level === "ok" ? "done" : (r.level === "warn" ? "of" : "bad");
+    const tiles = [
+      { k: "写入的主", v: r.phase.write, sub: r.phase.other, role: r.phase.write === "新" ? "pd" : "other" },
+      { k: "读", v: r.phase.read, sub: "", role: "other" },
+      { k: "能不能回到旧表", v: r.level === "ok" ? "能，无损" : (r.level === "warn" ? "能，先补数据" : "不能"), sub: "", role },
+      { k: "回滚要多久", v: r.level === "bad" ? "看修复" : "秒级", sub: r.level === "bad" ? "" : "拨配置中心的开关", role }
+    ];
+    $("#rb-tiles").innerHTML = tiles.map(t => `<div class="tile" data-role="${t.role}"><small>${t.k}</small><b>${t.v}</b><span>${t.sub}</span></div>`).join("");
+    const out = $("#rb-out");
+    out.dataset.role = role;
+    out.innerHTML = `<b>回滚动作</b>：${r.action}<ul><li><b>数据</b>：${r.data}</li><li><b>用户</b>：${r.users}</li></ul>`;
+  }
+
+  function wire(id, set) {
+    $$("#" + id + " button").forEach(b => b.addEventListener("click", () => {
+      $$("#" + id + " button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      set(b.dataset.v);
+      render();
+    }));
+  }
+  wire("rb-p", v => { phase = v; });
+  wire("rb-i", v => { incident = v; });
+
+  const answer = rollback("p5", "data").level === "warn" ? "fix" : (rollback("p5", "data").level === "ok" ? "yes" : "no");
+  $$("#rb-guess .opts button").forEach(b => b.addEventListener("click", () => {
+    $$("#rb-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", String(x === b)); });
+    const g = b.dataset.g;
+    if (g !== "skip") b.classList.add(g === answer ? "right" : "wrong");
+    $$("#rb-guess .opts button").forEach(x => { if (x.dataset.g === answer) x.classList.add("right"); });
+    const res = $("#rb-res");
+    res.hidden = false;
+    res.innerHTML = (g === "skip" ? "" : (g === answer ? "猜对了。" : "没猜中。")) +
+      " 能回，但要先修数据：切写以后旧表靠反向双写保持最新，新表上算错的金额也被原样写进了旧表。直接拨回去，旧表上也是错的。下面已经切到这一格。";
+    phase = "p5"; incident = "data";
+    $$("#rb-p button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === phase)));
+    $$("#rb-i button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === incident)));
+    render();
+  }));
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
