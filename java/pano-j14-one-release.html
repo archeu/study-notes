@@ -1,0 +1,983 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>一次发布，从合并到回滚</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; scenario panorama (reverse-learn) for Java map J14: hero + 11-stop strip, scene card + release/incident timeline, panorama map (top band = pipeline outside the cluster, stops 1-4; middle band = Kubernetes control plane and node, stops 5-8 snaking right-to-left; bottom band = after go-live, stops 9-11 with a dashed rollback route back to stop 4), 7-minute release time ruler with rolling-update staircase (JS-drawn from SIM data), walk-through stepper linked to the map, knowledge-point table, retell / predictions / next round. Roles: pd = CI/CD and release strategy, bk = Docker image, rn = config and secrets (deploy manifests), cg = Kubernetes core objects, g2 = resources, probes, HPA, of = Java in containers, bad = failure, other = neutral / old version. One interaction: the stepper. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:80px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:22px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:22px}
+.lead{color:var(--muted);max-width:46em}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .stop[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--bk)}
+.strip{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:4px;scrollbar-width:thin}
+.strip a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:5px 12px 5px 6px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.strip a:hover{border-color:var(--rc)}
+.strip a b{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--rc);color:var(--on-accent);font-family:var(--font-mono);font-size:12px;font-weight:600}
+.strip i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.where a{font-weight:500}
+
+/* ---------- scene ---------- */
+.scene-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:18px;align-items:start}
+.card{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:18px 20px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.facts{display:grid;grid-template-columns:4.2em minmax(0,1fr);gap:8px 12px;margin:0;font-size:15px}
+.facts dt{font-weight:700;color:var(--muted)}
+.facts dd{margin:0;min-width:0}
+.facts code{overflow-wrap:anywhere}
+.result{border-top:1.5px dashed var(--line);padding-top:12px;font-size:14.5px}
+.result b{color:var(--good)}
+.result .bad{color:var(--bad);font-weight:700}
+.tag-real{display:inline-block;font-size:12px;font-weight:700;padding:0 7px;border-radius:6px;background:var(--good-tint);color:var(--good);vertical-align:1px}
+.tag-doc{display:inline-block;font-size:12px;font-weight:700;padding:0 7px;border-radius:6px;background:var(--neutral-tint);color:var(--neutral);vertical-align:1px}
+.code-card h3{font-size:18px}
+.code-card p.cap{font-size:13.5px;color:var(--muted)}
+.code{margin:0;background:var(--code-bg);border:1px solid var(--line);border-radius:12px;padding:12px 0;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.6}
+.code .ln{display:grid;grid-template-columns:3.4em max-content;white-space:pre;padding-right:14px}
+.code .ln i{font-style:normal;text-align:center;font-family:var(--font-body);font-weight:700;color:var(--rc,transparent)}
+.code .ln.hl{background:color-mix(in srgb,var(--rc) 9%,transparent)}
+.code .cm{color:var(--muted)}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:56em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto;min-width:760px}
+.sv text{font-family:var(--font-body)}
+.sv .mono{font-family:var(--font-mono)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13.5px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend span::before{content:"";width:12px;height:12px;border-radius:3px;background:var(--rt);border:2px solid var(--rc)}
+
+/* map svg */
+.pmap .box rect{fill:var(--card);stroke:var(--rc);stroke-width:2}
+.pmap .box .bt{font-size:14px;font-weight:700;fill:var(--ink)}
+.pmap .box .bn{fill:var(--rc)}
+.pmap .box .bs{font-size:12px;fill:var(--muted)}
+.pmap .box{cursor:pointer;transition:opacity .25s}
+.pmap .box rect{transition:fill .25s,stroke-width .25s}
+.pmap .zone{fill:none;stroke:var(--line-strong);stroke-width:1.4;stroke-dasharray:6 5}
+.pmap .zl{font-size:12.5px;fill:var(--muted)}
+.pmap .client rect{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.pmap .client text{fill:var(--ink)}
+.pmap .host rect{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.pmap .host text{font-size:12px;fill:var(--ink)}
+.pmap .host.bad rect{fill:var(--bad-tint);stroke:var(--bad)}
+.pmap .host.bad text{fill:var(--bad)}
+.pmap .ed line,.pmap .ed path{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.pmap .ed.ret line,.pmap .ed.ret path{stroke-dasharray:5 4}
+.pmap .ed.bad line{stroke:var(--bad)}
+.pmap .ed{transition:opacity .25s}
+.pmap .el{font-size:11px;fill:var(--muted)}
+.pmap .el.bad{fill:var(--bad);font-weight:700}
+.pmap .mk{fill:var(--line-strong)}
+.pmap .mk-bad{fill:var(--bad)}
+/* walk highlighting (only on the clone inside .walk) */
+.walk .pmap .box{opacity:.28}
+.walk .pmap .box.past{opacity:.6}
+.walk .pmap .box.on{opacity:1}
+.walk .pmap .box.on rect{fill:var(--rt);stroke-width:3.2}
+.walk .pmap .ed{opacity:.3}
+.walk .pmap .ed.hot{opacity:1}
+.walk .pmap .ed.hot line,.walk .pmap .ed.hot path{stroke:var(--ink);stroke-width:2}
+.walk .pmap .ed.hot.bad line{stroke:var(--bad)}
+
+/* timing svg */
+.tim .lane{font-size:12px;fill:var(--ink)}
+.tim .pt{font-size:14px;font-weight:700;fill:var(--ink)}
+.tim .ps{font-size:12px;fill:var(--muted)}
+.tim .bar{fill:var(--bk)}
+.tim .bar.bad{fill:var(--bad)}
+.tim .bv{font-size:11.5px;fill:var(--muted)}
+.tim .bin{font-size:11.5px;fill:var(--on-accent);font-weight:700}
+.tim .tot{stroke:var(--ink);stroke-width:1.6;stroke-dasharray:4 3}
+.tim .tl{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.tim .ax{stroke:var(--line-strong);stroke-width:1.2}
+.tim .tk{font-size:11px;fill:var(--muted)}
+.tim .grid{stroke:var(--line);stroke-width:1}
+
+/* ---------- walk ---------- */
+.walk{display:flex;flex-direction:column;gap:14px;outline:none}
+.ctrl{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.btn[aria-pressed="true"]{background:var(--bk-tint);border-color:var(--bk)}
+.cnt{margin-left:auto;font-family:var(--font-mono);font-size:13px;color:var(--muted)}
+.walk-fig:empty{display:none}
+.stops{display:flex;flex-direction:column;gap:14px}
+.stop{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--rc);border-radius:14px;padding:16px 18px;display:flex;flex-direction:column;gap:8px}
+.stop h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:21px}
+.stop h3 .no{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:50%;background:var(--rc);color:var(--on-accent);font-family:var(--font-mono);font-size:14px;font-weight:600;flex:none;align-self:center}
+.stop p{font-size:15px;max-width:60em}
+.stop p > b:first-child{display:inline-block;min-width:5.2em;font-size:13px;color:var(--muted)}
+.stop .risk > b:first-child{color:var(--bad)}
+.stop .down > b:first-child{color:var(--rc)}
+.stop .jv{color:var(--muted);font-size:14px}
+.stop code{overflow-wrap:anywhere}
+.todo-chip{display:inline-block;font-size:12px;font-weight:700;padding:0 7px;border-radius:6px;border:1.5px dashed var(--line-strong);color:var(--muted);vertical-align:1px}
+.walk.js .stop{display:none}
+.walk.js .stop.cur{display:flex}
+
+/* ---------- nodes ---------- */
+.tbl{overflow-x:auto;background:var(--card);border:1.5px solid var(--line);border-radius:16px}
+table.nodes{border-collapse:collapse;width:100%;min-width:720px;font-size:14.5px;line-height:1.55}
+table.nodes th,table.nodes td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+table.nodes th{font-size:13px;color:var(--muted);font-weight:700}
+table.nodes tr:last-child td{border-bottom:0}
+table.nodes td.st{font-family:var(--font-mono);white-space:nowrap}
+table.nodes td.ord{white-space:nowrap}
+table.nodes td.ord b{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--ink);color:var(--paper);font-family:var(--font-mono);font-size:12.5px;margin-right:8px}
+table.nodes .why{color:var(--muted);font-size:13.5px}
+.dp{font-size:12px;color:var(--muted);white-space:nowrap}
+.aside-box{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:14px 18px;display:flex;flex-direction:column;gap:8px;font-size:14.5px}
+.aside-box h3{font-size:18px}
+.aside-box ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:6px}
+
+/* ---------- back ---------- */
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}
+.retell{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:8px}
+.retell li{padding-left:4px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p{font-size:14.5px}
+details p + p{margin-top:6px}
+details .from{font-size:13px;color:var(--muted)}
+.preds{display:flex;flex-direction:column;gap:10px}
+.mines{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:8px;font-size:15px}
+.next{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+.next .card h4{font-size:18px}
+.next .card p{font-size:14.5px;color:var(--muted)}
+
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+
+@media (max-width:860px){
+  .scene-grid,.two,.next{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:520px){
+  main{gap:64px;padding-block:28px 56px}
+  .facts{grid-template-columns:minmax(0,1fr);gap:2px 0}
+  .facts dd{margin-bottom:6px}
+  .cnt{margin-left:0;width:100%}
+}
+/* ---------- this page ---------- */
+.stop .log{font-size:13.5px;color:var(--muted);background:var(--code-bg);border:1px solid var(--line);border-radius:10px;padding:6px 10px}
+.stop .log code{font-size:12.5px;color:var(--ink)}
+.result .from{font-size:13px;color:var(--muted);margin-top:6px}
+#map > h3{font-size:20px;margin-top:8px}
+.note-p{font-size:14px;color:var(--muted);max-width:56em}
+table.runs td.num{font-family:var(--font-mono);white-space:nowrap;font-variant-numeric:tabular-nums}
+table.runs .bad-t{color:var(--bad);font-weight:700}
+/* race timeline */
+.race .lane{font-size:14px;font-weight:700;fill:var(--ink);font-family:var(--font-mono)}
+.race .lsub{font-size:12px;fill:var(--muted)}
+.race .axis{stroke:var(--line-strong);stroke-width:1.2}
+.race .tk{font-size:11.5px;fill:var(--muted)}
+.race .ev rect{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.race .ev text{font-size:13px;font-weight:700;fill:var(--ink)}
+.race .ev text.r{font-size:12px;font-weight:400;fill:var(--muted)}
+.race .ev.off rect{fill:none;stroke:var(--line-strong);stroke-dasharray:5 4}
+.race .ev.off text{fill:var(--muted);font-weight:400}
+.race .qv rect{fill:var(--card);stroke:var(--line-strong);stroke-width:1.4}
+.race .qv text{font-family:var(--font-mono);font-size:15px;font-weight:700;fill:var(--ink)}
+.race .qv.bad rect{fill:var(--bad-tint);stroke:var(--bad)}
+.race .qv.bad text{fill:var(--bad)}
+.race .lk{stroke:var(--line-strong);stroke-width:1.2;stroke-dasharray:3 3}
+.race .lk.bad{stroke:var(--bad)}
+.race .note{font-size:12.5px;fill:var(--muted)}
+.race .note.bad{fill:var(--bad);font-weight:700}
+
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+table.runs td.why code.bad{color:var(--bad)}
+/* J04: measured latency bars and connection dots */
+.lat .bar rect{fill:var(--rt);stroke:var(--rc);stroke-width:1.6}
+.lat .bl{font-size:12.5px;fill:var(--ink)}
+.lat .bv{font-size:12.5px;font-weight:700;fill:var(--ink);font-family:var(--font-mono)}
+.lat .gl{stroke:var(--line);stroke-width:1}
+.lat .gt{font-size:11px;fill:var(--muted);font-family:var(--font-mono)}
+.lat .dl{stroke:var(--bad);stroke-width:1.6;stroke-dasharray:5 4}
+.lat .dt{font-size:11.5px;fill:var(--bad);font-weight:700}
+.conn .dot{fill:var(--rt);stroke:var(--rc);stroke-width:1.4}
+.conn .ct{font-size:13px;font-weight:700;fill:var(--ink)}
+.conn .cs{font-size:12px;fill:var(--muted)}
+.conn .pipe{fill:var(--rt);stroke:var(--rc);stroke-width:2}
+.swipe{display:none;margin:0 0 6px;font-size:12px;color:var(--muted)}
+@media (max-width:800px){.swipe{display:block}}
+.tim .seg{fill:var(--rt);stroke:var(--rc);stroke-width:1.5}
+.tim .seg.bad{fill:var(--bad-tint);stroke:var(--bad)}
+.tim .sl{font-size:11.5px;fill:var(--ink)}
+.tim .sv2{font-size:11.5px;fill:var(--ink);font-family:var(--font-mono);font-weight:600}
+.tim .ld{stroke:var(--line-strong);stroke-width:1}
+.pmap .dep{font-size:11px;fill:var(--muted);font-family:var(--font-mono)}
+.pmap .dat{font-family:var(--font-mono);font-size:11.5px;fill:var(--ink);white-space:pre}
+.pmap .host text.dat{font-size:11.5px}
+.pmap .dat .k{fill:var(--muted)}
+.code.snip{padding:10px 14px;white-space:pre;font-size:12px}
+.code.snip .bad{color:var(--bad);font-weight:600}
+.code.snip .ok{color:var(--good);font-weight:600}
+.code.snip .cm{color:var(--muted)}
+.tim .mkc{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.tim .mkn{font-size:11px;font-weight:700;fill:var(--rc);font-family:var(--font-mono)}
+.tim .seg.other{fill:var(--neutral-tint);stroke:var(--neutral)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>Java 后端架构</span><span aria-hidden="true">/</span><span class="tb-here">全景：一次发布，从合并到回滚</span></div></nav>
+<main>
+
+<header class="hero">
+  <p class="kicker">JAVA 后端架构 · J14 云原生与交付 · 场景全景</p>
+  <h1>一次发布，从合并到回滚</h1>
+  <p class="lead">交易靶场 11 月 26 日下午，订单服务从 1.8.3 发到 1.8.4。14:02 合并代码，7 分钟后 4 个 Pod 全部换成新版，探针全过，大盘一切正常；到了 17:41 晚高峰，Pod 开始被一个接一个杀掉，日志里却没有一行 OutOfMemoryError。这张全景回答三件事：<b>代码怎么变成镜像</b>，镜像又怎么一个个替换掉线上的老 Pod 而不断流；<b>容器的边界</b>（requests、limits、cgroup）和 JVM 怎么对上；<b>出了事</b>，怎么在 1 分钟内回到上一个好版本。</p>
+  <nav class="strip" aria-label="十一站">
+    <a href="#s-1" data-role="pd"><b>1</b>CI 流水线</a><i>›</i>
+    <a href="#s-2" data-role="bk"><b>2</b>打镜像</a><i>›</i>
+    <a href="#s-3" data-role="bk"><b>3</b>推镜像</a><i>›</i>
+    <a href="#s-4" data-role="rn"><b>4</b>部署清单</a><i>›</i>
+    <a href="#s-5" data-role="cg"><b>5</b>Deployment</a><i>›</i>
+    <a href="#s-6" data-role="g2"><b>6</b>调度</a><i>›</i>
+    <a href="#s-7" data-role="of"><b>7</b>起容器和 JVM</a><i>›</i>
+    <a href="#s-8" data-role="g2"><b>8</b>探针</a><i>›</i>
+    <a href="#s-9" data-role="cg"><b>9</b>切流量</a><i>›</i>
+    <a href="#s-10" data-role="g2"><b>10</b>观察和扩容</a><i>›</i>
+    <a href="#s-11" data-role="pd"><b>11</b>回滚</a>
+  </nav>
+  <p class="where"><span>所在：<a href="roadmap.html#j14">Java 地图 J14 · 云原生与交付</a></span><span>上一站：<a href="pano-j13-late-night-alert.html">凌晨三点，告警响了</a></span><span>Docker 和 Kubernetes 基础和 <a href="../agent/roadmap.html#st10">AI 地图站 10</a> 共用：值班助手最后也要这样打包、上线、回滚</span><span>本页没有本机实测，数字都是 <span class="tag-doc">按设计</span> 或 <span class="tag-doc">按文档</span></span></p>
+</header>
+
+<!-- ============ 场景 ============ -->
+<section id="scene">
+  <h2>场景：发布时一切正常，晚高峰才出事</h2>
+  <div class="scene-grid">
+    <div class="card">
+      <dl class="facts">
+        <dt>谁</dt><dd>交易靶场的订单服务 <code>order-svc</code>，跑在 Kubernetes 上：一个 Deployment，4 个副本，每个 Pod 的 <code>requests</code> 是 CPU 500m、内存 1Gi，<code>limits.memory</code> 也是 1Gi。Spring Boot 3.5、JDK 21。前面是 Ingress，后面是 J13 那套 Prometheus 告警。</dd>
+        <dt>怎么发</dt><dd>GitHub Actions 跑测试、打镜像，推到 Harbor；流水线最后改部署仓库里的镜像 tag，Argo CD 把它同步进集群。滚动策略 <code>maxSurge: 1</code>、<code>maxUnavailable: 0</code>：先多起一个新的，新的 Ready 了再停一个老的。</dd>
+        <dt>埋了什么雷</dt><dd>1.8.4 的合并请求顺手改了一行环境变量：<code>JAVA_OPTS=-Xmx1g</code>，是从老虚拟机的启动脚本里抄来的。1.8.3 用的是 <code>-XX:MaxRAMPercentage=75</code>，堆上限 768 MiB。现在堆一个人就能占满 1 GiB 的 limit，元空间、线程栈、直接内存都没地方放了。</dd>
+        <dt>期望</dt><dd>发布全程不断流；出事时说得清 Pod 被 OOMKilled 和 Java 抛 OutOfMemoryError 的区别，1 分钟内发出回滚（地图上的两条过关标准）。</dd>
+      </dl>
+      <div class="result">
+        <p><span class="tag-doc">按设计推演</span> 下午流量小，堆只用到四五百 MB，探针、错误率、P99 都和 1.8.3 一样，发布“成功”。17:30 晚高峰，HPA 把副本扩到 6 个，扩出来的也带着 <code>-Xmx1g</code>。堆跟着流量涨过 800 MB，整个进程的内存越过 1Gi，<span class="bad">内核直接把它杀掉</span>：退出码 137，JVM 连抛异常、写堆转储的机会都没有。被杀的 Pod 上正在处理的下单请求全部断掉。</p>
+        <p class="from">本页没跑实验：Docker、Kubernetes、资源与探针几个知识点页，会在本机的 kind 集群里把这次发布真做一遍，把这颗雷真踩一次。</p>
+      </div>
+    </div>
+    <div class="card code-card">
+      <h3>时间线</h3>
+      <p class="cap">左边的号是这一行属于第几站。时间是交易靶场的设计。</p>
+<pre class="code"><span class="ln" data-role="pd"><i>1</i>14:02:00  合并请求进 main，流水线开始</span><span class="ln" data-role="bk"><i>2</i>14:05:20  测试过了，打镜像</span><span class="ln" data-role="bk"><i>3</i>14:06:10  推 order-svc:1.8.4-3f9c2ab</span><span class="ln hl" data-role="rn"><i>4</i>14:06:20  Argo CD 同步（带着 -Xmx1g）</span><span class="ln" data-role="cg"><i>5</i>14:06:30  新 ReplicaSet，第 1 个新 Pod</span><span class="ln" data-role="g2"><i>8</i>14:07:05  第 1 个新 Pod Ready</span><span class="ln" data-role="cg"><i>9</i>14:09:05  4 个全部换完</span><span class="ln" data-role="g2"><i>10</i>17:30     晚高峰，HPA 4 → 6</span><span class="ln hl" data-role="bad"><i></i>17:41     第 1 个 Pod 被 OOMKilled</span><span class="ln" data-role="bad"><i></i>17:44     第 2 个</span><span class="ln" data-role="other"><i></i>17:45     告警：10 分钟内重启 ≥ 2 次</span><span class="ln" data-role="pd"><i>11</i>17:46     describe pod：OOMKilled，137</span><span class="ln hl" data-role="pd"><i>11</i>17:47     git revert，Argo CD 同步</span><span class="ln" data-role="done"><i>11</i>17:50     6 个 Pod 全回 1.8.3</span></pre>
+      <p class="cap">发布本身 7 分钟；从第一次被杀（17:41）到全部回到老版本（17:50）9 分钟，其中定位 2 分钟，回滚动作 1 分钟内发出。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 全景图 ============ -->
+<section id="map">
+  <h2>全景图：十一站</h2>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv pmap" viewBox="0 0 960 470" role="img" aria-label="全景图，蛇形三行。第一行是集群外的流水线，从左到右：第 1 站 CI 流水线跑 mvn verify，交出 jar 包；第 2 站 docker build 多阶段构建，按层拆 jar；第 3 站推到 Harbor，只推变了的那一层；第 4 站改部署清单，新 tag、环境变量、Secret，由 Argo CD 同步。第二行是 Kubernetes 集群，从右到左：第 5 站 Deployment 控制器建新 ReplicaSet；第 6 站调度器按 requests 挑节点；第 7 站 kubelet 拉镜像、起容器，JVM 按 cgroup 定堆，1.8.4 的 -Xmx1g 埋在这里；第 8 站探针，startup 之后 readiness。第三行是上线以后，从左到右：第 9 站 Service 把流量切给新 Pod，老 Pod 优雅退出；第 10 站观察和 HPA 扩容，晚高峰 4 到 6 个副本；第 11 站 OOMKilled 之后回滚，虚线 git revert 回到第 4 站重新同步。">
+  <defs>
+    <marker id="pm-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker>
+  </defs>
+
+  <!-- 上：流水线 -->
+  <rect class="zone" x="12" y="12" width="936" height="124" rx="14"/>
+  <text class="zl" x="24" y="31">流水线：集群外，14:02 → 14:06（GitHub Actions → Harbor → 部署仓库）</text>
+  <g class="box" data-stop="1" data-role="pd">
+    <rect x="24" y="46" width="182" height="64" rx="12"/>
+    <text class="bt" x="36" y="72"><tspan class="bn">①</tspan> CI 流水线</text>
+    <text class="bs" x="36" y="93">mvn verify：编译、测试</text>
+  </g>
+  <g class="ed" data-edge="1"><line x1="208" y1="78" x2="256" y2="78" marker-end="url(#pm-ar)"/><text class="el" x="232" y="70" text-anchor="middle">jar 包</text></g>
+  <g class="box" data-stop="2" data-role="bk">
+    <rect x="260" y="46" width="182" height="64" rx="12"/>
+    <text class="bt" x="272" y="72"><tspan class="bn">②</tspan> docker build</text>
+    <text class="bs" x="272" y="93">多阶段，按层拆 jar</text>
+  </g>
+  <g class="ed" data-edge="2"><line x1="444" y1="78" x2="492" y2="78" marker-end="url(#pm-ar)"/><text class="el" x="468" y="70" text-anchor="middle">镜像层</text></g>
+  <g class="box" data-stop="3" data-role="bk">
+    <rect x="496" y="46" width="182" height="64" rx="12"/>
+    <text class="bt" x="508" y="72"><tspan class="bn">③</tspan> 推到 Harbor</text>
+    <text class="bs" x="508" y="93">只推变了的那一层</text>
+  </g>
+  <g class="ed" data-edge="3"><line x1="680" y1="78" x2="728" y2="78" marker-end="url(#pm-ar)"/><text class="el" x="704" y="70" text-anchor="middle">新 tag</text></g>
+  <g class="box" data-stop="4" data-role="rn">
+    <rect x="732" y="46" width="182" height="64" rx="12"/>
+    <text class="bt" x="744" y="72"><tspan class="bn">④</tspan> 部署清单</text>
+    <text class="bs" x="744" y="93">tag、env、Secret → Argo CD</text>
+  </g>
+  <g class="ed" data-edge="4"><line x1="823" y1="112" x2="823" y2="180" marker-end="url(#pm-ar)"/><text class="el" x="831" y="146">新 Pod 模板</text></g>
+
+  <!-- 中：集群 -->
+  <rect class="zone" x="12" y="150" width="936" height="150" rx="14"/>
+  <text class="zl" x="24" y="169">Kubernetes 集群：控制面决定，节点执行</text>
+  <g class="box" data-stop="5" data-role="cg">
+    <rect x="732" y="184" width="182" height="64" rx="12"/>
+    <text class="bt" x="744" y="210"><tspan class="bn">⑤</tspan> Deployment</text>
+    <text class="bs" x="744" y="231">新 ReplicaSet，一个个换</text>
+  </g>
+  <g class="ed" data-edge="5"><line x1="730" y1="216" x2="682" y2="216" marker-end="url(#pm-ar)"/><text class="el" x="706" y="208" text-anchor="middle">新 Pod</text></g>
+  <g class="box" data-stop="6" data-role="g2">
+    <rect x="496" y="184" width="182" height="64" rx="12"/>
+    <text class="bt" x="508" y="210"><tspan class="bn">⑥</tspan> 调度器</text>
+    <text class="bs" x="508" y="231">按 requests 挑节点</text>
+  </g>
+  <g class="ed" data-edge="6"><line x1="494" y1="216" x2="446" y2="216" marker-end="url(#pm-ar)"/><text class="el" x="470" y="208" text-anchor="middle">绑定节点</text></g>
+  <g class="box" data-stop="7" data-role="of">
+    <rect x="260" y="184" width="182" height="64" rx="12"/>
+    <text class="bt" x="272" y="210"><tspan class="bn">⑦</tspan> kubelet → JVM</text>
+    <text class="bs" x="272" y="231">拉层、起容器、定堆</text>
+  </g>
+  <g class="ed" data-edge="7"><line x1="258" y1="216" x2="210" y2="216" marker-end="url(#pm-ar)"/><text class="el" x="234" y="208" text-anchor="middle">进程起来</text></g>
+  <g class="box" data-stop="8" data-role="g2">
+    <rect x="24" y="184" width="182" height="64" rx="12"/>
+    <text class="bt" x="36" y="210"><tspan class="bn">⑧</tspan> 探针</text>
+    <text class="bs" x="36" y="231">startup → readiness</text>
+  </g>
+  <text class="el bad" x="260" y="270">⑦ cgroup 给的 memory.max = 1Gi，1.8.4 的 -Xmx1g 埋在这里</text>
+  <text class="el" x="260" y="289">每个新 Pod 约 35 秒到 Ready，4 个依次换完约 2 分半</text>
+  <g class="ed" data-edge="8"><line x1="115" y1="250" x2="115" y2="342" marker-end="url(#pm-ar)"/><text class="el" x="123" y="311">Ready</text></g>
+
+  <!-- 下：上线以后 -->
+  <rect class="zone" x="12" y="316" width="936" height="142" rx="14"/>
+  <text class="zl" x="134" y="335">上线以后：接流量、观察，出事就回滚</text>
+  <g class="box" data-stop="9" data-role="cg">
+    <rect x="24" y="346" width="182" height="64" rx="12"/>
+    <text class="bt" x="36" y="372"><tspan class="bn">⑨</tspan> Service 切流量</text>
+    <text class="bs" x="36" y="393">新的进，老的优雅退</text>
+  </g>
+  <g class="ed" data-edge="9"><line x1="208" y1="378" x2="256" y2="378" marker-end="url(#pm-ar)"/><text class="el" x="232" y="370" text-anchor="middle">换完</text></g>
+  <g class="box" data-stop="10" data-role="g2">
+    <rect x="260" y="346" width="182" height="64" rx="12"/>
+    <text class="bt" x="272" y="372"><tspan class="bn">⑩</tspan> 观察 + HPA</text>
+    <text class="bs" x="272" y="393">晚高峰 4 → 6 个副本</text>
+  </g>
+  <g class="ed bad" data-edge="10"><line x1="444" y1="378" x2="492" y2="378" marker-end="url(#pm-ar)"/><text class="el bad" x="468" y="370" text-anchor="middle">137</text></g>
+  <g class="box" data-stop="11" data-role="pd">
+    <rect x="496" y="346" width="182" height="64" rx="12"/>
+    <text class="bt" x="508" y="372"><tspan class="bn">⑪</tspan> 回滚</text>
+    <text class="bs" x="508" y="393">OOMKilled → git revert</text>
+  </g>
+  <g class="ed ret" data-edge="11"><path d="M680,378 H938 V78 H918" marker-end="url(#pm-ar)"/></g>
+  <text class="el" x="700" y="370">git revert：回到第 ④ 站重新同步</text>
+  <text class="el" x="700" y="390">老 ReplicaSet、老镜像都还在</text>
+  <text class="el" x="700" y="410">所以回滚比发布快</text>
+  <text class="el" x="24" y="440">⑨ 摘流量和停进程是两件异步的事：先从 EndpointSlice 摘掉，preStop 等 10 秒，再收 SIGTERM</text>
+</svg>
+    </div>
+    <figcaption class="cap">实线是发布往前走，虚线是回滚，红色是出事的地方。颜色按知识点分：CI/CD 与发布策略一色（①⑪），Docker 一色（②③），配置和密钥一色（④），Kubernetes 核心对象一色（⑤⑨），资源、探针、HPA 一色（⑥⑧⑩），Java 在容器里一色（⑦）。点图上的任何一站，跳到下面的讲解。</figcaption>
+  </figure>
+
+  <h3>7 分钟花在哪</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv tim" viewBox="0 0 960 272" role="img" aria-label="时间尺，14:02 到 14:09。第一行流水线：编译和测试 3 分 10 秒，打镜像 50 秒，推镜像加同步 20 秒。下面四行是四对 Pod 的滚动：每一行老 Pod 先在服务，新 Pod 启动 35 秒到 Ready 后，老 Pod 下线 15 秒；四对依次进行，14:06:30 开始，14:09:05 结束。">
+  <g id="tl-axis"></g>
+  <g id="tl-rows"></g>
+</svg>
+    </div>
+    <figcaption class="cap" id="tl-sum">从合并到全部换完 7 分 5 秒，其中测试占 3 分 10 秒。滚动 2 分 35 秒：每个新 Pod 35 秒到 Ready，Ready 之后才停一个老的，所以任何时刻能接流量的 Pod 都不少于 4 个。</figcaption>
+  </figure>
+</section>
+
+<!-- ============ 一步一步走 ============ -->
+<section id="walk">
+  <h2>一步一步走</h2>
+  <div class="walk" tabindex="0" aria-label="分步演示，左右方向键切换">
+    <div class="ctrl">
+      <button class="btn" type="button" id="w-prev">← 上一步</button>
+      <button class="btn primary" type="button" id="w-next">下一步 →</button>
+      <button class="btn" type="button" id="w-auto" aria-pressed="false">自动播放</button>
+      <button class="btn" type="button" id="w-reset">从头来</button>
+      <span class="cnt" id="w-cnt" aria-live="polite"></span>
+    </div>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box walk-fig" id="w-fig"></div>
+    <div class="stops">
+      <div class="stop" id="s-1" data-stop="1" data-role="pd">
+        <h3><span class="no">1</span>CI 流水线：先证明这次提交配得上一个版本号</h3>
+        <p>14:02 合并请求进了 main，GitHub Actions 起一台干净的机器，跑 <code>mvn -B verify</code>：编译、单元测试、用 Testcontainers 起 MySQL 的集成测试，一共 3 分 10 秒。全绿才往下走，任何一步红了，流水线停在这里。</p>
+        <p class="why"><b>为什么要它</b>在每个人自己的电脑上“能跑”不算数。每次合并都在同一个干净环境里从头构建、从头测试，坏的提交停在离它最近、修起来最便宜的地方。</p>
+        <p class="down"><b>往下一层</b>CI/CD 与发布策略 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>测试慢到大家想跳过，于是加一个“紧急发布跳过测试”的开关，然后它变成常态；或者没配依赖缓存，每次都从 Maven 中央仓库重新下载，3 分钟的流水线变成 10 分钟。</p>
+      </div>
+      <div class="stop" id="s-2" data-stop="2" data-role="bk">
+        <h3><span class="no">2</span>docker build：多阶段构建，按层拆 jar</h3>
+        <p>Dockerfile 分两个阶段。第一阶段在带 Maven 和 JDK 的镜像里打出 jar；第二阶段从 <code>eclipse-temurin:21-jre</code> 开始，用 Spring Boot 的分层模式把 jar 拆成四层依次 COPY：<code>dependencies</code>、<code>spring-boot-loader</code>、<code>snapshot-dependencies</code>、<code>application</code>。这次只改了业务代码，前三层命中缓存，50 秒构建完。</p>
+<pre class="code snip"><span class="cm"># 第二阶段：只要 JRE 和拆好的四层，变得最少的放最下面</span>
+FROM eclipse-temurin:21-jre
+COPY --from=build /x/dependencies/ ./
+COPY --from=build /x/spring-boot-loader/ ./
+COPY --from=build /x/snapshot-dependencies/ ./
+COPY --from=build /x/application/ ./     <span class="cm"># 只有这一层每次都变</span></pre>
+        <p class="why"><b>为什么要它</b>镜像是一层层叠起来的，某一层变了，它上面的层全部重建。Maven、源码、测试报告留在第一阶段，不进运行镜像；依赖放下面、业务代码放最上面，改一行代码只重建最上面那一层。</p>
+        <p class="down"><b>往下一层</b>Docker：镜像分层、多阶段构建 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>整个 fat jar 一层 COPY 进去，改一行代码就是几十 MB 的新层，推、拉都慢；基础镜像写 <code>latest</code>，昨天能构建的今天行为变了。</p>
+      </div>
+      <div class="stop" id="s-3" data-stop="3" data-role="bk">
+        <h3><span class="no">3</span>推到 Harbor：只推变了的那一层</h3>
+        <p><code>docker push harbor.lab/trade/order-svc:1.8.4-3f9c2ab</code>。仓库按每一层内容的摘要（digest）判断有没有，只有 <code>application</code> 那一层是新的，几秒就推完。tag 写版本号加 git 提交号，不用 <code>latest</code>。</p>
+        <p class="why"><b>为什么要它</b>镜像是“构建一次，到处运行”的那个包：测试环境验过的，就是生产上跑的，一个字节不差。同一个 tag 永远指向同一份内容，回滚时才有一个确定的东西可以回。</p>
+        <p class="down"><b>往下一层</b>Docker：镜像分层、多阶段构建 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>用会被覆盖的 tag（<code>latest</code>、<code>1.8</code>）发布：有的节点缓存着旧内容、有的拉到了新内容，同一个 Deployment 里跑着两份代码，还很难看出来。</p>
+      </div>
+      <div class="stop" id="s-4" data-stop="4" data-role="rn">
+        <h3><span class="no">4</span>部署清单：新 tag、环境变量、密钥，交给 Argo CD 同步</h3>
+        <p>流水线最后一步，把部署仓库里 <code>values.yaml</code> 的 <code>image.tag</code> 改成新的，提交。Argo CD 收到 webhook，对比 Git 和集群，把 Deployment、ConfigMap、Secret 同步进去。这次合并请求还改了一行 env：<code>JAVA_OPTS=-Xmx1g</code>，雷就是这时候进集群的。数据库密码在 Secret 里，以环境变量注入 Pod，不进镜像，也不以明文进 Git。</p>
+        <p class="why"><b>为什么要它</b>部署仓库是“集群应该长什么样”的唯一来源，这叫 GitOps：谁、什么时候、改了什么，都在 Git 历史里，回滚就是 revert 一个提交。镜像管“跑什么代码”，配置和密钥管“在哪个环境、用什么参数跑”，两样分开，同一个镜像才能从测试一路发到生产。</p>
+        <p class="down"><b>往下一层</b>CI/CD 与发布策略 <span class="todo-chip">待做</span>；Linux、脚本与配置密钥管理 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>把密码写进 ConfigMap 或镜像；以为 Secret 是加密的，其实默认只是 base64，Git 里要用 Sealed Secrets 或 External Secrets 这类方案。还有：只改 ConfigMap，Pod 不会自己重启，新配置要等下次重建才生效。</p>
+      </div>
+      <div class="stop" id="s-5" data-stop="5" data-role="cg">
+        <h3><span class="no">5</span>Deployment 控制器：建新 ReplicaSet，一个一个换</h3>
+        <p>API Server 收到的新 Pod 模板里，镜像和 env 都变了。Deployment 控制器按模板算出一个哈希，新建 ReplicaSet <code>order-svc-7c9d5f</code>；按 <code>maxSurge: 1</code>、<code>maxUnavailable: 0</code>，先把新的扩到 1 个，老的保持 4 个。后面每有一个新 Pod Ready，就把老的缩 1、新的扩 1，直到 4:0 换成 0:4。</p>
+        <p class="why"><b>为什么要它</b>这是声明式：只说“我要 4 个 1.8.4”，控制器不停地对比“想要的”和“现在的”，一步一步逼近。老的 ReplicaSet 缩到 0 但不删（默认留 10 个历史版本），回滚就是把它再扩回来。</p>
+        <p class="down"><b>往下一层</b>Kubernetes 核心：Pod、Deployment、Service、Ingress <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>不写策略就用默认的 25% / 25%：4 个副本时允许先停 1 个，发布那几分钟只剩 3/4 的容量，赶上高峰就被压垮。新 Pod 一直起不来时，滚动会停在半路，要到 <code>progressDeadlineSeconds</code>（默认 600 秒）才标记失败，它不会自己回滚。</p>
+      </div>
+      <div class="stop" id="s-6" data-stop="6" data-role="g2">
+        <h3><span class="no">6</span>调度器：按 requests 挑一个节点</h3>
+        <p>新 Pod 刚建出来时没有节点。调度器先过滤：哪些节点上还没被预订的 CPU 有 500m、内存有 1Gi；再给剩下的节点打分（比如尽量分散到不同节点），挑出一个，把节点名写回 Pod。</p>
+        <p class="why"><b>为什么要它</b>调度只看 <code>requests</code>，不看实际用了多少，也不看 <code>limits</code>。requests 是“预订”，保证每个 Pod 至少有这么多；limits 是“上限”，超了 CPU 会被限速，超了内存会被杀。</p>
+        <p class="down"><b>往下一层</b>弹性与资源：HPA、requests 和 limits、探针 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>requests 写得比实际小，节点被超卖，大家一起挤；写得太大，Pod 一直 Pending，滚动卡在第 1 个新 Pod 上。</p>
+      </div>
+      <div class="stop" id="s-7" data-stop="7" data-role="of">
+        <h3><span class="no">7</span>kubelet 起容器，JVM 按 cgroup 定堆</h3>
+        <p>选中节点上的 kubelet 让 containerd 拉镜像（节点上已经有前三层，只拉 <code>application</code> 那一层），再建一个 cgroup，把内存上限设成 1Gi，然后起进程。JVM 启动时读 cgroup，知道自己只有 1Gi 内存。1.8.3 按 <code>MaxRAMPercentage=75</code> 算出堆上限 768 MiB，剩下 256 MiB 给元空间、代码缓存、线程栈和直接内存；1.8.4 的 <code>-Xmx1g</code> 把堆写死成 1 GiB，剩下的是 0。Spring Boot 22 秒启动完。</p>
+        <p class="why"><b>为什么要它</b>容器不是虚拟机，它的边界是内核的 cgroup 划出来的。JVM 要按这个边界定堆、定 GC 线程数和 <code>availableProcessors</code>；按宿主机的 64 GB 来算，就会一启动就越界。</p>
+        <p class="down"><b>往下一层</b><a href="../jvm/jvm-container.html">Java 在容器里：内存、CPU</a>（有页）；启动速度 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>堆加上堆外超过 limit，内核直接 <code>SIGKILL</code>，Java 来不及抛 <code>OutOfMemoryError</code>，也不会写堆转储，这就是今晚的雷。反过来，堆真的满了，Java 抛 OOM，进程还活着、容器状态还是 Running，探针要是不查这个，Pod 就半死不活地挂着。</p>
+      </div>
+      <div class="stop" id="s-8" data-stop="8" data-role="g2">
+        <h3><span class="no">8</span>探针：先等它启动完，再让它接流量</h3>
+        <p><code>startupProbe</code> 每 5 秒问一次 <code>/actuator/health/liveness</code>，最多等 2 分钟；它通过之前，另外两个探针都不开始。通过以后，<code>readinessProbe</code> 问 <code>/actuator/health/readiness</code>，回 UP，Pod 变成 Ready，被加进 Service 的 EndpointSlice；<code>livenessProbe</code> 接着定期问，连续失败就重启容器。1.8.4 启动正常，探针全过，内存的雷要到晚上才响。</p>
+        <p class="why"><b>为什么要它</b>“进程起来了”不等于“能干活”。三种探针各管一件事：startup 管“启动完了没有”，免得启动慢被误判成死了；readiness 管“现在接不接流量”；liveness 管“要不要重启”。</p>
+        <p class="down"><b>往下一层</b>弹性与资源：HPA、requests 和 limits、探针 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>liveness 里也去查数据库，MySQL 抖 30 秒，所有 Pod 被一起重启，小抖动变成大事故；没有 startupProbe、liveness 又设得急，启动慢的应用还没起完就被杀，进入 CrashLoopBackOff。</p>
+      </div>
+      <div class="stop" id="s-9" data-stop="9" data-role="cg">
+        <h3><span class="no">9</span>Service 和 Ingress 切流量，老 Pod 优雅退出</h3>
+        <p>新 Pod 进了 EndpointSlice，Ingress 控制器和各节点的 kube-proxy 看到变化，开始把请求分给它。控制器随即把老 ReplicaSet 缩 1：被选中的老 Pod 先从 EndpointSlice 摘掉，<code>preStop</code> 里 sleep 10 秒，等各处都更新完，再收到 <code>SIGTERM</code>；Spring Boot 优雅停机，不接新请求、处理完手上的再退出。四轮下来约 2 分半。</p>
+        <p class="why"><b>为什么要它</b>“从 EndpointSlice 摘掉”和“给进程发 SIGTERM”是同时开始的两件事，各节点和 Ingress 更新转发表要一点时间。不等一等，就会有请求被发到一个已经在关门的进程上。</p>
+        <p class="down"><b>往下一层</b>Kubernetes 核心 <span class="todo-chip">待做</span>；信号和退出码在 Linux、脚本与配置密钥管理 <span class="todo-chip">待做</span></p>
+        <p class="risk"><b>常出的事</b>没有 preStop，每次发布都有零星 502，大家习惯了，以为是网络抖；<code>terminationGracePeriodSeconds</code>（默认 30 秒）比 preStop 加应用停机的时间还短，到点被 SIGKILL，手上的请求照样断。</p>
+      </div>
+      <div class="stop" id="s-10" data-stop="10" data-role="g2">
+        <h3><span class="no">10</span>发布后观察，晚高峰 HPA 扩容</h3>
+        <p>14:09 换完，大盘上 1.8.4 的错误率、P99 和 1.8.3 一样，看了 15 分钟，发布单关掉。17:30 晚高峰，HPA 看到平均 CPU 超过 requests 的 70%，把副本从 4 扩到 6。扩出来的 2 个 Pod 用的是同一份模板，也带着 <code>-Xmx1g</code>。流量大了，堆一路涨，17:41 第一个 Pod 被杀。</p>
+        <p class="why"><b>为什么要它</b>探针只能证明“能启动、能回健康检查”，内存、连接池、慢查询这类问题要真实流量压上来才显形，所以发布后要有一段观察。HPA 让副本数跟着负载走，不用为高峰常年多养机器。</p>
+        <p class="down"><b>往下一层</b>弹性与资源：HPA、requests 和 limits、探针 <span class="todo-chip">待做</span>；观察看什么在 <a href="../observability/prometheus-alerting.html">J13 Prometheus 告警</a>（有页）</p>
+        <p class="risk"><b>常出的事</b>只盯错误率，不看容器重启次数和内存曲线；HPA 按 CPU 扩，可瓶颈在数据库连接，越扩连接越多，数据库先倒。</p>
+      </div>
+      <div class="stop" id="s-11" data-stop="11" data-role="pd">
+        <h3><span class="no">11</span>回滚：先回到上一个好版本，再查原因</h3>
+        <p>17:45 告警“order-svc 10 分钟内重启 ≥ 2 次”响了。值班 <code>kubectl describe pod</code>，看到 <code>Last State: Terminated, Reason: OOMKilled, Exit Code: 137</code>，Java 日志里干干净净，没有 OutOfMemoryError。问“变了什么”：14:06 那次发布。17:47 在部署仓库 <code>git revert</code> 那个提交，Argo CD 同步，老镜像都还在节点上，6 个 Pod 不到 3 分钟全换回 1.8.3。</p>
+<pre class="code snip"><span class="cm"># 137 = 128 + 9，9 号信号是 SIGKILL：进程是被别人杀的</span>
+Last State:  Terminated
+  Reason:    OOMKilled
+  Exit Code: 137</pre>
+        <p class="why"><b>为什么要它</b>回滚比修 bug 快，也比修 bug 确定：先回到已知的好版本让用户恢复，原因明天再查。GitOps 下回滚就是 revert，有记录，也不会被下一次同步改回去。</p>
+        <p class="down"><b>往下一层</b>CI/CD 与发布策略 <span class="todo-chip">待做</span>；OOMKilled 和 Java OOM 的区别在 <a href="../jvm/jvm-container.html">Java 在容器里</a>（有页）</p>
+        <p class="risk"><b>常出的事</b>图快直接 <code>kubectl rollout undo</code>：Argo CD 开了自动修正（selfHeal）就会马上改回 1.8.4，没开也会一直显示不同步，下次同步照样回去。另外，<code>rollout undo</code> 只回退 Pod 模板，<code>JAVA_OPTS</code> 要是放在 ConfigMap 里，Pod 换回去了，雷还在。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 知识点地图 ============ -->
+<section id="nodes">
+  <h2>知识点地图</h2>
+  <p class="lead">知识点名照抄学习地图。6 个知识点里只有“Java 在容器里”已经有页（内存和 CPU），这次补它“下一圈”里的启动速度；其余 5 个都是新页。下钻顺序从下往上：先有镜像，再有 Pod，再给 Pod 定资源和探针；容器和 JVM 怎么对上放在资源之后；最后把这些串成流水线和发布策略，再收一页 Linux 和配置密钥的基本功。</p>
+  <div class="tbl">
+    <table class="nodes">
+      <thead><tr><th>站</th><th>知识点</th><th>状态</th><th>下钻顺序和理由</th></tr></thead>
+      <tbody>
+        <tr><td class="st">2、3、7</td><td>Docker：镜像分层、多阶段构建 <span class="dp">懂机制</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>1</b><span class="why">最底下一层：后面所有站搬来搬去的都是镜像。和 AI 地图站 10 共用。</span></td></tr>
+        <tr><td class="st">5、9</td><td>Kubernetes 核心：Pod、Deployment、Service、Ingress <span class="dp">懂设计</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>2</b><span class="why">声明式和控制循环是整个集群的设计核心，滚动、回滚、扩容都是它的特例。</span></td></tr>
+        <tr><td class="st">6、8、10</td><td>弹性与资源：HPA、requests 和 limits、探针 <span class="dp">懂机制</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>3</b><span class="why">图上出现三次，第一条过关标准（OOMKilled 和 Java OOM 的区别）一半在这里。</span></td></tr>
+        <tr><td class="st">7、11</td><td>Java 在容器里：内存、CPU、启动速度 <span class="dp">懂机制</span></td><td><a href="../jvm/jvm-container.html">有页</a>（内存、CPU）；启动速度 <span class="todo-chip">待做</span></td><td class="ord"><b>4</b><span class="why">先复习已有页，再补启动速度：第 7 站的 22 秒决定了滚动和扩容有多快。要先懂 limits 和探针。</span></td></tr>
+        <tr><td class="st">1、4、11</td><td>CI/CD 与发布策略：滚动、蓝绿、金丝雀 <span class="dp">懂机制</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>5</b><span class="why">把前面四页串成一条流水线，再比滚动、蓝绿、金丝雀；第二条过关标准（1 分钟内回滚）在这里练。</span></td></tr>
+        <tr><td class="st">4、9、11</td><td>Linux、脚本与配置密钥管理 <span class="dp">会用</span></td><td><span class="todo-chip">待做</span></td><td class="ord"><b>6</b><span class="why">收尾：前几页一路碰到的信号和退出码、启动脚本、ConfigMap 和 Secret，收成一套会用的基本功。</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="aside-box">
+    <h3>这张全景没走到的</h3>
+    <ul>
+      <li><b>服务网格</b>（Istio、Linkerd）：交易靶场的服务治理在 J10 用的是 Spring Cloud，网格放进下一圈，和 J10 对照着学。</li>
+      <li><b>Helm 和 Kustomize 的模板写法</b>：CI/CD 那页用到多少讲多少，不单独做页。</li>
+      <li><b>集群本身怎么搭、怎么升级</b>（控制面高可用、etcd 备份、节点升级）：那是平台团队的活，业务开发要懂的是“节点被腾空时，我的 Pod 会怎样”，放进下一圈。</li>
+      <li><b>多集群、多机房发布</b>：在 <a href="../arch/multi-active-dr.html">J12 多活容灾</a> 那页。</li>
+      <li><b>部署 AI 服务</b>（GPU 节点、几个 GB 的模型镜像）：是 <a href="../agent/roadmap.html#st10">AI 地图站 10</a> 的事，这一站打好 Docker 和 K8s 的底子。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 回到全景 ============ -->
+<section id="back">
+  <h2>回到全景</h2>
+  <div class="two">
+    <div class="card">
+      <h3>复述练习</h3>
+      <ol class="retell">
+        <li>合上页面，画出 11 站，分成三组：流水线（1～4）、集群里（5～8）、上线以后（9～11）。</li>
+        <li>每站一句话，再把“同一份东西换了几次形态”讲出来：源码 → jar → 镜像层 → 带 tag 的镜像 → Pod 模板 → 绑了节点的 Pod → cgroup 里的进程 → EndpointSlice 里的一个地址。每一次是谁把它变过去的？</li>
+        <li>挑 3 站往下讲两层。比如第 2、7、9 站：为什么改一行代码只重建最上面一层？JVM 怎么知道自己只有 1Gi？摘流量和发 SIGTERM 为什么要隔 10 秒？</li>
+      </ol>
+      <p>也可以直接讲给我听，说“回到全景”，我对照这张图帮你查漏。</p>
+      <h3>怎么算过关（地图上的标准）</h3>
+      <ul class="retell">
+        <li>说清 Pod 被 OOMKilled 和 Java 抛 OOM 的区别：谁发现的、谁动的手、日志里看得到什么、进程还在不在（第 7、11 站）。</li>
+        <li>发布出问题时 1 分钟内回滚（第 11 站）。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>动手：交易靶场这一站</h3>
+      <p>地图上 J14 给靶场的任务：靶场全部上 K8s（本机用 kind 或 k3s），配好探针、HPA 和滚动发布，演练一次发布回滚。下钻的几页会这样埋雷：</p>
+      <ol class="mines">
+        <li>给 order-svc 写多阶段 Dockerfile，改一行代码重新构建，数一数哪几层变了、推了多少字节（第 2、3 站）。</li>
+        <li>在 kind 里部署 4 个副本，一边压测一边发布，数错误数；把策略换成默认的 25% / 25% 再发一次（第 5、9 站）。</li>
+        <li>去掉 preStop 再发一次，看错误数有没有变（第 9 站）。</li>
+        <li>让 liveness 检查数据库，停 MySQL 30 秒，看所有 Pod 会不会一起重启（第 8 站）。</li>
+        <li>埋这次的雷：<code>-Xmx</code> 等于 limit，压测到 OOMKilled；再换成堆真的泄漏，对比两种 OOM 留下的痕迹（第 7、11 站）。</li>
+        <li>HPA 按 CPU 扩容，压测看副本数怎么变、多久扩上去（第 10 站）。</li>
+        <li>1 分钟内回滚：<code>git revert</code> 和 <code>kubectl rollout undo</code> 各做一次，计时（第 11 站）。</li>
+      </ol>
+    </div>
+  </div>
+
+  <h3>预测题</h3>
+  <div class="preds">
+    <details>
+      <summary>1. 如果 1.8.4 的问题是一个没上限的本地缓存，堆真的被占满，而 JAVA_OPTS 没改（还是 MaxRAMPercentage=75），你会看到什么？和今晚有什么不同？</summary>
+      <p>堆上限是 768 MiB，进程总内存到不了 1Gi，内核不会出手。先是 GC 越来越频繁，接口越来越慢；然后 Java 抛 <code>OutOfMemoryError: Java heap space</code>，日志里看得到，开了 <code>HeapDumpOnOutOfMemoryError</code> 还会留下堆转储。进程不一定退出，容器状态还是 Running。如果 liveness 只看端口通不通，这个 Pod 就半死不活地一直挂着、一直接流量。今晚是反过来：进程被内核从外面杀了，Java 什么都没留下，只有 <code>describe pod</code> 里的 OOMKilled 和 137。</p>
+      <p class="from">从第 7、8、11 站推出：OOMKilled 是 cgroup 的 limit 被越过，内核动手；Java OOM 是堆满了，JVM 自己报。所以要用 MaxRAMPercentage 把堆限在 limit 以内，把“越界”变成 Java 自己能报的错。</p>
+    </details>
+    <details>
+      <summary>2. 发布策略换成默认的 maxSurge 25%、maxUnavailable 25%，并且挑在 17:35 晚高峰发。会怎样？</summary>
+      <p>4 个副本时两个 25% 都是 1：控制器可以先停一个老的，同时起一个新的。新 Pod 要 35 秒才 Ready，这 35 秒里只有 3 个 Pod 在接流量，每个多扛三分之一。晚高峰每个 Pod 的 CPU 已经在 70% 上下，3 个 Pod 就要各扛 90% 以上，P99 明显变长，HPA 又要过一会儿才扩，扩出来的新 Pod 也要 35 秒。滚动的每一轮都重复一次。</p>
+      <p class="from">从第 5、8、10 站推出：<code>maxUnavailable: 0</code> 用多一个 Pod 的资源换“容量不降”；Pod 启动越慢，这一点越要紧。</p>
+    </details>
+    <details>
+      <summary>3. 有人在 readinessProbe 里加了“检查 MySQL 能不能连上”。某天 MySQL 主从切换，40 秒连不上。会怎样？</summary>
+      <p>几十秒内所有 order-svc 的 Pod 都不 Ready，被从 EndpointSlice 里摘光，Service 后面一个地址都没有，Ingress 对所有请求回 503，连不碰数据库的接口（比如查商品快照的缓存）也一起挂了。MySQL 回来后，探针要再通过几次才把 Pod 加回去，恢复比 MySQL 本身还慢。要是写在 liveness 里更糟：40 秒后所有 Pod 被一起重启，又是 22 秒启动、一起冷启动。</p>
+      <p class="from">从第 8、9 站推出：探针只回答“我自己还行不行”，依赖挂了应该由应用降级、由告警通知，不该让 Kubernetes 把整个服务下线。</p>
+    </details>
+    <details>
+      <summary>4. 17:46 值班的人觉得 git revert 太慢，直接 <code>kubectl rollout undo deployment/order-svc</code>。会怎样？</summary>
+      <p>先是生效的：Deployment 把上一个 ReplicaSet 扩回来，Pod 开始换回 1.8.3。但集群和 Git 不一致了。Argo CD 开了 selfHeal 的话，会很快把 Deployment 改回 Git 里的 1.8.4，又开始被杀；没开 selfHeal，界面上一直挂着 OutOfSync，下次有人同步时 1.8.4 又回来。正确做法是 revert 部署仓库；实在要先用 <code>rollout undo</code> 抢时间，就先关掉这个应用的自动同步，事后补上 revert。</p>
+      <p class="from">从第 4、11 站推出：GitOps 下集群只是 Git 的投影，绕过 Git 改集群，改动迟早会被“纠正”回去。</p>
+    </details>
+  </div>
+
+  <h3>下一圈</h3>
+  <div class="next">
+    <div class="card">
+      <h4>1.8.4 还加了一列</h4>
+      <p>滚动的 2 分半里，新老两个版本同时在读写同一张表。老代码不认识新列，新代码依赖新列，回滚时又要倒着来一遍。要学“先扩展、后收缩”的表结构变更，接 J06 和 J11。</p>
+    </div>
+    <div class="card">
+      <h4>按流量放 5%，让指标自动决定继续还是回滚</h4>
+      <p>滚动是按 Pod 数换，换一个就是 25% 的用户。金丝雀要按请求比例切，再让系统盯着错误率和延迟自动判断，难在“怎么才算变坏了”。</p>
+    </div>
+    <div class="card">
+      <h4>半夜节点要升级，Pod 被腾走</h4>
+      <p>这次是你主动发布，那次是平台把节点腾空。PodDisruptionBudget、优雅退出、启动速度，决定了这件事用户感觉不感觉得到。</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>JDK 版本约定：交易靶场和 Java 地图的全景页用 JDK 21；单个知识点页的实验用 JDK 17。</p>
+  <p>档位：标准（全景页），没有做本机实测。时间线、构建和启动耗时、副本数、内存数字都是交易靶场的设计；下钻的 Docker、Kubernetes、资源与探针几页会在本机 kind 集群里把这次发布真做一遍。</p>
+  <p>按文档：Deployment 的滚动策略默认 <code>maxSurge</code> 和 <code>maxUnavailable</code> 都是 25%，<code>revisionHistoryLimit</code> 默认 10，<code>progressDeadlineSeconds</code> 默认 600 秒，超时只标记失败、不自动回滚；<code>rollout undo</code> 回退的是 Pod 模板；Pod 的 <code>terminationGracePeriodSeconds</code> 默认 30 秒，preStop 的时间算在里面；startupProbe 成功之前 liveness 和 readiness 都不执行；调度按 requests 计算；HPA 的 CPU 利用率是相对 requests 算的；不是 <code>latest</code> 的 tag 默认 <code>imagePullPolicy: IfNotPresent</code>。JDK 10 起（8u191 起）默认开启容器支持，<code>MaxRAMPercentage</code> 默认 25。Spring Boot 在 Kubernetes 上自动打开 <code>/actuator/health/liveness</code> 和 <code>/readiness</code> 两个探针组，3.4 起默认优雅停机；分层 jar 默认四层 dependencies、spring-boot-loader、snapshot-dependencies、application。Argo CD 默认每隔几分钟轮询一次 Git，配上 webhook 才是推过去就同步。退出码 137 是 128 加 SIGKILL 的 9。</p>
+  <p>按设计：4 个副本、requests 和 limits、<code>-Xmx1g</code> 这颗雷、35 秒到 Ready、22 秒启动、HPA 70% 目标、所有时刻，都是交易靶场的设计，不是框架默认。</p>
+  <p>回到地图：<a href="roadmap.html#j14">Java 地图 J14 · 云原生与交付</a> · 上一站：<a href="pano-j13-late-night-alert.html">J13 全景：凌晨三点，告警响了</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+const STOPS = 11;
+function clampStep(i) { return Math.min(STOPS, Math.max(1, i | 0)); }
+// 每一步点亮和这一站有关的箭头
+const EDGES = { 1: ["1"], 2: ["2"], 3: ["3"], 4: ["4"], 5: ["5"], 6: ["6"], 7: ["7"], 8: ["8"], 9: ["9"], 10: ["10"], 11: ["10", "11"] };
+function stepState(i) {
+  i = clampStep(i);
+  const stops = {};
+  for (let k = 1; k <= STOPS; k++) stops[k] = k === i ? "on" : (k < i ? "past" : "next");
+  return { step: i, stops, edges: EDGES[i] };
+}
+// 时间尺：秒数从 14:02:00 算起（按设计）
+const PIPE = [[10, 200, "编译、测试 3:10", "pd"], [200, 250, "打镜像 50 s", "bk"], [250, 270, "推 + 同步 20 s", "rn"]];
+// 滚动：maxSurge 1、maxUnavailable 0。新 Pod Ready 后，老 Pod 才开始下线，同时起下一个新 Pod
+function rollout(start, replicas, readyAfter, drain) {
+  const pairs = [];
+  let t = start;
+  for (let k = 0; k < replicas; k++) {
+    const create = t, ready = t + readyAfter;
+    pairs.push({ create, ready, oldStop: ready, oldGone: ready + drain });
+    t = ready;
+  }
+  return pairs;
+}
+const PAIRS = rollout(270, 4, 35, 15);
+// 在时刻 s：能接流量的 Pod 数、存在的 Pod 数（含启动中、下线中）
+function census(s) {
+  let serving = 0, exist = 0;
+  for (const p of PAIRS) {
+    if (s < p.oldStop) { serving++; exist++; } else if (s < p.oldGone) exist++;
+    if (s >= p.create) { exist++; if (s >= p.ready) serving++; }
+  }
+  return { serving, exist };
+}
+function summary() {
+  const end = PAIRS[PAIRS.length - 1].oldGone;
+  let minServing = Infinity, maxExist = 0;
+  for (let s = 0; s <= end + 5; s += 0.5) {
+    const c = census(s);
+    minServing = Math.min(minServing, c.serving);
+    maxExist = Math.max(maxExist, c.exist);
+  }
+  return { end, rolling: end - PAIRS[0].create, test: PIPE[0][1] - PIPE[0][0], minServing, maxExist, ready: PAIRS[0].ready - PAIRS[0].create };
+}
+function mmss(sec) { const m = Math.floor(sec / 60), s = Math.round(sec % 60); return m ? m + " 分" + (s ? " " + s + " 秒" : "") : s + " 秒"; }
+const T0 = 150, TMAX = 440, PX = (944 - T0) / TMAX;
+function tx(sec) { return T0 + sec * PX; }
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const NS = "http://www.w3.org/2000/svg";
+  const mk = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; };
+
+  // 时间尺
+  const ax = $("#tl-axis"), rows = $("#tl-rows");
+  for (let s = 0; s <= 420; s += 60) {
+    ax.append(mk("line", { class: "grid", x1: tx(s), y1: 14, x2: tx(s), y2: 232 }));
+    ax.append(mk("text", { class: "tk", x: tx(s), y: 252, "text-anchor": "middle" }, "14:0" + (2 + s / 60)));
+  }
+  ax.append(mk("line", { class: "ax", x1: T0, y1: 232, x2: tx(TMAX), y2: 232 }));
+  const textW = t => [...t].reduce((w, ch) => w + (ch.charCodeAt(0) > 255 ? 11.5 : 6.6), 0);
+  function seg(y, a, b, label, role) {
+    const w = (b - a) * PX;
+    const grey = role === "other" || role === "drain";
+    const attrs = { class: grey ? "seg other" : "seg", x: tx(a).toFixed(1), y, width: Math.max(w, 2).toFixed(1), height: 30, rx: 5 };
+    if (!grey) attrs["data-role"] = role;
+    if (role === "drain") attrs.opacity = ".4";
+    rows.append(mk("rect", attrs));
+    if (!label) return;
+    const fits = textW(label) + 10 <= w;
+    rows.append(mk("text", { class: "sl", x: (fits ? tx(a) + 5 : tx(b) + 5).toFixed(1), y: y + 20 }, label));
+  }
+  rows.append(mk("text", { class: "lane", x: 0, y: 20 + 20 }, "流水线"));
+  PIPE.forEach(([a, b, label, role]) => seg(20, a, b, label, role));
+  PAIRS.forEach((p, i) => {
+    const y = 64 + i * 42;
+    rows.append(mk("text", { class: "lane", x: 0, y: y + 20 }, "Pod " + (i + 1)));
+    seg(y, 0, p.oldStop, i === 0 ? "1.8.3 在服务" : "1.8.3", "other");
+    seg(y, p.oldStop, p.oldGone, "", "drain");
+    seg(y, p.create, p.ready, "", "of");
+    seg(y, p.ready, TMAX, i === 0 ? "1.8.4 Ready" : "1.8.4", "cg");
+  });
+  const s = summary();
+  $("#tl-sum").innerHTML = "从合并到全部换完 " + mmss(s.end - 0) + "，其中测试占 " + mmss(s.test) + "。滚动 " + mmss(s.rolling) + "：每个新 Pod " + s.ready + " 秒到 Ready（橙色），Ready 之后才停一个老的（灰色变浅那一小段是 preStop 加优雅停机），所以任何时刻能接流量的 Pod 都不少于 " + s.minServing + " 个；代价是同一时刻最多有 " + s.maxExist + " 个 Pod 同时存在，节点要留出这份余量。";
+
+  // 分步演示
+  const walk = $(".walk");
+  const src = $("#map svg.pmap");
+  const fig = $("#w-fig");
+  const clone = src.cloneNode(true);
+  clone.querySelectorAll("[id]").forEach(el => { el.id = el.id.replace(/^pm-/, "pw-"); });
+  clone.querySelectorAll("[marker-end]").forEach(el => {
+    el.setAttribute("marker-end", el.getAttribute("marker-end").replace("#pm-", "#pw-"));
+  });
+  clone.setAttribute("aria-label", "分步演示用的全景图，当前一站高亮");
+  fig.append(clone);
+  walk.classList.add("js");
+  const panels = $$(".stop", walk);
+  const cnt = $("#w-cnt");
+  let cur = 1, timer = null;
+  function apply(i) {
+    const st = stepState(i);
+    cur = st.step;
+    $$(".box", clone).forEach(g => {
+      const k = +g.dataset.stop;
+      g.classList.remove("on", "past", "next");
+      g.classList.add(st.stops[k]);
+    });
+    $$(".ed", clone).forEach(e => e.classList.toggle("hot", st.edges.includes(e.dataset.edge)));
+    panels.forEach(p => p.classList.toggle("cur", +p.dataset.stop === cur));
+    const t = panels.find(p => +p.dataset.stop === cur).querySelector("h3").textContent.replace(/^\d+/, "");
+    cnt.textContent = "第 " + cur + " / " + STOPS + " 站 · " + t;
+    $("#w-prev").disabled = cur === 1;
+    $("#w-next").disabled = cur === STOPS;
+  }
+  function stopAuto() {
+    if (timer) { clearInterval(timer); timer = null; }
+    $("#w-auto").setAttribute("aria-pressed", "false");
+    $("#w-auto").textContent = "自动播放";
+  }
+  function show(i, scroll) {
+    apply(i);
+    if (scroll) walk.scrollIntoView({ block: "start" });
+  }
+  $("#w-prev").addEventListener("click", () => { stopAuto(); apply(cur - 1); });
+  $("#w-next").addEventListener("click", () => { stopAuto(); apply(cur + 1); });
+  $("#w-reset").addEventListener("click", () => { stopAuto(); apply(1); });
+  $("#w-auto").addEventListener("click", () => {
+    if (timer) { stopAuto(); return; }
+    if (cur === STOPS) apply(1);
+    $("#w-auto").setAttribute("aria-pressed", "true");
+    $("#w-auto").textContent = "暂停";
+    timer = setInterval(() => { if (cur >= STOPS) stopAuto(); else apply(cur + 1); }, 4200);
+  });
+  walk.addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") { stopAuto(); apply(cur + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { stopAuto(); apply(cur - 1); e.preventDefault(); }
+  });
+  clone.addEventListener("click", e => {
+    const g = e.target.closest(".box");
+    if (g) { stopAuto(); apply(+g.dataset.stop); }
+  });
+  $$(".box", src).forEach(g => {
+    g.setAttribute("tabindex", "0");
+    g.setAttribute("role", "link");
+    g.setAttribute("aria-label", "跳到第 " + g.dataset.stop + " 站的讲解");
+    const go = () => { stopAuto(); show(+g.dataset.stop, true); };
+    g.addEventListener("click", go);
+    g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
+  $$('.strip a[href^="#s-"]').forEach(a => a.addEventListener("click", e => {
+    e.preventDefault();
+    stopAuto();
+    show(+a.getAttribute("href").slice(3), true);
+  }));
+  const m = /^#s-(\d+)$/.exec(location.hash);
+  apply(m ? +m[1] : 1);
+  if (m) walk.scrollIntoView({ block: "start" });
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
