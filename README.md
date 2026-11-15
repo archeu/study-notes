@@ -94,6 +94,7 @@
 | 14 | [订单表拆成 8 张：分库分表与 ShardingSphere](https://archeu.github.io/study-notes/database/sharding-shardingsphere.html) | J11 知识点 1：2000 万口诀从哪来（B+ 树层数估算）、真正逼着拆的是写入和运维时间、便宜的招各解决什么、垂直 / 单库分表 / 分库分表、取模 / 范围 / 映射、分片键三条标准、库表同源（实测 2500/0 vs 1250）、ShardingSphere-JDBC 5.5.3 五步与 12 条 SQL 的真实改写、5.5.3 依赖拆包的四种报错，分片键试验台 |
 | 15 | [9527 在哪张表：分片以后的跨片查询、分页与全局表](https://archeu.github.io/study-notes/database/sharding-cross-shard-query.html) | J11 知识点 2：四种查询各碰几张表、订单号基因的复合分片算法与老单号广播、跨片深分页的全局视野改写和内存归并（实测 offset 100000 时 2.4 s / 2.7 GB，游标 23 ms）、LIMIT 0,1020 起 MySQL 改走 filesort、AVG 与 GROUP BY 改写、绑定表 32 → 8 条、唯一索引只管一张表，跨片分页代价计算器 |
 | 16 | [1.2 亿行搬进 8 张表，App 不停：不停机数据迁移](https://archeu.github.io/study-notes/database/online-data-migration.html) | J11 知识点 3：停机迁移为什么回不去、应用双写 / binlog 增量 / ShardingSphere 迁移任务、七个阶段谁是主怎么退、搬运覆盖和乱序两种竞态、版本保护 + INSERT IGNORE、分块 BIT_XOR(CRC32) 校验再逐行修、影子读与灰度切读、反向双写，带流量的迁移演练（naive 倒退 95 行、safe 0 行，修复后差 0），回滚推演台 |
+| 17 | [不自己拆，换个数据库：TiDB、OceanBase、GoldenDB 替你做了什么](https://archeu.github.io/study-notes/database/distributed-db-tidb-oceanbase.html) | J11 知识点 6：全景第 2～8 站在分布式数据库里由谁做、自己拆的几处长期痛点、TiDB 计算存储分离 / OceanBase 一体化 Paxos / GoldenDB 分片 + GTM 三种架构、Region 与 PD 调度、Raft 多数派提交与 RPO = 0、TSO + Percolator 两阶段提交、计算下推，TiDB 8.5.8 小集群实测（杀 follower 无感、杀 leader 写入停 13.9 s 且 0 失败），多数派计算器 |
 
 ## 性能
 
