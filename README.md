@@ -36,6 +36,7 @@
 | 07 | [全景：一次商品详情查询](https://archeu.github.io/study-notes/java/pano-j07-product-detail-cache.html) | J07 场景全景：查本地、发 GET、主线程查字典、布隆过滤器、重建锁、查库、回填加解锁、放本地、改价提交、删 Redis、广播失效、后台落盘淘汰十二站，Redis 8.10 + Caffeine + MySQL 8.4 实测（本地命中 4 µs、Redis 往返 279 µs 而服务端只要 2 µs、击穿时查库 1～26 次加锁后 1 次、改价后 11～26 ms 跟上），分步演示 |
 | 08 | [全景：一条订单消息的一生](https://archeu.github.io/study-notes/java/pano-j08-order-event-life.html) | J08 场景全景：写 outbox、选分区、攒批发出、追加写、副本复制、回 ACK、三组拉取、处理去重、提交位点、心跳重平衡、段与保留十一站，Kafka 4.4 三 broker 实测（ACK 12～19 ms、三组 12～20 ms 收到、停两个副本写入被拒、提交前崩溃重投一次靠去重表挡住），分步演示 |
 | 09 | [全景：一次下单跨三个库](https://archeu.github.io/study-notes/java/pano-j09-order-across-three-dbs.html) | J09 场景全景：订单 9527 用 Seata TCC 在订单、库存、券三库各写一笔，幂等键、号段、TC Raft 决议、Confirm 重试、outbox 加锁投递、中途 kill -9 的超时回滚与空回滚、对账兜底十一站，三库状态表，联动分步演示 |
+| 10 | [全景：拆成微服务后的一次下单](https://archeu.github.io/study-notes/java/pano-j10-order-through-microservices.html) | J10 场景全景：订单 9527 穿过网关鉴权、限流、灰度路由，Nacos 推来的超时配置，OpenFeign 串行调商品、券、库存，inventory-2 卡住却仍“健康”，Sentinel 慢调用熔断与降级、摘流量后 35 秒缓存才恢复，每一跳的超时预算表，分步演示 |
 
 ## Spring
 
