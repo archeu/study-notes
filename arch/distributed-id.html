@@ -1,0 +1,1613 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>订单号 9527 从哪来：分布式 ID——号段与雪花算法</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J09 knowledge point 7 (distributed IDs: segment allocation vs snowflake), station 2 of the J09 panorama, mechanism type, second round after the MyBatis-Plus snowflake section. Roles: g2 = segment allocator (id_alloc, double buffer), rn = snowflake (MyBatis-Plus Sequence / Leaf), cg = Seata IdWorker variant, pd = database / InnoDB, of = order instance A, bk = order instance B. bad/done/other keep their repo-wide meaning. Interaction: one bench in step 6 (scheme x incident x qps x step -> 3 s strip + tiles, guess first). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>架构</span><span aria-hidden="true">/</span><span class="tb-here">分布式 ID：号段与雪花</span></div></nav>
+
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-of"/></marker>
+    <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bk"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+    <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g2"/></marker>
+    <marker id="ah-rn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-rn"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">号段 · id_alloc · 双 buffer · 雪花 64 位 · 机器号怎么分 · 时钟回拨 · Seata IdWorker · 美团 Leaf · InnoDB 页分裂 · MyBatis-Plus 3.5.18 · MySQL 8.4 · JDK 17 实测</p>
+  <h1>订单号 9527 从哪来：分布式 ID——号段与雪花算法</h1>
+  <p class="lead">多台机器各发各的号，彼此不商量，还不能撞。两条路：<b>号段</b>把“不撞”交给数据库里的一行，一次领一千个号放在内存里发，怕的是库慢、库挂；<b>雪花</b>把“不撞”拆进 64 位里，时间戳 + 机器号 + 序列号，谁也不用问，怕的是时钟往回走、两台机器拿了同一个机器号。选哪个，就看你更信得过数据库，还是更信得过时钟和机器号的分配。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j09-order-across-three-dbs.html#s-2">一次下单跨三个库 · 第 2 站</a></span><span>地图：<a href="../java/roadmap.html#j09">J09 · 分布式 ID：雪花算法、号段</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>分布式 ID 的第二圈。第一圈在 <a href="../mybatis/mybatis-plus.html">MyBatis-Plus 原理</a>的雪花 ID 一节：<code>ASSIGN_ID</code> 怎么用，64 位怎么分，传到前端为什么丢精度。时钟回拨在<a href="clock-timeout-retry.html">时钟、超时与重试</a>的坑 6 讲过一次。这一圈补上号段，把两种发号放在一起比；再看 ID 长什么样，会怎样影响 InnoDB 的主键索引。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：9527 要在写任何库之前定下来</h2>
+  </div>
+  <p class="lead">在全景第 2 站，这一步要解决：用户 1024 下单，订单服务要在<b>不访问任何库</b>的情况下发出订单号 9527。后面第 3 站开全局事务，第 4、5、6 站在订单库、库存库、券库各写一笔，第 9 站发消息，第 11 站对账，用的都是这个号。所以号必须先有，而且两个实例 A、B 同时在发，谁也不能和谁撞。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="左边是订单服务的两个实例。实例 A 内存里有号段 9001 到 10000，第 527 个号是 9527；实例 B 内存里有号段 10001 到 11000，下一单是 10001。9527 这个号从 A 出发，分别流向第 3 站 Seata TC 登记全局事务、第 4 站订单库插入订单 9527、第 5 站库存库按 9527 冻结 2 件、第 6 站券库把 MINUS20 锁给 9527、第 9 站和第 11 站的消息和对账。">
+  <rect x="20" y="30" width="250" height="118" rx="14" class="b-of"/>
+  <text x="145" y="56" text-anchor="middle" class="t-of">订单服务 · 实例 A</text>
+  <rect x="38" y="68" width="214" height="30" rx="7" class="b-card"/>
+  <text x="145" y="88" text-anchor="middle" class="t-mono">内存：号段 [9001, 10000]</text>
+  <text x="145" y="128" text-anchor="middle" class="t-s">第 527 个号 → 9527</text>
+  <rect x="20" y="172" width="250" height="108" rx="14" class="b-bk"/>
+  <text x="145" y="198" text-anchor="middle" class="t-bk">订单服务 · 实例 B</text>
+  <rect x="38" y="210" width="214" height="30" rx="7" class="b-card"/>
+  <text x="145" y="230" text-anchor="middle" class="t-mono">内存：号段 [10001, 11000]</text>
+  <text x="145" y="266" text-anchor="middle" class="t-s">别的用户的下一单 → 10001</text>
+
+  <path d="M270 100 H 330" class="e-of" marker-end="url(#ah-of)"/>
+  <rect x="336" y="78" width="104" height="44" rx="22" class="b-g2"/>
+  <text x="388" y="107" text-anchor="middle" class="t-id">9527</text>
+  <text x="388" y="146" text-anchor="middle" class="t-xs">没有访问任何库</text>
+  <text x="388" y="162" text-anchor="middle" class="t-xs">耗时不到 1 微秒</text>
+
+  <path d="M440 92 C 500 92, 500 42, 556 42" class="e-g2" marker-end="url(#ah-g2)"/>
+  <path d="M440 96 C 500 96, 500 92, 556 92" class="e-g2" marker-end="url(#ah-g2)"/>
+  <path d="M440 100 C 500 100, 500 142, 556 142" class="e-g2" marker-end="url(#ah-g2)"/>
+  <path d="M440 104 C 500 104, 500 192, 556 192" class="e-g2" marker-end="url(#ah-g2)"/>
+  <path d="M440 108 C 500 108, 500 242, 556 242" class="e-g2" marker-end="url(#ah-g2)"/>
+  <text x="486" y="286" text-anchor="middle" class="t-xs">同一个 9527</text>
+
+  <rect x="560" y="24" width="380" height="36" rx="9" class="b-cg"/>
+  <text x="576" y="47" class="t-s">第 3 站 · Seata TC：全局事务登记这一单</text>
+  <rect x="560" y="74" width="380" height="36" rx="9" class="b-pd"/>
+  <text x="576" y="97" class="t-s">第 4 站 · 订单库：orders 9527 CREATING</text>
+  <rect x="560" y="124" width="380" height="36" rx="9" class="b-pd"/>
+  <text x="576" y="147" class="t-s">第 5 站 · 库存库：按 9527 冻结 sku 88 两件</text>
+  <rect x="560" y="174" width="380" height="36" rx="9" class="b-pd"/>
+  <text x="576" y="197" class="t-s">第 6 站 · 券库：MINUS20 锁给 9527</text>
+  <rect x="560" y="224" width="380" height="36" rx="9" class="b-card"/>
+  <text x="576" y="247" class="t-s">第 9、11 站 · ORDER_CREATED 9527、按 9527 对账</text>
+</svg>
+  </div>
+  <figcaption>三个库、一个 TC、一条消息，都拿 9527 当业务键。号要是等订单库 INSERT 之后才有，库存和券的 Try 就得排在它后面；两个实例要是撞了号，两笔订单的冻结和用券就会记到同一个号下面。</figcaption>
+  </figure>
+  <div class="goals3">
+    <div class="card" data-role="of"><h3>不撞</h3><p>两个实例、重启以后、扩到十个实例，都不发出同一个号。</p></div>
+    <div class="card" data-role="of"><h3>先有号，再写库</h3><p>号在内存里就能拿到，不等任何一次 INSERT，每单不多一次网络往返。</p></div>
+    <div class="card" data-role="of"><h3>大体递增，发号的东西挂了别马上停</h3><p>递增是给 InnoDB 主键用的（<a href="#d-btree">⑥ 第三圈实测</a>）；发号依赖的库或时钟出事时，下单还能撑一会儿。</p></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：三种老办法各疼在哪</h2>
+  </div>
+  <div class="trio">
+    <div class="card" data-role="other">
+      <h3>各库自己 AUTO_INCREMENT</h3>
+<svg class="sv" viewBox="0 0 300 130" role="img" aria-label="订单表分成两个分片，各自从 1 开始自增，两边都有 1、2、3，撞号。">
+  <rect x="10" y="10" width="120" height="110" rx="10" class="b-neu"/>
+  <text x="70" y="32" text-anchor="middle" class="t-s">orders_0</text>
+  <text x="70" y="58" text-anchor="middle" class="t-mono">1  2  3</text>
+  <rect x="170" y="10" width="120" height="110" rx="10" class="b-neu"/>
+  <text x="230" y="32" text-anchor="middle" class="t-s">orders_1</text>
+  <text x="230" y="58" text-anchor="middle" class="t-mono">1  2  3</text>
+  <path d="M110 54 H 190" class="e-bad"/>
+  <text x="150" y="94" text-anchor="middle" class="t-bad">撞了</text>
+</svg>
+      <ul class="pains"><li class="bad">INSERT 之后才知道号，库存、券都得等订单库先写</li><li class="bad">分库以后每个分片都从 1 开始；改步长（<code>auto_increment_increment</code>）的话，加分片要重新规划</li></ul>
+    </div>
+    <div class="card" data-role="other">
+      <h3>每单问一次发号库</h3>
+<svg class="sv" viewBox="0 0 300 130" role="img" aria-label="订单服务每下一单都要访问一次发号库，发号库挂了，下单全停。">
+  <rect x="10" y="40" width="96" height="50" rx="10" class="b-neu"/>
+  <text x="58" y="70" text-anchor="middle" class="t-s">订单服务</text>
+  <rect x="194" y="40" width="96" height="50" rx="10" class="b-neu"/>
+  <text x="242" y="70" text-anchor="middle" class="t-s">发号库</text>
+  <path d="M106 52 H 190" class="e-mut" marker-end="url(#ah-ink)"/>
+  <path d="M106 64 H 190" class="e-mut" marker-end="url(#ah-ink)"/>
+  <path d="M106 76 H 190" class="e-mut" marker-end="url(#ah-ink)"/>
+  <text x="150" y="30" text-anchor="middle" class="t-xs">每单 1 次往返</text>
+  <text x="242" y="116" text-anchor="middle" class="t-bad">挂了 = 下单全停</text>
+</svg>
+      <ul class="pains"><li class="bad">往发号表插一行，再取 <code>LAST_INSERT_ID()</code>：每单多一次网络往返</li><li class="bad">所有实例都压在这一个库上，它慢下单就慢，它挂下单就停</li></ul>
+    </div>
+    <div class="card" data-role="other">
+      <h3>UUID</h3>
+<svg class="sv" viewBox="0 0 300 130" role="img" aria-label="随机 UUID 插进 B+ 树的叶子时落在中间，页对半分裂，两页各半满。">
+  <text x="150" y="24" text-anchor="middle" class="t-mono">8f1c…-4e2a-…</text>
+  <rect x="20" y="50" width="76" height="40" rx="6" class="b-neu"/>
+  <rect x="112" y="50" width="76" height="40" rx="6" class="b-neu"/>
+  <rect x="204" y="50" width="76" height="40" rx="6" class="b-neu"/>
+  <path d="M150 30 V 64" class="e-bad" marker-end="url(#ah-bad)"/>
+  <rect x="112" y="70" width="38" height="20" rx="3" class="b-bad"/>
+  <text x="150" y="116" text-anchor="middle" class="t-bad">插到中间 → 页对半分裂</text>
+</svg>
+      <ul class="pains"><li class="bad">36 个字符，比 BIGINT 大 28 字节，每个二级索引都要带一份</li><li class="bad">随机，插进 B+ 树中间：⑥ 实测同样 30 万行，表 79.8 MB 对 39.6 MB；号上也看不出谁先谁后</li></ul>
+    </div>
+  </div>
+  <div class="essence">
+    <p class="big">精华：把“不撞”从每一单里拿出去。号段是一次向数据库批发一千个；雪花是事先给每台机器划好一块号空间，再用时间把号排开。</p>
+  </div>
+  <div class="pit" id="p-misuse"><b><em>!</em>不懂精华时的典型误用</b>
+    <dl><dt>做法</dt><dd>“MyBatis-Plus 的 <code>ASSIGN_ID</code> 开箱就是分布式唯一的”，不配机器号，直接扩到 5 个容器。</dd><dt>结果</dt><dd>雪花的“不撞”有一半靠机器号各不相同，机器号没分好，精华就没了。⑤ 实测两个实例用同一个机器号，低流量下各发约 1870 个，撞了 900 个。MyBatis-Plus 自己算的机器号在容器里只剩 32 种可能，见<a href="#p-twin">坑 1</a>。</dd></dl>
+  </div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="g2">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：“不撞”靠谁保证</h2>
+  </div>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>做法</th><th>“不撞”靠什么</th><th>长什么样</th><th>递增吗</th><th>每个号要访问别人吗</th><th>最怕</th></tr></thead>
+    <tbody>
+      <tr data-role="other"><td><b>UUID v4</b></td><td>122 位随机数，撞的概率小到可以忽略</td><td>36 字符</td><td class="n">完全随机</td><td class="y">不用</td><td>当主键：页分裂、表大一倍</td></tr>
+      <tr data-role="other"><td><b>UUID v7</b></td><td>48 位毫秒 + 随机数</td><td>36 字符（存成 <code>BINARY(16)</code> 是 16 字节）</td><td class="m">按毫秒递增；毫秒内要看实现</td><td class="y">不用</td><td>毫秒内随机的实现照样页分裂（<a href="#d-btree">⑥ 实测</a>）</td></tr>
+      <tr data-role="other"><td><b>数据库自增 / 发号表</b></td><td>库里的自增计数器</td><td>BIGINT，连续</td><td class="y">严格递增</td><td class="n">每个号一次</td><td>发号库慢、挂</td></tr>
+      <tr data-role="other"><td><b>Redis INCR</b></td><td>Redis 单线程里的一个计数器</td><td>BIGINT，连续</td><td class="y">严格递增</td><td class="n">每个号一次（可以一次 INCRBY 一段）</td><td>Redis 重启丢了最后一秒的 AOF，号倒退、重复（见 <a href="../redis/redis-persistence.html">Redis 持久化</a>）</td></tr>
+      <tr data-role="g2"><td><b>号段</b><br>美团 Leaf-segment</td><td>数据库一行 + 行锁，一次领一段</td><td>BIGINT，短，段内连续</td><td class="m">每个实例内递增，实例之间交错</td><td class="y">一段一次（一千个号一次）</td><td>库慢、库挂、主从切换丢更新</td></tr>
+      <tr data-role="rn"><td><b>雪花</b><br>MyBatis-Plus <code>Sequence</code>、Leaf-snowflake</td><td>时间戳 + 机器号 + 序列号</td><td>BIGINT，19 位十进制</td><td class="m">按毫秒递增；同一毫秒内按机器号排</td><td class="y">不用</td><td>时钟回拨、机器号重复</td></tr>
+      <tr data-role="cg"><td><b>改良雪花</b><br>Seata <code>IdWorker</code></td><td>机器号 + 启动时取一次时间，之后只加 1</td><td>BIGINT</td><td class="m">每个节点内严格递增，节点之间按机器号排</td><td class="y">不用</td><td>机器号重复</td></tr>
+    </tbody>
+  </table></div>
+  <div class="rule-box"><b>选择规则</b>：号只要唯一、不当主键（链路追踪 id、文件名），用 UUID。要当主键、要短、要能读、手边有稳定的 MySQL，用号段。不想让发号依赖任何服务、能管好机器号和校时，用雪花。框架内部只求唯一的号（Seata 的事务号），改良雪花最省心。<br><b>本页学号段和雪花</b>：交易靶场的订单号用号段，MyBatis-Plus 默认给的是雪花，Seata 的 XID 用的是改良雪花，三个都在全景第 2 站出现。</div>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="g2">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：一行加行锁，或者 64 位里分好地盘</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>InnoDB 的表就是一棵按主键排好序的 B+ 树</b>，叶子是 16 KB 的页。新主键比谁都大，就追加在最右边；落在中间，页满了就要分裂。见 <a href="../database/mysql-index-bplustree.html#m-page">MySQL 索引与 B+ 树</a>。</li>
+      <li><b>UPDATE 一行会给这行加行锁</b>，到事务提交才放。两个事务改同一行，后来的那个等着。见 <a href="../database/mysql-mvcc-lock.html">MVCC 与锁</a>。</li>
+      <li><b>墙上时钟会往回跳</b>：NTP 一步校正（step）、虚拟机迁移、有人手动改时间。见<a href="clock-timeout-retry.html#m-clock">时钟、超时与重试</a>。</li>
+      <li><b>JavaScript 的数字是 double</b>，只能精确表示 2<sup>53</sup> 以内的整数，19 位的雪花 ID 超过了它。见第一圈 <a href="../mybatis/mybatis-plus.html">MyBatis-Plus 原理</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-seg">机制 1 · 号段：一行记着发到哪了，一次领一千个</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="id_alloc 表里 biz_tag 为 order 的一行，max_id 从 9000 变成 10000 再变成 11000，step 是 1000。实例 A 先执行 UPDATE 加 step 再 SELECT，拿到 10000，于是号段是 9001 到 10000；实例 B 同时执行 UPDATE，被行锁挡住，等 A 提交后拿到 11000，号段是 10001 到 11000。之后两个实例各自在内存里用一个原子计数器往后发，A 的计数器停在 9527。">
+  <rect x="330" y="20" width="300" height="122" rx="14" class="b-pd"/>
+  <text x="480" y="44" text-anchor="middle" class="t-pd">订单库 · id_alloc</text>
+  <rect x="348" y="56" width="264" height="28" rx="6" class="b-card"/>
+  <text x="360" y="75" class="t-mono">biz_tag   max_id               step</text>
+  <rect x="348" y="90" width="264" height="36" rx="6" class="b-card"/>
+  <text x="360" y="113" class="t-mono">order     9000→10000→11000     1000</text>
+
+  <rect x="20" y="20" width="250" height="122" rx="14" class="b-of"/>
+  <text x="145" y="44" text-anchor="middle" class="t-of">实例 A · 启动时</text>
+  <text x="34" y="70" class="t-mono">UPDATE … max_id+step</text>
+  <text x="34" y="92" class="t-mono">SELECT max_id → 10000</text>
+  <text x="34" y="114" class="t-mono">COMMIT</text>
+  <text x="34" y="134" class="t-xs">段 = [10000−1000+1, 10000]</text>
+  <path d="M270 80 H 326" class="e-of" marker-end="url(#ah-of)"/>
+  <text x="298" y="72" text-anchor="middle" class="t-xs">先到</text>
+
+  <rect x="690" y="20" width="250" height="122" rx="14" class="b-bk"/>
+  <text x="815" y="44" text-anchor="middle" class="t-bk">实例 B · 同时启动</text>
+  <text x="704" y="70" class="t-mono">UPDATE … max_id+step</text>
+  <text x="704" y="92" class="t-xs">⏸ 行锁：等 A 提交</text>
+  <text x="704" y="114" class="t-mono">SELECT max_id → 11000</text>
+  <text x="704" y="134" class="t-xs">段 = [10001, 11000]</text>
+  <path d="M690 80 H 634" class="e-bk" marker-end="url(#ah-bk)"/>
+  <text x="662" y="72" text-anchor="middle" class="t-xs">后到</text>
+
+  <text x="480" y="176" text-anchor="middle" class="t-s">之后谁也不再访问 id_alloc，直到这一段发完</text>
+
+  <text x="20" y="214" class="t-of">A 的内存</text>
+  <rect x="110" y="198" width="340" height="26" rx="6" class="b-card"/>
+  <rect x="110" y="198" width="179" height="26" rx="6" class="b-g2"/>
+  <text x="110" y="244" class="t-xs">9001</text>
+  <text x="450" y="244" text-anchor="end" class="t-xs">10000</text>
+  <path d="M289 192 V 230" class="e-ink"/>
+  <text x="289" y="188" text-anchor="middle" class="t-s">next = 9527</text>
+  <text x="20" y="282" class="t-bk">B 的内存</text>
+  <rect x="110" y="266" width="340" height="26" rx="6" class="b-card"/>
+  <rect x="110" y="266" width="4" height="26" rx="2" class="b-g2"/>
+  <text x="110" y="312" class="t-xs">10001</text>
+  <text x="450" y="312" text-anchor="end" class="t-xs">11000</text>
+
+  <rect x="510" y="198" width="430" height="110" rx="12" class="b-card"/>
+  <text x="528" y="224" class="t-s">nextId() 就是一句：</text>
+  <text x="528" y="248" class="t-mono">long v = next.getAndIncrement();</text>
+  <text x="528" y="270" class="t-mono">if (v &lt;= max) return v;   // 段内：纯内存</text>
+  <text x="528" y="294" class="t-xs">发完了才再去 id_alloc 领下一段</text>
+</svg>
+  </div>
+  <figcaption>“不撞”全靠那一行：<code>UPDATE … max_id = max_id + step</code> 在行锁下排队执行，两个实例永远领不到重叠的段。之后每个号只是一次 <code>AtomicLong</code> 自增。</figcaption>
+  </figure>
+
+  <h3 id="m-dbl">机制 2 · 双 buffer：用掉 10% 就去领下一段</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 200" role="img" aria-label="三格。第一格：当前段用掉 10%，后台线程去 id_alloc 领下一段，下一段还是空的虚线框。第二格：当前段用掉 60%，下一段已经领到，备着。第三格：当前段发完，指针换到下一段，调用方不等库；旧段变灰，新的下一段又空了。">
+  <g>
+    <text x="20" y="24" class="t-s">① 用掉 10%：后台去领</text>
+    <rect x="20" y="40" width="260" height="26" rx="6" class="b-card"/>
+    <rect x="20" y="40" width="26" height="26" rx="6" class="b-g2"/>
+    <text x="150" y="58" text-anchor="middle" class="t-xs">当前段</text>
+    <rect x="20" y="80" width="260" height="26" rx="6" class="b-dash"/>
+    <text x="150" y="98" text-anchor="middle" class="t-xs">下一段：还没有</text>
+    <path d="M150 112 V 150" class="e-pdd" marker-end="url(#ah-pd)"/>
+    <rect x="96" y="154" width="108" height="32" rx="8" class="b-pd"/>
+    <text x="150" y="175" text-anchor="middle" class="t-xs">id_alloc · 后台线程</text>
+  </g>
+  <g>
+    <text x="340" y="24" class="t-s">② 下一段到了，备着</text>
+    <rect x="340" y="40" width="260" height="26" rx="6" class="b-card"/>
+    <rect x="340" y="40" width="156" height="26" rx="6" class="b-g2"/>
+    <text x="470" y="58" text-anchor="middle" class="t-xs">当前段 60%</text>
+    <rect x="340" y="80" width="260" height="26" rx="6" class="b-g2"/>
+    <text x="470" y="98" text-anchor="middle" class="t-xs">下一段：[11001, 12000] 已就绪</text>
+    <text x="470" y="140" text-anchor="middle" class="t-xs">库慢 200 ms 也没关系，</text>
+    <text x="470" y="158" text-anchor="middle" class="t-xs">只要它比“发完剩下 90%”快</text>
+  </g>
+  <g>
+    <text x="660" y="24" class="t-s">③ 当前段发完：指针一换</text>
+    <rect x="660" y="40" width="260" height="26" rx="6" class="b-neu"/>
+    <text x="790" y="58" text-anchor="middle" class="t-xs">旧段：发完了</text>
+    <rect x="660" y="80" width="260" height="26" rx="6" class="b-g2"/>
+    <text x="790" y="98" text-anchor="middle" class="t-xs">变成当前段，调用方不等库</text>
+    <path d="M930 98 C 950 98, 950 53, 924 53" class="e-g2" marker-end="url(#ah-g2)"/>
+    <text x="790" y="140" text-anchor="middle" class="t-bad">重启时两段一起丢</text>
+    <text x="790" y="158" text-anchor="middle" class="t-bad">一段 125 ms 就发完、库要 200 ms：照样卡</text>
+  </g>
+</svg>
+  </div>
+  <figcaption>阈值 10% 和后台单线程预取都照着美团 Leaf 的 <code>SegmentIDGenImpl</code>：剩余量小于 step 的 90%、下一段还没备好、也没有线程在领，就提交一个预取任务。两段都空、库也领不到，Leaf 直接返回错误码 −3。</figcaption>
+  </figure>
+
+  <h3 id="m-snow">机制 3 · 雪花：64 位里分好地盘</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="三种 64 位布局，按位数等比例画。MyBatis-Plus：1 位符号，41 位毫秒时间戳，5 位机房，5 位机器，12 位序列号。美团 Leaf：1 位符号，41 位时间戳，10 位机器号，12 位序列号。Seata IdWorker：1 位符号，10 位机器号，41 位时间戳，12 位序列号，时间戳和序列号合在一个 AtomicLong 里。">
+  <text x="20" y="37" class="t-rn">MyBatis-Plus</text>
+  <rect x="160" y="18" width="12" height="28" class="b-neu"/>
+  <rect x="172" y="18" width="492" height="28" class="b-rn"/>
+  <text x="418" y="37" text-anchor="middle" class="t-s">毫秒时间戳 · 41 位（从 2010-11-04 起）</text>
+  <rect x="664" y="18" width="60" height="28" class="b-of"/>
+  <text x="694" y="37" text-anchor="middle" class="t-xs">机房 5</text>
+  <rect x="724" y="18" width="60" height="28" class="b-bk"/>
+  <text x="754" y="37" text-anchor="middle" class="t-xs">机器 5</text>
+  <rect x="784" y="18" width="144" height="28" class="b-card"/>
+  <text x="856" y="37" text-anchor="middle" class="t-xs">序列号 · 12</text>
+  <text x="160" y="66" class="t-monos">2121816155688669185 → 2026-11-15 04:02:47.611 UTC · 机房 1 · 机器 1 · 序列 1（⑤ 实测拆开）</text>
+
+  <text x="20" y="117" class="t-rn">Leaf-snowflake</text>
+  <rect x="160" y="98" width="12" height="28" class="b-neu"/>
+  <rect x="172" y="98" width="492" height="28" class="b-rn"/>
+  <text x="418" y="117" text-anchor="middle" class="t-s">毫秒时间戳 · 41 位（起点自己配）</text>
+  <rect x="664" y="98" width="120" height="28" class="b-bk"/>
+  <text x="724" y="117" text-anchor="middle" class="t-xs">机器号 10 · ZK 发</text>
+  <rect x="784" y="98" width="144" height="28" class="b-card"/>
+  <text x="856" y="117" text-anchor="middle" class="t-xs">序列号 · 12</text>
+  <text x="160" y="146" class="t-monos">新毫秒的序列号从 0～99 里随机起；机器号按 ip:port 在 ZooKeeper 建持久顺序节点拿</text>
+
+  <text x="20" y="197" class="t-cg">Seata IdWorker</text>
+  <rect x="160" y="178" width="12" height="28" class="b-neu"/>
+  <rect x="172" y="178" width="120" height="28" class="b-bk"/>
+  <text x="232" y="197" text-anchor="middle" class="t-xs">机器号 10</text>
+  <rect x="292" y="178" width="492" height="28" class="b-cg"/>
+  <text x="538" y="197" text-anchor="middle" class="t-s">时间戳 · 41 位（启动时取一次）</text>
+  <rect x="784" y="178" width="144" height="28" class="b-card"/>
+  <text x="856" y="197" text-anchor="middle" class="t-xs">序列号 · 12</text>
+  <path d="M292 214 V 224 H 928 V 214" class="e-cg"/>
+  <text x="610" y="242" text-anchor="middle" class="t-s">这 53 位是一个 AtomicLong，每发一个号 +1，启动后不再看钟</text>
+
+  <text x="160" y="284" class="t-xs">按位数等比例：1 位 = 12 px。41 位毫秒 ≈ 69.7 年；12 位序列号 = 每毫秒 4096 个，单线程 ⑤ 实测 410 万个/秒，正好顶到这个上限。</text>
+</svg>
+  </div>
+  <figcaption>三个号同时满足才会撞：<b>同一毫秒、同一个机器号、同一个序列号</b>。序列号由一台机器自己的 <code>synchronized</code> 或 <code>AtomicLong</code> 管，所以“不撞”剩下两个前提：时间不往回走，机器号各不相同。</figcaption>
+  </figure>
+
+  <h3 id="m-design">为什么这样设计：信谁，就怕谁出事</h3>
+  <div class="design">
+    <div class="card" data-role="g2">
+      <h3>号段：把“不撞”交给数据库</h3>
+<svg class="sv" viewBox="0 0 440 150" role="img" aria-label="三个实例都从同一行 id_alloc 领段，每 1000 个号访问一次库。">
+  <rect x="160" y="10" width="120" height="44" rx="10" class="b-pd"/>
+  <text x="220" y="37" text-anchor="middle" class="t-s">id_alloc 一行</text>
+  <rect x="20" y="100" width="110" height="36" rx="9" class="b-of"/>
+  <text x="75" y="123" text-anchor="middle" class="t-xs">A [9001, 10000]</text>
+  <rect x="165" y="100" width="110" height="36" rx="9" class="b-bk"/>
+  <text x="220" y="123" text-anchor="middle" class="t-xs">B [10001, 11000]</text>
+  <rect x="310" y="100" width="110" height="36" rx="9" class="b-card"/>
+  <text x="365" y="123" text-anchor="middle" class="t-xs">C [12001, 13000]</text>
+  <path d="M190 54 L 90 98" class="e-pd" marker-end="url(#ah-pd)"/>
+  <path d="M220 54 V 98" class="e-pd" marker-end="url(#ah-pd)"/>
+  <path d="M250 54 L 350 98" class="e-pd" marker-end="url(#ah-pd)"/>
+  <text x="340" y="70" class="t-xs">每 1000 个号一次</text>
+</svg>
+      <ul class="pains"><li class="ok">号短、能读、不看钟，加实例不用分配任何东西</li><li>库慢、库挂、库主从切换丢了最后一次 UPDATE，全落在发号上</li></ul>
+    </div>
+    <div class="card" data-role="rn">
+      <h3>雪花：把“不撞”拆进位里</h3>
+<svg class="sv" viewBox="0 0 440 150" role="img" aria-label="三台机器各有自己的机器号，沿着同一条时间轴各发各的，彼此不通信。">
+  <path d="M60 130 H 420" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text x="420" y="146" text-anchor="end" class="t-xs">时间（毫秒）</text>
+  <text x="10" y="34" class="t-xs">机器 1</text>
+  <text x="10" y="70" class="t-xs">机器 2</text>
+  <text x="10" y="106" class="t-xs">机器 3</text>
+  <path d="M60 30 H 410" class="e-rn"/>
+  <path d="M60 66 H 410" class="e-of"/>
+  <path d="M60 102 H 410" class="e-bk"/>
+  <circle cx="120" cy="30" r="5" class="f-rn"/><circle cx="200" cy="30" r="5" class="f-rn"/><circle cx="330" cy="30" r="5" class="f-rn"/>
+  <circle cx="150" cy="66" r="5" class="f-of"/><circle cx="260" cy="66" r="5" class="f-of"/>
+  <circle cx="100" cy="102" r="5" class="f-bk"/><circle cx="220" cy="102" r="5" class="f-bk"/><circle cx="380" cy="102" r="5" class="f-bk"/>
+</svg>
+      <ul class="pains"><li class="ok">谁也不访问，不依赖任何服务，号自带时间</li><li>机器号要有人事先分好、不能重；时钟不能往回走</li></ul>
+    </div>
+  </div>
+  <div class="rule-box"><b>决定胜负的约束</b>：每发一个号都要排队问一个中心（发号表、<code>INCR</code>），中心就是瓶颈和单点。两种设计都在想办法不问中心：号段是<b>批发</b>，一千个号问一次，中心的压力降到千分之一，但中心还在；雪花是<b>分地盘</b>，地盘事先分好就一次也不问，代价是把“不撞”押在两件没人替你检查的事上：机器号和时钟。Seata 的改良版再退一步：时钟只在启动时看一次，之后靠计数器往前走，运行中回拨就伤不到它，代价是号里的“时间”不再是发号的时刻（<a href="#d-seata">⑥ 第三圈</a>）。</div>
+
+  <h3 id="m-syntax">最少的写法</h3>
+  <div class="cmp3 two-col">
+    <div class="codebox" data-role="g2"><div class="code-bar"><b>号段</b><code>预取、动态 step 放到 ⑥</code></div>
+<pre><code>CREATE TABLE id_alloc (
+  biz_tag VARCHAR(32) PRIMARY KEY,
+  max_id  BIGINT NOT NULL,
+  step    INT    NOT NULL
+);
+INSERT INTO id_alloc VALUES ('order', 9000, 1000);
+
+-- 领一段：UPDATE 和 SELECT 在一个事务里
+BEGIN;
+UPDATE id_alloc SET max_id = max_id + step
+ WHERE biz_tag = 'order';
+SELECT max_id, step FROM id_alloc
+ WHERE biz_tag = 'order';   -- 10000, 1000
+COMMIT;                     -- 段 = [9001, 10000]</code></pre></div>
+    <div class="codebox" data-role="rn"><div class="code-bar"><b>雪花（MyBatis-Plus）</b><code>机器号怎么分放到 ⑥</code></div>
+<pre><code>@TableId(type = IdType.ASSIGN_ID)   // insert 时 id 为空就生成
+private Long id;
+
+long id = IdWorker.getId();         // 不经过实体也能取
+
+# application.yml（3.5.7 起；两个都配才生效，
+#  只配一个就退回按网卡和进程号自己算）
+mybatis-plus:
+  global-config:
+    sequence:
+      datacenter-id: 1    # 0..31
+      worker-id: 3        # 0..31，两者组合全局唯一</code></pre></div>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：在交易靶场里发出 9527</h2>
+  </div>
+  <p class="lead">一个 MySQL 8.4 容器放 <code>id_alloc</code>，两个号段发号器当实例 A、B；雪花直接用 MyBatis-Plus 3.5.18 真实的 <code>Sequence</code>。按 JDK 8 写法，本机用 JDK 17 跑。<a href="https://github.com/archeu/study-labs/tree/main/java/arch/distributed-id">完整代码 →</a></p>
+  <div class="codebox" data-role="g2"><div class="code-bar"><b>SegmentIdGen 的核心</b><code>双 buffer 的预取放到 ⑥ 第三圈</code></div>
+<pre><code>// 领一段：UPDATE + SELECT 一个事务，行锁保证 A、B 领到的段不重叠
+Segment fetch() {
+    update("UPDATE id_alloc SET max_id = max_id + step WHERE biz_tag = ?", tag);
+    long max = …, step = …;   // SELECT max_id, step
+    commit();
+    return new Segment(max - step + 1, max);
+}
+
+long nextId() {
+    while (true) {
+        Segment s = cur;
+        long v = s.next.getAndIncrement();
+        if (v &lt;= s.max) return v;               // 段内：纯内存
+        synchronized (this) {                    // 段发完：只让一个线程去换
+            if (cur != s) continue;              // 别人已经换过了
+            cur = fetch();                       // 单 buffer：在这里等库
+        }
+    }
+}</code></pre></div>
+<pre class="console"><b>$ ./run.sh new segment</b>
+== segment ①：两个订单服务实例各领一段（id_alloc 里 order 的 max_id 从 9000 开始，step 1000）
+A 启动领到 [9001, 10000]，B 启动领到 [10001, 11000]
+<span class="w">A 发到第 527 个号：订单号 9527（全程没访问库，A 的 id_alloc 访问次数 = 1 + 预取 1）</span>
+<span class="r">接下来按时间先后交替下 6 单：A 9528 → B 10001 → A 9529 → B 10002 → A 9530 → B 10003</span>
+A 被 kill -9：当前段发到 9530，剩下 470 个，预取好的下一段 [11001, 12000] 也一起丢了
+A 重启领到 [12001, 13000]：永远不会再发出来的号 1470 个（订单号有空洞，但没有重复）
+
+== segment ②：两个实例 × 4 个线程，各发 50,000 个号（双 buffer），查重
+<span class="w">发了 400,000 个号，用时 1.93 s（207,046 个/秒），重复 0 个，访问 id_alloc 402 次（一次领 1000 个）</span>
+
+<b>$ ./run.sh again snowflake</b>
+== snowflake ①：拆开一个 MyBatis-Plus 雪花 ID（Sequence(workerId=1, datacenterId=1)）
+id = 2121816155688669185（19 位十进制）
+二进制 0 | 00111010111001000110100100011010011111010 | 00001 | 00001 | 000000000001
+拆开：时间 2026-11-15T04:02:47.611Z | 机房 1 | 机器 1 | 序列 1
+<span class="r">转成 JS 的 Number（double）再转回来：2121816155688669184，差了 1</span>
+不给 workerId，让 MyBatis-Plus 自己算（本机）：机房 1 | 机器 9 | 序列 1</pre>
+  <div class="lab-res" data-role="of"><b>读出来的结论</b>（2 核 ARM，JDK 17，MySQL 8.4.13，MyBatis-Plus 3.5.18；号段部分跑了 4 次，除了耗时和重试次数，数字每次都一样）
+    <ul>
+      <li>9527 是 A 的第 527 个号，A 从启动到发出它只访问过 id_alloc 两次：启动领段一次，用掉 10% 后预取一次。</li>
+      <li>按时间先后，号是 9528、10001、9529、10002……：<b>每个实例内递增，实例之间交错</b>。拿“id 大的更晚”去做增量同步，会漏单。</li>
+      <li>两个实例 8 个线程抢 40 万个号，一个都不重复；平均每领一次发 1000 个。</li>
+      <li>雪花的机器号不配，MyBatis-Plus 按网卡和进程号算了一个“机器 9”；上一次跑是“机器 29”。它会变，所以也会撞（<a href="#p-twin">坑 1</a>）。</li>
+    </ul>
+  </div>
+  <div class="done-box"><b>到这里已经能交差了</b>：订单服务启动时建一个 <code>SegmentIdGen("order")</code>，下单先 <code>nextId()</code> 拿到 9527，再开全局事务、写三个库；或者实体上 <code>@TableId(type = ASSIGN_ID)</code>，给每个实例配好不重复的 <code>worker-id</code>。
+    <br><b>已知还没处理的细节</b>：机器号怎么保证不重（<a href="#p-twin">坑 1</a>），时钟回拨（<a href="#p-back">坑 2</a>、<a href="#p-restart">坑 3</a>），号段在库慢、库挂、切主时会怎样（<a href="#p-slow">坑 6</a>～<a href="#p-failover">坑 8</a>），双 buffer 的并发细节（<a href="#d-race">第三圈</a>），ID 的形状对 InnoDB 的影响（<a href="#d-btree">第三圈</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="rn">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：机器号、时钟、库，三处各会怎么出事</h2>
+  </div>
+
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-twin"><b><em>1</em>两个实例拿了同一个机器号<a class="rootmark" href="#m-snow">← ④ 机制 3 三元组</a></b>
+      <dl><dt>现象</dt><dd>两个实例都配成（机房 1，机器 1）：低流量各发约 1870 个，撞了 900 个；一口气各发 50 万个，撞了 43.5 万个（⑤ 实测）。</dd><dt>根源</dt><dd>时间、机器号、序列号三样都一样就撞。MyBatis-Plus 新毫秒的序列号只从 1 或 2 起，低流量时两边同一毫秒的号有一半概率一样。不配机器号时它自己算：机房 = MAC 末两字节右移 6 位再模 32，机器 = “机房号 + 进程号”的 hashCode 模 32，进程号小于 10（容器里常是 1）就换成随机数。本机 Docker 27 按容器 IP 生成 MAC，两次起容器都是 <code>02:42:ac:11:00:03</code>；各台宿主机网段一样时机房号也一样，只剩 32 种机器号：5 个实例有 28% 的概率撞上，10 个是 79%。</dd><dt>做法</dt><dd class="fix">机器号由一个地方统一发，并且记账：Leaf 在 ZooKeeper 按 <code>ip:port</code> 建持久顺序节点；百度 UidGenerator 每次启动往 <code>WORKER_NODE</code> 表插一行，用自增 id 当机器号（22 位）；K8s 用 StatefulSet 的序号。拿不到号就不启动。</dd></dl>
+    </div>
+    <div class="pit" id="p-back"><b><em>2</em>运行中时钟往回拨<a class="rootmark" href="#m-snow">← ④ 机制 3 时间不能回头</a></b>
+      <dl><dt>现象</dt><dd>回拨 3 ms：那一次调用多花了 6 ms。回拨 10 ms、1 s：直接抛 <code>Clock moved backwards</code>；1 s 那次之后，每毫秒调一次，1005 ms 里失败了 908 次（⑤ 之外的实测，<code>snowflake ④</code>）。</dd><dt>根源</dt><dd>MyBatis-Plus 3.5.18 的 <code>nextId()</code> 记着上一次的毫秒 <code>lastTimestamp</code>：现在比它小，差 ≤ 5 ms 就 sleep 差值 × 2 再看一次，否则抛异常。Leaf 一样，只是返回错误码。不敢接着发，是因为那段时间的号可能已经发过了。</dd><dt>做法</dt><dd class="fix">运行中校时只用 slew（慢慢调快慢），不 step；监控时钟偏移，偏得多的实例先摘流量。见<a href="clock-timeout-retry.html#m-clock">时钟、超时与重试</a>。</dd></dl>
+    </div>
+    <div class="pit" id="p-restart"><b><em>3</em>重启时钟回拨：内存里的“上一次”没了<a class="rootmark" href="#m-snow">← ④ 机制 3 时间不能回头</a></b>
+      <dl><dt>现象</dt><dd>实例跑了 300 ms 后重启，重启时钟往回拨了 300 ms：重启后 300 ms 发的 2810 个号里，2495 个和重启前的重复。没有任何报错（实测，<code>snowflake ⑤</code>）。</dd><dt>根源</dt><dd><code>lastTimestamp</code> 只在内存里，重启后从 −1 开始，坑 2 那道检查形同虚设。</dd><dt>做法</dt><dd class="fix">把“最后发号的时间”存到进程外面，启动时比一比。Leaf 每 3 秒把本机时间写进 ZooKeeper，启动时那里的时间比本机还晚就拒绝启动；它最多漏掉最后 3 秒。最简单的办法：启动后先等一段比可能的回拨量更长的时间。</dd></dl>
+    </div>
+    <div class="pit" id="p-mod"><b><em>4</em>低流量时按 id % 4 分库，只落两个库<a class="rootmark" href="#m-snow">← ④ 机制 3 低 12 位是序列号</a></b>
+      <dl><dt>现象</dt><dd>每毫秒最多一个号，发 1000 个，按 <code>id % 4</code> 分到 4 个库：<code>[0, 529, 471, 0]</code>；按 <code>id % 3</code>：<code>[328, 322, 350]</code>（实测，<code>snowflake ②</code>）。</dd><dt>根源</dt><dd>对 2<sup>k</sup> 取模（k ≤ 12）只看最低 k 位，也就是序列号。MyBatis-Plus 新毫秒的序列号是 1 或 2（源码注释：“不同毫秒内，序列号置为 1 - 2 随机数”），所以只会落在 1、2 号库。它不从 0 起，本来就是为了避免低流量时 ID 全是偶数。</dd><dt>做法</dt><dd class="fix">分片别直接拿雪花 ID 对 2 的幂取模：先 hash 再取模，或者在号里嵌入用户的分片位（基因法），按用户分库。</dd></dl>
+    </div>
+    <div class="pit" id="p-gap"><b><em>5</em>号段：重启丢号，订单号不连续<a class="rootmark" href="#m-dbl">← ④ 机制 1、2 段在内存里</a></b>
+      <dl><dt>现象</dt><dd>A 发到 9530 被 kill -9，重启领到 [12001, 13000]：9531～10000 和预取好的 [11001, 12000] 永远不会再发，一共 1470 个（⑤ 实测）。</dd><dt>根源</dt><dd>段在内存里，没发完的号不会还回 id_alloc；双 buffer 让一次重启多丢一整段。</dd><dt>做法</dt><dd class="fix">别对订单号提“连续”的要求：不拿它当“今天第几单”，对账按状态比，不按号有没有断。想少丢就把 step 调小，可这和坑 7 要的“段大一点”正好相反，按坑 7 定。</dd></dl>
+    </div>
+    <div class="pit" id="p-slow"><b><em>6</em>号段：库慢了，一段卡一次<a class="rootmark" href="#m-dbl">← ④ 机制 2 双 buffer</a></b>
+      <dl><dt>现象</dt><dd>领号段时库慢到 200 ms，按固定速率发 3 秒：单 buffer 4000 个/秒，12 次调用各卡 211 ms；双 buffer 4000 个/秒，一次没卡；双 buffer 8000 个/秒，15 次各卡 209 ms（实测，<code>segment ③</code>）。</dd><dt>根源</dt><dd>双 buffer 只是把“等库”挪到了后台，前提是后台领一段比“发完剩下 90%”快。8000 个/秒时，1000 个号只够用 125 ms，比 200 ms 短。</dd><dt>做法</dt><dd class="fix">step 至少是“峰值 QPS × 库最慢一次的耗时”的几倍。Leaf 有动态 step：这一段不到 15 分钟就发完，下次 step 翻倍（上限 1,000,000）；超过 30 分钟才发完就减半。</dd></dl>
+    </div>
+    <div class="pit" id="p-down"><b><em>7</em>号段：库挂了，只能撑“手里剩的号 ÷ QPS”<a class="rootmark" href="#m-dbl">← ④ 机制 2 双 buffer</a></b>
+      <dl><dt>现象</dt><dd>双 buffer、4000 个/秒、step 1000，库挂了以后又发了 1800 个，撑了 430 ms，然后报“两段都发完了”；这 430 ms 里重试访问库 889 次（实测，<code>segment ④</code>，库挂用开关模拟）。</dd><dt>根源</dt><dd>库挂之后能发的，只有当前段的余量加上备好的下一段。</dd><dt>做法</dt><dd class="fix">按“库最长可能挂多久”定段大小：峰值 2000 个/秒、要撑 10 分钟，手里就要常备 120 万个号，这正是动态 step 在自动做的事。预取失败要退避，别每次调用都打一次库。</dd></dl>
+    </div>
+    <div class="pit" id="p-failover"><b><em>8</em>号段：id_alloc 主从切换，max_id 倒退<a class="rootmark" href="#m-seg">← ④ 机制 1 一行加行锁</a></b>
+      <dl><dt>现象</dt><dd>id_alloc 所在的库是异步复制。主库刚给 B 领了 [10001, 11000] 就挂了，从库还没收到这次更新；切主后 max_id 还是 10000，下一个来领的实例又领到 [10001, 11000]，两个实例同时发同一段。</dd><dt>根源</dt><dd>号段的“不撞”全靠那一行的值只往前走。切主丢了最后一次 UPDATE，值倒退了。这一条是从机制推出来的，本页没有实测。</dd><dt>做法</dt><dd class="fix">id_alloc 放在半同步复制或 MGR（多数派提交）的库上；万一异步切主，放流量之前先把每个 biz_tag 的 max_id 往前推一大段，比如加 100 万。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <ul class="rules-list">
+    <li><b>机器号显式分配，启动时登记，拿不到就不启动</b>。防的是：坑 1，靠网卡和进程号碰运气。</li>
+    <li><b>ID 在库里存 BIGINT，接口里转成字符串</b>（Jackson <code>ToStringSerializer</code>）。防的是：⑤ 里 2121816155688669185 到了 JS 里变成 …184。</li>
+    <li><b>不拿 ID 大小判断先后</b>，增量同步、分页游标用更新时间加主键，或者 binlog。防的是：号段跨实例交错（⑤ 的 9528 → 10001 → 9529），“id &gt; 上次最大值”会漏掉后发的小号。</li>
+    <li><b>对外展示的订单编号和主键分开</b>。防的是：号段的号连续，两天的号一减就是这两天的单量；雪花 ID 一拆就能看出下单时刻和机器号。</li>
+    <li><b>运行中校时只 slew，并监控时钟偏移</b>。防的是：坑 2、坑 3。</li>
+    <li><b>号段 step 按峰值和库的故障时长定，开动态 step；id_alloc 放在不会丢更新的库上</b>。防的是：坑 6、7、8。</li>
+  </ul>
+
+  <h3>第三圈 · 深处</h3>
+  <h4 id="d-btree">1. ID 长什么样，决定 InnoDB 主键索引有多大</h4>
+  <p>往 InnoDB 插 30 万行（主键 + 100 字节 payload，每 1000 行一个事务），只换主键（本机实测，<code>btree</code> 跑了 3 次，页数每次差 3% 以内）：</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 360" role="img" aria-label="上半部分两张小图：顺序插入时，新记录正好接在上一次插入的位置后面，InnoDB 从插入点分裂，旧页保持满的；乱序插入时，新记录落在页中间，页从中间对半分，两页各半满。下半部分是五根横条，表示 30 万行占用的空间：BIGINT 雪花单实例 39.6 MB，BIGINT 雪花 8 个实例轮流写 71.6 MB，随机 UUID v4 79.8 MB，UUID v7 毫秒内随机 81.9 MB，UUID v7 毫秒内递增 48.7 MB。">
+  <text x="20" y="24" class="t-s">接在上一次插入后面：从插入点分</text>
+  <rect x="20" y="36" width="180" height="34" rx="5" class="b-pd"/>
+  <text x="110" y="58" text-anchor="middle" class="t-xs">旧页：满的</text>
+  <rect x="210" y="36" width="60" height="34" rx="5" class="b-good"/>
+  <text x="240" y="58" text-anchor="middle" class="t-xs">新页</text>
+  <path d="M240 90 V 74" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="240" y="104" text-anchor="middle" class="t-xs">新记录</text>
+
+  <text x="500" y="24" class="t-s">落在中间：从中间对半分</text>
+  <rect x="500" y="36" width="120" height="34" rx="5" class="b-bad"/>
+  <text x="560" y="58" text-anchor="middle" class="t-xs">半满</text>
+  <rect x="630" y="36" width="120" height="34" rx="5" class="b-bad"/>
+  <text x="690" y="58" text-anchor="middle" class="t-xs">半满</text>
+  <path d="M610 90 V 74" class="e-bad" marker-end="url(#ah-bad)"/>
+  <text x="610" y="104" text-anchor="middle" class="t-xs">新记录</text>
+  <text x="780" y="58" class="t-xs">以后还会再插进来，</text>
+  <text x="780" y="74" class="t-xs">但多半填不满</text>
+
+  <line x1="250" y1="130" x2="250" y2="340" class="e-mut" stroke-dasharray="3 4"/>
+  <text x="20" y="150" class="t-s">BIGINT 雪花（单实例）</text>
+  <rect x="250" y="138" width="251" height="20" rx="4" class="b-rn"/>
+  <text x="508" y="153" class="t-mono">39.6 MB · 2,533 页 · 分裂 2,524</text>
+  <text x="20" y="190" class="t-s">BIGINT 雪花 8 个实例轮流写</text>
+  <rect x="250" y="178" width="454" height="20" rx="4" class="b-bad"/>
+  <text x="711" y="193" class="t-mono">71.6 MB · 4,583 页</text>
+  <text x="20" y="230" class="t-s">CHAR(36) 随机 UUID v4</text>
+  <rect x="250" y="218" width="506" height="20" rx="4" class="b-bad"/>
+  <text x="763" y="233" class="t-mono">79.8 MB · 5,105 页</text>
+  <text x="20" y="270" class="t-s">CHAR(36) UUID v7 毫秒内随机</text>
+  <rect x="250" y="258" width="519" height="20" rx="4" class="b-bad"/>
+  <text x="776" y="273" class="t-mono">81.9 MB · 5,240 页</text>
+  <text x="20" y="310" class="t-s">CHAR(36) UUID v7 毫秒内递增</text>
+  <rect x="250" y="298" width="309" height="20" rx="4" class="b-good"/>
+  <text x="566" y="313" class="t-mono">48.7 MB · 3,115 页</text>
+  <text x="250" y="346" class="t-xs">横条按 DATA_LENGTH 等比例画（1 MB ≈ 6.34 px）；第 5 行比第 1 行大，是因为主键本身大了 28 字节</text>
+</svg>
+  </div>
+  <figcaption>MySQL 8.4 源码 <code>btr_page_get_split_rec_to_right()</code>：新记录正好插在页头 <code>PAGE_LAST_INSERT</code> 记的那条后面，才当成“顺序插入”，从插入点分裂；否则从中间分。</figcaption>
+  </figure>
+  <ul class="pains">
+    <li class="ok"><b>只要单调，长短都还好</b>：UUID v7 毫秒内用计数器递增（RFC 9562 的做法），48.7 MB，只比 BIGINT 多出主键自身的那点。</li>
+    <li><b>毫秒内乱一点，就和完全随机一样</b>：毫秒内用随机数的 UUID v7，81.9 MB，比随机 UUID v4 还大。这次插入速度约每毫秒 44 行，每毫秒里的几十行顺序是乱的，每次都插不到“上一次的后面”。</li>
+    <li><b>多实例的雪花也会这样</b>：同一毫秒里，号按机器号排，不按到达顺序；8 个实例轮流写，71.6 MB。这次是每毫秒约 60 行的极端速率；真实流量下每毫秒到达的号少得多，影响会小，本页没测（<a href="#loop">↺ 练习 4</a>）。号段跨实例交错得更厉害：A 在 9xxx、B 在 10xxx 两处同时追加，好在两处各自都是顺序的。</li>
+  </ul>
+
+  <h4 id="d-seata">2. Seata 的改良雪花：启动后不再看钟</h4>
+  <p>Seata 2.6.0 的 <code>IdWorker</code> 把 41 位时间戳和 12 位序列号合成一个 <code>AtomicLong</code>，启动时用当前时间初始化，之后每发一个号 <code>incrementAndGet()</code>：序列号满了自然进位到时间戳上。只有当这个“逻辑时间”赶上了墙上时钟，才 <code>sleep(5)</code> 一下，而且只等这一次，等完照样加 1。</p>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>照着它写的 <code>SeataStyleIdWorker</code>，本机实测</th><th>结果</th><th>为什么</th></tr></thead>
+    <tbody>
+      <tr data-role="cg"><td>运行中把钟往回拨 1 秒，接着连发 1.5 秒</td><td class="y">208 万个，没有异常、没有重复、严格递增</td><td>逻辑时间不跟着钟走。只有 203 次调用各 sleep 了 5 ms：这个实例刚启动，逻辑时间贴着墙上时钟，回拨后要等钟追上来</td></tr>
+      <tr data-role="cg"><td>先在机器 2 发一个号，5 ms 后在机器 1 发一个</td><td class="m">18859322099458049 之后是 9852122844717057</td><td>机器号在高位：跨节点按机器号排，不按时间排</td></tr>
+    </tbody>
+  </table></div>
+  <p>代价是号里的“时间”变成了“启动时刻 + 已发数量 ÷ 4096 毫秒”，拆不出发号时刻。跑了一天、每秒 100 个号的节点，逻辑时间只比启动时刻晚 2 秒左右，远落后于墙上时钟，钟往回拨几秒根本碰不到它。Seata 的 XID 是 <code>TC 的 IP:端口:事务号</code>，事务号只要在这个 TC 节点内唯一，正好用得上。</p>
+
+  <h4 id="d-leaf">3. Leaf 怎么分机器号、怎么防重启回拨</h4>
+  <p>Leaf-snowflake 启动时按 <code>ip:port</code> 去 ZooKeeper 的 forever 目录下找自己的节点：有就沿用那个顺序号当机器号（同一个实例重启拿回原号），没有就建一个持久顺序节点 <code>ip:port-0000000001</code>。拿到的号写进本地文件，ZooKeeper 连不上时用文件里的号启动。启动时比较节点里记的时间和本机时间，节点里的更晚就拒绝启动；之后每 3 秒上报一次本机时间（<code>SnowflakeZookeeperHolder</code>）。运行中的回拨处理和 MyBatis-Plus 一样，≤ 5 ms 等两倍，否则报错；新毫秒的序列号从 0～99 里随机起。</p>
+
+  <h4 id="d-race">4. 双 buffer 的并发细节：我写 SegmentIdGen 时踩的坑</h4>
+  <p>第一版在两个实例 × 4 线程下，偶尔有线程报“两段都发完了”，可库明明好好的。原因：段发完时，线程 T1、T2 先后进了 <code>synchronized</code> 块，都 <code>wait()</code> 等预取；预取到了，T1 醒来换上新段，把“下一段”清空；T2 醒来一看，“下一段”是空的、也没人在领，就判了“两段都空”。<code>wait()</code> 会让出锁，醒来后必须重新检查<b>当前段是不是已经被换过</b>。补上 <code>if (cur != s) continue;</code> 后跑 3 次，40 万个号 0 重复、0 报错。Leaf 的写法是：等完先在写锁里从当前段再取一次号，取不到才去看下一段。</p>
+
+  <h3 id="bench-h">实验台：四种发号，六种事故</h3>
+  <div class="lab bench" data-role="rn" id="bench" tabindex="0">
+    <div class="ctl-grid">
+      <div class="grp ctl span"><span>怎么发号</span><div class="pick2" id="pk-sch">
+        <button type="button" data-v="seg1" aria-pressed="false">号段 · 单 buffer</button>
+        <button type="button" data-v="seg2" aria-pressed="true">号段 · 双 buffer</button>
+        <button type="button" data-v="mp" aria-pressed="false">雪花 · MyBatis-Plus</button>
+        <button type="button" data-v="seata" aria-pressed="false">改良雪花 · Seata 式</button>
+      </div></div>
+      <div class="grp ctl span"><span>1 秒时出了什么事</span><div class="pick2" id="pk-inc">
+        <button type="button" data-v="slow" aria-pressed="false">id_alloc 库慢到 200 ms</button>
+        <button type="button" data-v="down" aria-pressed="true">id_alloc 库挂了</button>
+        <button type="button" data-v="back10" aria-pressed="false">时钟回拨 10 ms</button>
+        <button type="button" data-v="back1000" aria-pressed="false">时钟回拨 1 s</button>
+        <button type="button" data-v="restart" aria-pressed="false">kill -9 后重启（钟回拨 300 ms）</button>
+        <button type="button" data-v="twin" aria-pressed="false">两个实例同一个机器号</button>
+      </div></div>
+      <label class="ctl"><span class="lbl">每秒多少单 q<output id="o-q">4,000</output></span><input type="range" id="r-q" min="1000" max="20000" step="1000" value="4000"></label>
+      <label class="ctl"><span class="lbl">号段 step<output id="o-s">1,000</output></span><input type="range" id="r-s" min="0" max="3" step="1" value="1"></label>
+    </div>
+    <div class="guess" data-role="rn" id="bg">
+      <p id="bg-q"><b>先猜</b>：</p>
+      <div class="opts" id="bg-opts">
+        <button type="button" data-g="ok" aria-pressed="false">照常发</button>
+        <button type="button" data-g="slow" aria-pressed="false">变慢（有调用等 50 ms 以上）</button>
+        <button type="button" data-g="fail" aria-pressed="false">报错，发不出号</button>
+        <button type="button" data-g="dup" aria-pressed="false">发出重复的号</button>
+        <button type="button" data-g="gap" aria-pressed="false">没出错，只是跳号</button>
+        <button type="button" data-g="skip" class="skip" aria-pressed="false">不猜，直接看</button>
+      </div>
+      <p class="res" id="bg-res" hidden></p>
+    </div>
+    <div id="bench-out" hidden>
+      <div class="tiles4" id="tiles">
+        <div class="tile" data-role="rn"><small>结果</small><b id="t-key">–</b><span id="t-key2"></span></div>
+        <div class="tile" data-role="of"><small>最慢一次 nextId()</small><b id="t-lat">–</b><span id="t-lat2"></span></div>
+        <div class="tile" data-role="bad"><small>报错 / 重复</small><b id="t-bad">–</b><span id="t-bad2"></span></div>
+        <div class="tile" data-role="other"><small>永远不会再发的号</small><b id="t-lost">–</b><span id="t-lost2"></span></div>
+      </div>
+      <div class="fig-box wide"><svg id="strip" class="sv" viewBox="0 0 900 110" role="img" aria-label="3 秒的时间条，每格 50 毫秒"></svg></div>
+      <p class="why" id="why"></p>
+    </div>
+    <p class="tip">模型估算，看 3 秒，事故在 1 秒时发生。号段：一个实例扛全部 q，开始时当前段还剩 37%，领一段平时 5 ms；“两个实例同一个机器号”时两个实例各扛 q/2。规则照 Leaf、MyBatis-Plus 3.5.18、Seata 2.6.0 的源码写，量级和 ⑤⑥ 的实测对过；实测是闭环发号，这里是请求按时到达、会排队，所以库慢时等得比实测久。</p>
+  </div>
+
+  <h3 id="next">下一圈</h3>
+  <ul class="pains">
+    <li class="ok">百度 UidGenerator 的 <code>CachedUidGenerator</code>：用 RingBuffer 提前填好一批号、借用未来的秒，默认 28 位秒（约 8.5 年）+ 22 位机器号 + 13 位序列号，和 Seata 的“借未来时间”对照着看。</li>
+    <li class="ok">分库分表下的 ID：基因法把用户的分片位嵌进订单号，按订单号也能找到库；ShardingSphere 内置的雪花和 key 生成策略。</li>
+    <li class="ok">UUID v7 存 <code>BINARY(16)</code>、MySQL 的 <code>UUID_TO_BIN(…, 1)</code> 交换时间位，和 BIGINT 在二级索引上的差距。</li>
+    <li class="ok">号段服务化：Leaf 作为独立服务（HTTP 取号）和嵌在应用里的取舍，一次取一批号给客户端缓存。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改 IdLab</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>改预取阈值</b>：把双 buffer 的 <code>s.idle() &lt; 0.9 * step</code> 改成 <code>0.1 * step</code>（用掉 90% 才去领）。再跑 <code>segment ③</code>，先猜 4000 个/秒还卡不卡；要让 8000 个/秒也不卡，step 至少多大？（坑 6）</li>
+    <li><b>加动态 step</b>：一段从领到发完不到 15 分钟，下次 step 翻倍，上限 1,000,000；为了在几秒内看到效果，把 15 分钟缩成 50 ms。再跑 <code>segment ④</code>，库挂了以后能撑多久？（坑 7）</li>
+    <li><b>启动时查回拨</b>：在 <code>snowflake ⑤</code> 里，重启前把最后发号的毫秒写进文件，重启时比本机时间晚就拒绝启动。重复还剩多少？只每 3 秒写一次（像 Leaf）呢？（坑 3）</li>
+    <li><b>多实例写 B+ 树</b>：<code>btree</code> 里把 8 个实例换成 2 个；再先生成好 30 万个号、按每毫秒 1 个的节奏取号，然后插入。页数会落在 2,533 和 4,583 之间的哪里？（第三圈 1）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>分布式 ID 就是把“不撞”从每一单里拿出去：号段一次向数据库批发一段，靠一行加行锁不撞，怕库慢、库挂、切主；雪花事先给每台机器划好地盘，靠时间 + 机器号 + 序列号不撞，怕时钟回拨和机器号重复。</p></details>
+    <details><summary>2. 三种老办法各疼在哪？</summary><p>各库自增：INSERT 之后才有号，库存、券得等订单库先写；分库后各分片从 1 开始撞号。每单问一次发号库：每单多一次往返，发号库是单点。UUID：36 字符，随机插进 B+ 树中间，页对半分裂，表大一倍，也看不出先后。</p></details>
+    <details><summary>3. 坑 1（两个实例撞号）的根源是 ④ 的哪条？</summary><p>机制 3：雪花的号由（时间、机器号、序列号）三样组成，序列号只在一台机器内部排开。机器号一样，就只剩“时间不同”能把两台机器的号分开；同一毫秒里两边又都从 1 或 2 起，必然有一半撞上。</p></details>
+    <details><summary>4. 预测：号段 step 1000、双 buffer，QPS 从 4000 涨到 8000，库一直正常（领一段 5 ms），会卡吗？</summary><p>不会。机制 2 的条件是“后台领一段的时间 &lt; 发完剩下 90% 的时间”：8000 个/秒发完 900 个要 112 ms，远大于 5 ms。坑 6 卡住，是因为库慢到了 200 ms，不是因为 QPS 本身。</p></details>
+    <details><summary>5. 预测：雪花 ID 按 id % 4 分 4 个库，高峰期每毫秒几十单，分布会怎样？</summary><p>接近均匀。机制 3：低 12 位是序列号，高峰时同一毫秒里序列号从 1 或 2 一路加上去，最低两位把 0～3 都走一遍。坑 4 只在每毫秒最多一个号的低峰出现。</p></details>
+    <details><summary>6. 预测：Seata 式的节点跑了一整天，每秒 100 个号，运维把钟往回拨了 10 秒，会怎样？</summary><p>照常发，一次也不 sleep。一天发了 864 万个号，逻辑时间只比启动时刻多走了 864 万 ÷ 4096 ≈ 2.1 秒，墙上时钟却已经过了 24 小时；往回拨 10 秒，墙上时钟还是远远领先，<code>waitIfNecessary</code> 的条件不成立。</p></details>
+    <details><summary>7. 放回全景：第 2 站前后各发生了什么？发号坏了（发出重复号 / 发号依赖的库挂了），整条链路会怎样？</summary><p>之前：第 1 站用幂等键 <code>req-7f3a</code> 判定这是一次新请求，同一个键的第二次 POST 不再下单。之后：第 3 站开全局事务拿 XID（XID 里的事务号也是一种雪花发的），第 4 站订单 Try 插入 9527，第 5、6 站按 9527 冻库存、锁券，第 9 站发 <code>ORDER_CREATED 9527</code>，第 11 站按 9527 对账。<br>发出重复号：两单都叫 9527。订单表不分库时，第 4 站主键冲突，后一单 Try 失败、整单回滚，算是被挡住了；订单表分库、两单落在不同分片时，谁也挡不住，冻结、用券、消息、对账全混在同一个号下面，对账会把两单当成一单。<br>号段的库挂了：内存里的号用完以前一切照常；用完以后第 2 站报错，后面的站一个都不会发生，下单整体不可用。雪花不依赖库，这种事故碰不到它，它怕的是另外两件事。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM，JDK 17，<code>--release 8</code> 编译，Docker 里的 MySQL 8.4.13，MyBatis-Plus 3.5.18）：⑤ 的 <code>segment</code> 跑了 4 次（第一版双 buffer 有并发 bug，见第三圈 4，修好后 3 次 0 重复），<code>snowflake</code> 2 次，<code>btree</code> 3 次（后两次修正了页分裂计数器读法、加了单调的 UUID v7 和 8 实例）。时钟回拨是覆盖 <code>Sequence.timeGen()</code> 拨的，库挂是用开关模拟的。Docker 容器 MAC 看了两次。</p>
+  <p>按源码：MyBatis-Plus 3.5.18 <code>Sequence</code>（位布局、twepoch 1288834974657、回拨 ≤ 5 ms 等两倍、新毫秒序列号 1～2 随机、机房号和机器号的算法）、<code>MybatisSqlSessionFactoryBuilder</code> 和 <code>GlobalConfig.Sequence</code>（worker-id、datacenter-id 都配才用）；Apache Seata 2.6.0 <code>IdWorker</code>；美团 Leaf master 的 <code>SegmentIDGenImpl</code>（10% 预取、动态 step 15 分钟 / 上限 1,000,000、两段都空返回 −3）、<code>IDAllocMapper</code>、<code>SnowflakeIDGenImpl</code>、<code>SnowflakeZookeeperHolder</code>（每 3 秒上报）；百度 uid-generator <code>DefaultUidGenerator</code>（28 / 22 / 13 位，起点 2016-05-20）；MySQL 8.4 <code>btr0btr.cc</code> 的 <code>btr_page_get_split_rec_to_right()</code>。</p>
+  <p>推算和估算：坑 1 的撞号概率（生日问题，32 种机器号）、坑 8（切主丢更新）、实验台的数字。</p>
+  <p>相关：<a href="../java/pano-j09-order-across-three-dbs.html">全景：一次下单跨三个库</a> · <a href="../mybatis/mybatis-plus.html">MyBatis-Plus 原理（第一圈）</a> · <a href="clock-timeout-retry.html">时钟、超时与重试</a> · <a href="idempotency-design.html">幂等设计</a> · <a href="../database/mysql-index-bplustree.html">MySQL 索引与 B+ 树</a> · <a href="../java/roadmap.html#j09">Java 地图 J09</a></p>
+</footer>
+</main>
+
+<script>
+/*SIM-START*/
+// 发号模拟台：看 3 秒（H = 3000 ms），事故在 t = 1000 ms 发生。
+// scheme: seg1（号段·单 buffer）| seg2（号段·双 buffer）| mp（雪花·MyBatis-Plus）| seata（Seata 式雪花）
+// inc: slow（id_alloc 库慢到 200 ms）| down（id_alloc 库挂了）| back10 / back1000（运行中时钟回拨）| restart（kill -9 后重启，重启时钟回拨 300 ms）| twin（两个实例同一个 workerId）
+// q：每秒多少单（一个实例；twin 时两个实例各 q/2），S：号段 step
+// 数字是模型估算，规则照着 Leaf / MyBatis-Plus 3.5.18 / Seata 2.6.0 的源码写，和 ⑤⑥ 的实测对过量级。
+function simulate(scheme, inc, q, S) {
+  var H = 3000, T0 = 1000, D0 = 5, DSLOW = 200, NB = 60; // 60 格，每格 50 ms
+  var r = { scheme: scheme, inc: inc, q: q, S: S, issued: 0, maxLat: 0, slow: 0, fail: 0, dup: 0, lost: 0,
+            failMs: 0, buckets: [], note: '', key: 'ok', holdSec: null, dbCalls: 0 };
+  for (var b = 0; b < NB; b++) r.buckets.push({ ok: 0, slow: 0, fail: 0, dup: 0 });
+  function bk(t) { return r.buckets[Math.min(NB - 1, Math.floor(t / (H / NB)))]; }
+  function dbLat(t) { if (t < T0) return D0; if (inc === 'slow') return DSLOW; if (inc === 'down') return Infinity; return D0; }
+
+  if (scheme === 'seg1' || scheme === 'seg2') {
+    var dbl = scheme === 'seg2';
+    var cur = Math.ceil(S * 0.37), used = S - Math.ceil(S * 0.37), nxt = false,   // 实例已经跑了一阵：当前段还剩 37%
+        loadDone = null, syncDone = null, acc = 0, pend = [];
+    for (var t = 0; t < H; t++) {
+      if (inc === 'restart' && t === T0) {
+        r.lost += cur + (nxt ? S : 0) + (loadDone !== null ? S : 0);
+        cur = S; used = 0; nxt = false; loadDone = null; r.dbCalls++;
+      }
+      if (loadDone !== null && t >= loadDone) { nxt = true; loadDone = null; }
+      if (t === T0) r.remAtT0 = cur + (nxt ? S : 0);
+      if (syncDone !== null && t >= syncDone) { cur = S; used = 0; syncDone = null; }
+      acc += q / 1000; var a = Math.floor(acc); acc -= a;
+      if (a > 0) pend.push([t, a]);
+      while (pend.length) {
+        var p = pend[0];
+        if (dbl && !nxt && loadDone === null && used > 0.1 * S) {
+          r.dbCalls++;
+          var L = dbLat(t);
+          if (L !== Infinity) loadDone = t + L;            // 库挂了：这次预取失败，下一毫秒再试
+        }
+        if (cur > 0) {
+          var n = Math.min(cur, p[1]); cur -= n; used += n; p[1] -= n;
+          var lat = t - p[0]; r.issued += n;
+          if (lat > r.maxLat) r.maxLat = lat;
+          if (lat > 50) { r.slow += n; bk(t).slow += n; } else bk(t).ok += n;
+          if (p[1] === 0) pend.shift();
+          continue;
+        }
+        if (dbl) {
+          if (nxt) { cur = S; used = 0; nxt = false; continue; }
+          if (loadDone !== null) break;                    // 预取在路上：排队等
+          r.fail += p[1]; bk(t).fail += p[1]; pend.shift(); // 两段都空，库也领不到：报错
+          continue;
+        }
+        if (syncDone === null) {
+          r.dbCalls++;
+          var L2 = dbLat(t);
+          if (L2 === Infinity) { r.fail += p[1]; bk(t).fail += p[1]; pend.shift(); continue; }
+          syncDone = t + L2;
+        }
+        break;                                              // 单 buffer：调用方等库
+      }
+    }
+    if (inc === 'down') r.holdSec = r.remAtT0 / q;                // 库挂的那一刻手里还剩多少号，按 q 还能发多久
+    if (inc === 'down') { var firstFail = -1; for (var i = 0; i < NB; i++) if (r.buckets[i].fail) { firstFail = i; break; } r.failAt = firstFail < 0 ? null : firstFail * H / NB; }
+  } else {
+    // 雪花：不访问库；每毫秒最多 4096 个，本台模拟的 q 远低于它
+    var k = q / 1000;
+    for (var t2 = 0; t2 < H; t2 += 1) {
+      var bb = bk(t2);
+      if (scheme === 'mp' && (inc === 'back10' || inc === 'back1000')) {
+        var back = inc === 'back10' ? 10 : 1000;
+        if (t2 >= T0 && t2 < T0 + back) { r.fail += k; bb.fail += k; r.failMs++; continue; }
+      }
+      var d = 0;
+      if (scheme === 'mp' && inc === 'restart' && t2 >= T0 && t2 < T0 + 300) d = k >= 1 ? k - 0.5 : k * k * 0.5;
+      if (scheme === 'mp' && inc === 'twin') { var h = k / 2; d = h >= 1 ? h - 0.5 : h * h * 0.5; }
+      r.issued += k; r.dup += d; bb.dup += d; bb.ok += k - d;
+    }
+    r.issued = Math.round(r.issued); r.fail = Math.round(r.fail); r.dup = Math.round(r.dup);
+  }
+  // 结论：重复 > 报错 > 变慢 > 跳号 > 照常
+  if (r.dup > 0) r.key = 'dup';
+  else if (r.fail > 0) r.key = 'fail';
+  else if (r.slow > 0) r.key = 'slow';
+  else if (r.lost > 0) r.key = 'gap';
+  else r.key = 'ok';
+  // 为什么（指回 ④）
+  var W = {
+    'seg1|slow': 'segslow', 'seg2|slow': (q * DSLOW / 1000 > 0.9 * S) ? 'seg2tooSmall' : 'seg2hide',
+    'seg1|down': 'segdown1', 'seg2|down': 'segdown2', 'seg1|restart': 'seggap', 'seg2|restart': 'seggap2',
+    'mp|back10': 'mpback', 'mp|back1000': 'mpback', 'mp|restart': 'mprestart', 'mp|twin': 'twin',
+    'seata|back10': 'seataback', 'seata|back1000': 'seataback', 'seata|restart': 'seatarestart', 'seata|twin': 'seatatwin'
+  };
+  r.why = W[scheme + '|' + inc] || ((scheme === 'mp' || scheme === 'seata') ? 'nodb' : 'noclock');
+  return r;
+}
+/*SIM-END*/
+
+(function () {
+  var SV = [100, 1000, 10000, 100000];
+  var state = { sch: 'seg2', inc: 'down', q: 4000, si: 1 };
+  var $ = function (id) { return document.getElementById(id); };
+  var fmt = function (n) { return Math.round(n).toLocaleString('en-US'); };
+  var SCH = { seg1: '号段 · 单 buffer', seg2: '号段 · 双 buffer', mp: '雪花 · MyBatis-Plus', seata: '改良雪花 · Seata 式' };
+  var INC = { slow: 'id_alloc 库慢到 200 ms', down: 'id_alloc 库挂了', back10: '时钟回拨 10 ms', back1000: '时钟回拨 1 s',
+              restart: 'kill -9 后重启、重启时钟回拨 300 ms', twin: '两个实例同一个机器号' };
+  var KEY = { ok: '照常发', slow: '变慢', fail: '报错', dup: '重复号', gap: '跳号' };
+  var GUESS = { ok: '照常发', slow: '变慢', fail: '报错，发不出号', dup: '发出重复的号', gap: '没出错，只是跳号' };
+
+  function secs(s) { return s >= 1 ? (Math.round(s * 10) / 10) + ' 秒' : Math.round(s * 1000) + ' ms'; }
+
+  function why(r) {
+    var segMs = Math.round(r.S / r.q * 1000), s90 = Math.round(0.9 * r.S / r.q * 1000);
+    var hold = r.holdSec != null ? secs(r.holdSec) : '';
+    switch (r.why) {
+      case 'segslow': return ['bad', '单 buffer：当前段发完，调用方在 synchronized 里自己去领，库要 200 ms，这期间到的请求全排队。一段只够用 ' + segMs + ' ms，所以每 ' + segMs + ' ms 卡一次；要是一段比 200 ms 还短，队越排越长。', '#p-slow', '坑 6'];
+      case 'seg2hide': return ['ok', '双 buffer：用掉 10% 时后台就去领下一段，剩下 90% 还够用 ' + s90 + ' ms，比 200 ms 长，下一段总能先到。调用方感觉不到库慢。', '#m-dbl', '④ 机制 2'];
+      case 'seg2tooSmall': return ['bad', '一段只够用 ' + segMs + ' ms，后台开始领时剩下的 90% 只够 ' + s90 + ' ms，可领一段要 200 ms：下一段还没到，当前段就发完了，照样排队。把 step 调大试试。', '#p-slow', '坑 6'];
+      case 'segdown1': return ['bad', '单 buffer 没有备用段：当前段一发完就要访问库。库挂的那一刻手里只剩 ' + fmt(r.remAtT0) + ' 个号，按 q 只够 ' + hold + '，之后每次调用都报错。', '#p-down', '坑 7'];
+      case 'segdown2': return r.fail > 0
+        ? ['bad', '库挂的那一刻，手里还有当前段余量加备好的下一段，共 ' + fmt(r.remAtT0) + ' 个号，按 q 撑了 ' + hold + '；之后两段都空、库也领不到，报错。这期间每次调用都去重试一次库，共 ' + fmt(r.dbCalls) + ' 次。', '#p-down', '坑 7']
+        : ['ok', '库挂的那一刻，手里还有 ' + fmt(r.remAtT0) + ' 个号，按 q 能撑 ' + hold + '，这 3 秒看不出事。库要是一直不回来，撑满这段时间就会报错。', '#p-down', '坑 7'];
+      case 'seggap': return ['', '号不重复，只是 kill -9 那一刻当前段没发完的 ' + fmt(r.lost) + ' 个号永远不会再发。号段不看时钟，重启时钟回拨碰不到它。', '#p-gap', '坑 5'];
+      case 'seggap2': return ['', '号不重复。kill -9 那一刻，当前段没发完的号和预取好的下一段一起丢了，共 ' + fmt(r.lost) + ' 个。号段不看时钟，重启时钟回拨碰不到它。', '#p-gap', '坑 5'];
+      case 'noclock': return ['ok', '号段不看时钟，也没有机器号：所有实例都从 id_alloc 那一行领段，行锁保证段不重叠。', '#m-seg', '④ 机制 1'];
+      case 'nodb': return ['ok', '雪花不访问任何库，id_alloc 怎样都碰不到它。它怕的是时钟和机器号。', '#m-snow', '④ 机制 3'];
+      case 'mpback': return ['bad', '回拨超过 5 ms，MyBatis-Plus 直接抛 Clock moved backwards，直到墙上时钟走回原来的位置：这 ' + fmt(r.failMs) + ' ms 里的 ' + fmt(r.fail) + ' 次调用全部失败。回拨 ≤ 5 ms 时只是等两倍时间。', '#p-back', '坑 2'];
+      case 'mprestart': return ['bad', '重启后 lastTimestamp 从 −1 开始，查不出回拨。接下来 300 ms 的每一毫秒都在重走重启前用过的时间，机器号一样，序列号又从 1 或 2 起，估算重复 ' + fmt(r.dup) + ' 个，而且没有任何报错。', '#p-restart', '坑 3'];
+      case 'twin': return ['bad', '两个实例各扛 q/2，机器号一样，同一毫秒都从序列号 1 或 2 起：估算 3 秒里重复 ' + fmt(r.dup) + ' 个。每毫秒的单越多，越接近“几乎全撞”。', '#p-twin', '坑 1'];
+      case 'seataback': return ['ok', '逻辑时间启动后就不看钟了。跑了一阵的实例，逻辑时间远落后于墙上时钟，回拨碰不到它；刚启动的实例会每次调用等 5 ms，直到钟追上来（第三圈实测，回拨 1 s 时有 203 次）。', '#d-seata', '第三圈 2'];
+      case 'seatarestart': return ['ok', '重启时用回拨后的时间初始化逻辑时间。旧实例的逻辑时间是“启动时刻 + 已发数 ÷ 4096 ms”，通常远早于 300 ms 之前，两段号碰不上；只有一直贴着每毫秒 4096 个发的实例才会撞。', '#d-seata', '第三圈 2'];
+      case 'seatatwin': return ['', '这 3 秒没有重复：两个实例的逻辑时间从各自的启动时刻起步，假设相差 60 秒，要发满约 2.5 亿个号才会追上对方。不是不会撞，是撞得很晚，晚到早就忘了这回事。机器号照样要分好。', '#d-seata', '第三圈 2'];
+    }
+    return ['', '', '#s4', '④'];
+  }
+
+  function drawStrip(r) {
+    var NB = r.buckets.length, W = 900, X0 = 20, CW = (W - 2 * X0) / NB, s = '';
+    for (var i = 0; i < NB; i++) {
+      var b = r.buckets[i], tot = b.ok + b.slow + b.fail + b.dup, cls = 'b-neu';
+      if (b.fail > 0.5) cls = 'b-bad'; else if (b.dup > 0.5) cls = 'b-warn'; else if (b.slow > 0) cls = 'b-of'; else if (tot > 0) cls = 'b-good';
+      s += '<rect x="' + (X0 + i * CW + 1).toFixed(1) + '" y="22" width="' + (CW - 2).toFixed(1) + '" height="34" rx="3" class="' + cls + '"/>';
+    }
+    var xT0 = X0 + (W - 2 * X0) / 3;
+    s += '<line x1="' + xT0 + '" y1="10" x2="' + xT0 + '" y2="64" class="e-dash"/>';
+    s += '<text x="' + (xT0 + 4) + '" y="14" class="t-bad">1.0 s 出事</text>';
+    for (var t = 0; t <= 3; t++) s += '<text x="' + (X0 + t * (W - 2 * X0) / 3) + '" y="76" text-anchor="' + (t === 0 ? 'start' : t === 3 ? 'end' : 'middle') + '" class="t-xs">' + t + ' s</text>';
+    var lg = [['b-good', '正常发出'], ['b-of', '有请求等了 50 ms 以上'], ['b-bad', '报错'], ['b-warn', '发出了重复号']], lx = 20;
+    lg.forEach(function (g) { s += '<rect x="' + lx + '" y="90" width="14" height="14" rx="3" class="' + g[0] + '"/><text x="' + (lx + 20) + '" y="102" class="t-xs">' + g[1] + '</text>'; lx += 40 + g[1].length * 11; });
+    $('strip').innerHTML = s;
+  }
+
+  function question() {
+    var seg = state.sch === 'seg1' || state.sch === 'seg2';
+    $('bg-q').innerHTML = '<b>先猜</b>：' + SCH[state.sch] + '，每秒 ' + fmt(state.q) + ' 单' + (seg ? '、step ' + fmt(SV[state.si]) : '（用不到 step）') + '，1 秒时' + INC[state.inc] + '。接下来会怎样？';
+  }
+
+  function reset() {
+    question();
+    $('bench-out').hidden = true; $('bg-res').hidden = true;
+    [].forEach.call($('bg-opts').querySelectorAll('button'), function (b) { b.setAttribute('aria-pressed', 'false'); b.classList.remove('right', 'wrong'); });
+  }
+
+  function run(g) {
+    var r = simulate(state.sch, state.inc, state.q, SV[state.si]);
+    [].forEach.call($('bg-opts').querySelectorAll('button'), function (b) {
+      var v = b.getAttribute('data-g');
+      b.setAttribute('aria-pressed', v === g ? 'true' : 'false');
+      b.classList.toggle('right', v === r.key);
+      b.classList.toggle('wrong', v === g && g !== r.key && g !== 'skip');
+    });
+    var w = why(r);
+    var res = $('bg-res');
+    res.hidden = false;
+    res.innerHTML = (g === 'skip' ? '' : (g === r.key ? '<b>猜对了。</b>' : '<b>没猜对。</b>')) + '结果是“' + GUESS[r.key] + '”。决定它的是 <a href="' + w[2] + '">' + w[3] + '</a>。';
+    $('t-key').textContent = KEY[r.key];
+    $('t-key2').textContent = '3 秒发出 ' + fmt(r.issued) + ' 个';
+    var seg = state.sch === 'seg1' || state.sch === 'seg2';
+    $('t-lat').textContent = r.maxLat > 0 ? fmt(r.maxLat) + ' ms' : '< 1 ms';
+    $('t-lat2').textContent = seg ? (r.slow > 0 ? fmt(r.slow) + ' 个请求等了 50 ms 以上' : '没有请求等过 50 ms') : '不访问任何服务';
+    if (r.dup > 0) { $('t-bad').textContent = fmt(r.dup) + ' 个重复'; $('t-bad2').textContent = '估算，没有任何报错'; }
+    else if (r.fail > 0) { $('t-bad').textContent = fmt(r.fail) + ' 次报错'; $('t-bad2').textContent = r.failMs ? '持续 ' + fmt(r.failMs) + ' ms' : (r.failAt != null ? '从 ' + (r.failAt / 1000).toFixed(2) + ' s 起' : ''); }
+    else { $('t-bad').textContent = '0'; $('t-bad2').textContent = ''; }
+    $('t-lost').textContent = fmt(r.lost);
+    $('t-lost2').textContent = r.lost > 0 ? '跳号，不重复' : '';
+    var el = $('why');
+    el.className = 'why' + (w[0] ? ' ' + w[0] : '');
+    el.innerHTML = w[1] + ' <a href="' + w[2] + '">← ' + w[3] + '</a>';
+    drawStrip(r);
+    $('bench-out').hidden = false;
+  }
+
+  function bindPick(id, key) {
+    $(id).addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b) return;
+      state[key] = b.getAttribute('data-v');
+      [].forEach.call($(id).querySelectorAll('button'), function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+      reset();
+    });
+  }
+  bindPick('pk-sch', 'sch');
+  bindPick('pk-inc', 'inc');
+  $('r-q').addEventListener('input', function () { state.q = +this.value; $('o-q').textContent = fmt(state.q); reset(); });
+  $('r-s').addEventListener('input', function () { state.si = +this.value; $('o-s').textContent = fmt(SV[state.si]); reset(); });
+  $('bg-opts').addEventListener('click', function (e) { var b = e.target.closest('button'); if (b) run(b.getAttribute('data-g')); });
+  reset();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
