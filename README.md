@@ -252,3 +252,4 @@
 | # | 页面 | 内容 |
 |---|------|------|
 | 01 | [一个请求，三样数据：日志、指标、链路三件套](https://archeu.github.io/study-notes/observability/logs-metrics-traces.html) | 三种数据形状（聚合的数、一次事件、一棵 span 树）和成本特征，ThreadLocal 与 traceparent 传上下文，trace_id 进 MDC 和 exemplar，Observation 一次埋点出指标和 span，换线程丢 traceId、高基数标签、默认采样 10%、_created 后缀被吞，Spring Boot 3.5 实测，一个请求的分步动画 |
+| 02 | [从一个数到一通电话：Prometheus 加 Grafana，指标和告警怎么设](https://archeu.github.io/study-notes/observability/prometheus-alerting.html) | 拉模式抓取、时间序列、rate 和 histogram_quantile、告警 pending 到 firing、Alertmanager 分组抑制路由，本机重演凌晨三点（3 实例 + Prometheus 3.16 + Alertmanager 0.35）测出错误率告警 117 秒、等连接告警 72 秒，空结果、实例挂了不响、平均值摊平等坑，燃烧率告警，告警延迟计算器 |
