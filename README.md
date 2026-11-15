@@ -173,6 +173,7 @@
 | 04 | [一单写三个库：2PC/XA、TCC、Saga、本地消息表与 Seata](https://archeu.github.io/study-notes/arch/distributed-transactions.html) | 两阶段提交的不确定区、四种做法把中间态放在哪（XA 锁住 / TCC 冻结 / Saga 先做后补 / 本地消息表只管送到）、fence 挡住重发空回滚悬挂、Seata TM RM TC 与 AT TCC Saga XA 各管什么、MySQL 8.4 四段实测，四种做法 × 三种故障实验台 |
 | 05 | [300 ms 超时，库存却冻了 2 件：时钟、超时与重试](https://archeu.github.io/study-notes/arch/clock-timeout-retry.html) | 超时 = 不知道的五种情况、查还是重做、退避抖动上限预算、墙上时钟 vs 单调时钟、Seata 判超时用谁的钟、比数不比钟，交易靶场实测和重试风暴实验台 |
 | 06 | [tc-1 断网了，谁来接着拍板：Raft 选主与日志复制](https://archeu.github.io/study-notes/arch/raft-consensus.html) | 多数派重叠、任期与随机选举超时、RequestVote 与 AppendEntries、过半提交与 no-op、投票限制、PreVote 与 leader 租约、ReadIndex，tc-1 断网 13 步分步演示，MiniRaft 与 SOFAJRaft 1.3.14 实测换主 |
+| 07 | [两个实例只许一个发：Redis、ZooKeeper、数据库三种分布式锁怎么选](https://archeu.github.io/study-notes/arch/distributed-lock-choice.html) | 锁记在哪、持锁者死了怎么放、换主丢不丢三个问题，ZooKeeper 临时顺序节点与会话、数据库行锁与租约行、SKIP LOCKED，kill -9 / 冻住 / 发得慢三种事故与 ZooKeeper 换 leader 实测，事故实验台 |
 
 ## JDK
 
