@@ -104,6 +104,7 @@
 |---|------|------|
 | 01 | [系统压测](https://archeu.github.io/study-notes/perf/load-testing.html) | 看哪五个数、六种压测、吞吐为什么会到顶、八类常见瓶颈的原理和解法、方案优劣和工具对比，压测曲线和瓶颈实验台 |
 | 02 | [响应时间为什么越压越长](https://archeu.github.io/study-notes/perf/response-time-queueing.html) | 六步排查：RT 的账单、四问排查路线、一串窗口和浴缸、开环积压与出口变窄、超时重试的反馈环、排队还是拒绝，四个本机实验和排队实验台 |
+| 03 | [压出来的才算数：全链路压测与容量规划](https://archeu.github.io/study-notes/perf/full-link-load-test.html) | J12 第 5 个知识点（系统压测的下一圈）：测试环境压的五种笨办法，全链路路线七步，压测标记逐跳透传表、InheritableThreadLocal 为什么不行，影子表 / 影子库 / 独立实例，按 P99 目标读单台容量，JDK 17 实测开环阶梯拐点和标记在线程池里丢失，容量计算器 |
 
 ## Redis
 
