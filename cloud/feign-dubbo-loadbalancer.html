@@ -1,0 +1,1176 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>OpenFeign 与负载均衡</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, same family as the other notes. Knowledge-point page (learn, mechanism type) for J10 panorama stations 6-8: OpenFeign, Spring Cloud LoadBalancer, Dubbo comparison. Roles: pd = OpenFeign proxy / method handler, bk = Spring Cloud LoadBalancer (choose, cache), rn = Nacos / discovery, cg = Dubbo, of = HTTP client and measured numbers, g2 = Spring HTTP service clients. bad/done/other keep their repo-wide meaning. Interaction: one load-balancing bench in step 6 (strategy x slow instance RT -> share, avg, p99, throughput; guess first). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+#lb-tiles .tile b{white-space:normal;font-size:20px}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>微服务</span><span aria-hidden="true">/</span><span class="tb-here">OpenFeign 与负载均衡</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-rn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-rn"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+    <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-cg"/></marker>
+    <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bk"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">@FeignClient · JDK 动态代理 · SynchronousMethodHandler · FeignBlockingLoadBalancerClient · RoundRobinLoadBalancer · 实例缓存 35 s · 默认不重试 · Dubbo 加权随机与 failover · Spring HTTP Service Clients · JDK 17 实测</p>
+  <h1>inventoryClient.reserve() 背后：OpenFeign、Dubbo 与负载均衡</h1>
+  <p class="lead">业务代码里写的是一个接口方法，OpenFeign 在启动时给它生成一个 JDK 动态代理；调用时代理把方法和参数拼成一个 HTTP 请求，URL 里的主机名是服务名 <code>inventory-svc</code>，交给 Spring Cloud LoadBalancer 从<b>本地缓存的实例列表</b>里按轮询挑一台，换成真实 IP 再发。挑实例发生在<b>调用方</b>，所以不多一跳；代价是每个调用方看到的列表可能是旧的（实测：下线后又被调了 32 秒），而且轮询不看对方快慢。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j10-order-through-microservices.html#s-6">拆成微服务后的一次下单 · 第 6、7、8 站</a></span><span>地图：<a href="../java/roadmap.html#j10">J10 · 服务调用：OpenFeign、Dubbo、负载均衡</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>J10 下钻第 3 步。远程调用的底层（序列化、协议、连接、负载均衡算法）在 <a href="../network/rpc-serialization-discovery-lb.html">RPC 原理</a>和 <a href="../java/pano-j04-order-calls-inventory.html">J04 全景</a>讲过第一圈；这一圈看 Spring Cloud 这一层：一个接口方法怎么变成一次挑实例的 HTTP 调用，挑实例用的列表从哪来、多旧。上一页 <a href="nacos-registry-config.html">Nacos</a> 的坑 3 在这里实测。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：业务代码只想写一行方法调用</h2>
+  </div>
+  <p class="lead">在全景第 6、7、8 站，这一步要解决：订单服务连着调商品、券、库存三个服务。业务代码只想写 <code>inventoryClient.reserve(9527, 88, 2)</code>，可实际要发生的是：拼 URL 和参数，从 inventory-svc 的两台里挑一台，发 HTTP，等不超过 800 ms，把响应转成 Java 对象，出错了转成异常。这些事三个服务、几十个接口都要做一遍。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 200" role="img" aria-label="左边一行业务代码 inventoryClient.reserve(9527, 88, 2)。右边是这一行背后要做的六件事：拼请求、挑实例、换成真实地址、发 HTTP、管超时、解码响应和错误。">
+  <rect x="20" y="70" width="270" height="60" rx="12" class="b-pd"/>
+  <text x="155" y="96" text-anchor="middle" class="t-mono">inventoryClient</text>
+  <text x="155" y="116" text-anchor="middle" class="t-mono">.reserve(9527, 88, 2)</text>
+  <path d="M290 100 H 330" class="e-ink" marker-end="url(#ah-ink)"/>
+  <rect x="336" y="20" width="190" height="44" rx="10" class="b-card"/><text x="350" y="47" class="t-s">① 拼 POST /stock/reserve</text>
+  <rect x="540" y="20" width="190" height="44" rx="10" class="b-bk"/><text x="554" y="47" class="t-s">② 两台里挑一台</text>
+  <rect x="744" y="20" width="196" height="44" rx="10" class="b-rn"/><text x="758" y="47" class="t-s">③ 服务名 → 10.0.1.31</text>
+  <rect x="336" y="80" width="190" height="44" rx="10" class="b-of"/><text x="350" y="107" class="t-s">④ 发 HTTP、复用连接</text>
+  <rect x="540" y="80" width="190" height="44" rx="10" class="b-bad"/><text x="554" y="107" class="t-s">⑤ 连接 200、读 800 ms</text>
+  <rect x="744" y="80" width="196" height="44" rx="10" class="b-card"/><text x="758" y="107" class="t-s">⑥ JSON → 对象，错 → 异常</text>
+  <text x="638" y="158" text-anchor="middle" class="t-xs">三个下游 × 几十个接口，每个都要这六步</text>
+  <text x="638" y="176" text-anchor="middle" class="t-xs">OpenFeign 做 ①④⑥，LoadBalancer 做 ②③，⑤ 两边都有份</text>
+</svg>
+  </div>
+  </figure>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：手写 RestClient</h2>
+  </div>
+  <div class="two">
+    <div class="codebox" data-role="other"><div class="code-bar"><b>老办法：每个调用点自己来</b><code>Spring 6.1+ 的 RestClient</code></div>
+<pre><code>List&lt;ServiceInstance&gt; list = discovery.getInstances("inventory-svc");
+ServiceInstance one = list.get(counter.getAndIncrement() % list.size());
+String r = restClient.post()
+    .uri(one.getUri() + "/stock/reserve?orderId={o}&amp;sku={s}&amp;qty={q}", 9527, 88, 2)
+    .retrieve().body(String.class);
+// 超时配在 restClient 的 requestFactory 上；列表为空、实例挂了、
+// 4xx/5xx 怎么转异常，每个调用点各写各的</code></pre></div>
+    <div class="card" data-role="other"><h3>疼在哪</h3><ul class="pains"><li>挑实例的代码散在几十个地方，各写各的</li><li>URL、参数拼接写错只能运行时发现</li><li>想加统一的超时、鉴权头、熔断，要一个个改</li><li class="ok">中间方案：给 <code>RestClient.Builder</code> 加 <code>@LoadBalanced</code>，直接写 <code>http://inventory-svc/…</code>，挑实例交给 LoadBalancer；但拼 URL 和解码还在业务代码里</li></ul></div>
+  </div>
+  <p class="note-p">缺的那一块：<b>把“怎么调”声明在接口上，调用点只剩一行方法调用</b>；挑实例、超时、编解码在一个地方统一配。这就是 OpenFeign 的精华。它的代价也来自这里：远程调用长得和本地方法一模一样，很容易忘了它会慢、会失败（坑 1）。</p>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：OpenFeign、HTTP Service Clients、Dubbo、gRPC</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>写法</th><th>线上传的是什么</th><th>挑实例、重试</th><th>现在的位置</th></tr></thead>
+      <tbody>
+        <tr><th>OpenFeign</th><td>接口 + Spring MVC 注解</td><td>HTTP/1.1 + JSON</td><td>Spring Cloud LoadBalancer；默认不重试</td><td>Spring Cloud 项目最常见；官方已宣布“功能完结”，不再加新功能</td></tr>
+        <tr><th>Spring HTTP Service Clients</th><td>接口 + <code>@HttpExchange</code>，底下是 RestClient 或 WebClient</td><td>HTTP + JSON</td><td>配 <code>@LoadBalanced</code> 的 Builder</td><td>OpenFeign 文档建议迁过去；Spring Framework 7 / Spring Boot 4 起有分组注册</td></tr>
+        <tr><th>Dubbo 3</th><td>Java 接口，提供方实现、调用方注入</td><td>dubbo 协议（TCP 二进制）或 Triple（HTTP/2，兼容 gRPC）</td><td>自带：默认加权随机；默认 failover，失败再试 2 次</td><td>国内大厂 RPC 老牌主力，3.3.x 在维护</td></tr>
+        <tr><th>gRPC</th><td>先写 .proto，生成桩代码</td><td>HTTP/2 + Protobuf</td><td>客户端负载均衡或代理</td><td>跨语言、内网高性能，<a href="../java/pano-j04-order-calls-inventory.html">J04 全景</a>用的就是它</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页学 OpenFeign + Spring Cloud LoadBalancer</b>：交易靶场是 Spring Cloud 栈，招聘里出现最多；挑实例那一层和 Gateway 共用（下钻第 4 步）。Dubbo 在 ④ 末尾对照着看，它把“挑实例、重试”做进了框架里，默认值和 OpenFeign 正好相反。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：代理 → 方法处理器 → 挑实例 → 发 HTTP</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <span><b>JDK 动态代理</b>：给一个接口在运行时造一个实现类（<code>$Proxy89</code>），所有方法调用都转到一个 <code>InvocationHandler.invoke()</code>。Spring AOP 的接口代理也是它，见 <a href="../spring/spring-aop-proxy.html">Spring AOP 代理</a>。</span>
+    <span><b>客户端负载均衡</b>：挑实例这件事在调用方进程里做，拿着实例列表直接连目标实例；对比 Nginx 那种“中间放一台转发”的服务端负载均衡。</span>
+  </div>
+
+  <h3 id="m-boot">机制 1：启动时，接口变成代理</h3>
+  <ol class="steps-out">
+    <li><code>@EnableFeignClients</code> 扫描到 <code>@FeignClient(name = "inventory-svc")</code> 的接口，为它注册一个工厂 Bean。</li>
+    <li>每个 Feign 客户端有一个<b>按名字隔离的子容器</b>：这个客户端的编码器、解码器、拦截器、超时都放在里面，<code>spring.cloud.openfeign.client.config.inventory-svc.*</code> 就是配给它的。</li>
+    <li><code>SpringMvcContract</code> 把接口上的 <code>@PostMapping</code>、<code>@RequestParam</code> 解析成每个方法的元数据：HTTP 方法、路径、参数放哪。</li>
+    <li><code>ReflectiveFeign</code> 为每个方法建一个 <code>SynchronousMethodHandler</code>，再用 JDK 代理把接口包起来，注入到 <code>OrderApp</code> 里的就是这个代理（⑤ 实测类名 <code>jdk.proxy2.$Proxy89</code>）。</li>
+  </ol>
+
+  <h3 id="m-call">机制 2：调用时，一路往下走到真实 IP</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="调用链从上到下：$Proxy89.reserve 交给 FeignInvocationHandler；它按方法找到 SynchronousMethodHandler，拼出请求 POST http://inventory-svc/stock/reserve 并执行拦截器；FeignBlockingLoadBalancerClient 让 LoadBalancer 挑实例；RoundRobinLoadBalancer 从 ServiceInstanceListSupplier 拿列表，列表来自 DiscoveryClient 也就是 Nacos 客户端，外面包了一层 35 秒的缓存；挑中 18081 以后把 URL 改写成真实地址，交给底层 HTTP 客户端发送，默认是 JDK 的 HttpURLConnection；响应经解码器变成 String。">
+  <rect x="20" y="16" width="440" height="40" rx="10" class="b-pd"/><text x="34" y="41" class="t-mono">$Proxy89.reserve(9527, 88, 2)</text>
+  <rect x="20" y="68" width="440" height="40" rx="10" class="b-pd"/><text x="34" y="93" class="t-mono">FeignInvocationHandler.invoke → 按方法找处理器</text>
+  <rect x="20" y="120" width="440" height="56" rx="10" class="b-pd"/><text x="34" y="143" class="t-mono">SynchronousMethodHandler.executeAndDecode</text><text x="34" y="164" class="t-monos">POST http://inventory-svc/stock/reserve?orderId=9527…</text>
+  <rect x="20" y="188" width="440" height="40" rx="10" class="b-bk"/><text x="34" y="213" class="t-mono">FeignBlockingLoadBalancerClient.execute</text>
+  <rect x="20" y="240" width="440" height="40" rx="10" class="b-of"/><text x="34" y="265" class="t-mono">Client.Default（HttpURLConnection）→ 10.0.1.31:18081</text>
+  <rect x="20" y="292" width="440" height="30" rx="8" class="b-card"/><text x="34" y="312" class="t-monos">响应 → Decoder → "18081"；非 2xx → ErrorDecoder → 异常</text>
+  <path d="M240 56 V 66" class="e-ink" marker-end="url(#ah-ink)"/>
+  <path d="M240 108 V 118" class="e-ink" marker-end="url(#ah-ink)"/>
+  <path d="M240 176 V 186" class="e-ink" marker-end="url(#ah-ink)"/>
+  <path d="M240 228 V 238" class="e-ink" marker-end="url(#ah-ink)"/>
+  <path d="M240 280 V 290" class="e-ink" marker-end="url(#ah-ink)"/>
+
+  <path d="M460 208 H 520" class="e-bk" marker-end="url(#ah-bk)"/>
+  <text x="490" y="200" text-anchor="middle" class="t-xs">choose</text>
+  <rect x="524" y="150" width="200" height="56" rx="10" class="b-bk"/><text x="536" y="174" class="t-b">RoundRobinLoadBalancer</text><text x="536" y="194" class="t-monos">position++ % 实例数</text>
+  <rect x="524" y="226" width="200" height="66" rx="10" class="b-dash"/><text x="536" y="248" class="t-b">缓存层（默认 35 s）</text><text x="536" y="268" class="t-xs">按时间过期，不听推送</text><text x="536" y="284" class="t-monos">Caching…Supplier</text>
+  <path d="M624 206 V 224" class="e-bk" marker-end="url(#ah-bk)"/>
+  <path d="M724 258 H 760" class="e-rn" marker-end="url(#ah-rn)"/>
+  <rect x="764" y="210" width="180" height="96" rx="10" class="b-rn"/><text x="776" y="234" class="t-b">DiscoveryClient</text><text x="776" y="254" class="t-xs">= Nacos 客户端缓存</text><text x="776" y="274" class="t-xs">Nacos 推送 0.6 s 内更新</text><text x="776" y="294" class="t-monos">上一页实测</text>
+  <text x="624" y="40" text-anchor="middle" class="t-h">两层缓存</text>
+  <text x="530" y="66" class="t-s">Nacos 推来的新列表，先进右边那层；</text>
+  <text x="530" y="88" class="t-s">LoadBalancer 自己那层要等过期才去取。</text>
+  <text x="530" y="110" class="t-s">所以下线后，调用方最多还会再用</text>
+  <text x="530" y="132" class="t-bad">35 s 旧列表（⑤ 实测 32 s）</text>
+</svg>
+  </div>
+  <figcaption>左边一列就是 ⑤ 里抓到的真实调用栈（栈顶在下面变成了图的上面）。OpenFeign 只管拼请求和解码；“去哪台”整个交给 LoadBalancer，而 LoadBalancer 又只信它自己那份缓存。</figcaption>
+  </figure>
+
+  <h3 id="m-lb">机制 3：挑哪台——轮询只数次数</h3>
+  <p><code>RoundRobinLoadBalancer</code> 维护一个计数器，每次 <code>+1</code> 再对实例数取模，起点随机。它<b>不知道</b>对面忙不忙、快不快、刚刚失败过没有。⑤ 里 18082 每次慢 300 ms，200 次照样一边 100 次。还可以换成 <code>RandomLoadBalancer</code>；打开 <code>spring.cloud.loadbalancer.nacos.enabled</code> 后用 Nacos 的权重；也可以叠加“优先同区”“健康检查”这些过滤层。要“谁快给谁”，得用 Dubbo 的最少活跃那一类，或者交给熔断把慢的那台摘出去。</p>
+
+  <h3 id="m-why">为什么这样设计：调用方自己挑，而不是中间放一台转发</h3>
+  <div class="design">
+    <div class="card" data-role="other"><h3>服务端负载均衡（中间一台 Nginx）</h3><p>列表只有一份，改了立刻对所有人生效；但每次调用多一跳网络，这一层自己要做高可用，所有流量都压在它身上。</p></div>
+    <div class="card" data-role="bk"><h3>客户端负载均衡（LoadBalancer 在调用方里）</h3><p>直接连目标实例，不多一跳，没有中间单点；代价是每个调用方各有一份列表，更新有延迟、彼此不一致，挑实例的策略也只看得到自己发出去的那部分请求。</p></div>
+  </div>
+  <p class="verdict">决定胜负的约束：<b>服务之间的调用量是入口流量的好几倍</b>（一单就是三次），每次多一跳、所有调用压在一层代理上，代价太大。所以内部调用选客户端负载均衡，列表旧一点由超时、熔断兜住。把这一层再挪出进程、放到每个 Pod 旁边，就是服务网格（J14）。</p>
+
+  <h3 id="m-dubbo">对照：Dubbo 把同样的事做进了框架</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>OpenFeign + Spring Cloud LoadBalancer</th><th>Dubbo 3（按官方文档的默认值）</th></tr></thead>
+      <tbody>
+        <tr><th>接口从哪来</th><td>调用方自己写接口，照着对方的 HTTP 接口抄注解</td><td>提供方发布一个 jar 里的 Java 接口，双方共用</td></tr>
+        <tr><th>注册的粒度</th><td>按应用（inventory-svc）</td><td>3.x 默认按应用，2.x 是按接口</td></tr>
+        <tr><th>默认负载均衡</th><td>轮询</td><td>加权随机；还有最少活跃、最短响应、一致性哈希等</td></tr>
+        <tr><th>失败了怎么办</th><td class="fix">默认不重试（<code>Retryer.NEVER_RETRY</code>）</td><td class="bad">默认 failover：换一台再试，最多再试 2 次</td></tr>
+        <tr><th>默认超时</th><td class="bad">底层 Feign 读超时 60 s</td><td>1000 ms</td></tr>
+        <tr><th>协议</th><td>HTTP/1.1 + JSON，浏览器、curl 都能调</td><td>dubbo 二进制协议，或 Triple（HTTP/2）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note-p">两边的默认值正好错开：Dubbo 默认会重试，所以“冻结库存”这种写接口要显式改成 failfast 或者做幂等；OpenFeign 默认不重试，但默认 60 秒读超时，不配就是全景第 9 站的雪崩。</p>
+
+  <h3>最少的写法</h3>
+  <div class="codebox" data-role="pd"><div class="code-bar"><b>接口 + 配置</b><code>重试、HC5 连接池、拦截器放到 ⑥</code></div>
+<pre><code>@FeignClient(name = "inventory-svc")            // 服务名，交给 LoadBalancer
+public interface InventoryClient {
+    @PostMapping("/stock/reserve")
+    String reserve(@RequestParam("orderId") long orderId,
+                   @RequestParam("sku") int sku, @RequestParam("qty") int qty);
+}
+// 启动类上加 @EnableFeignClients；依赖 spring-cloud-starter-openfeign + spring-cloud-starter-loadbalancer
+
+spring.cloud.openfeign.client.config.inventory-svc.connect-timeout: 200
+spring.cloud.openfeign.client.config.inventory-svc.read-timeout: 800</code></pre></div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：抓调用栈、数轮询、给缓存掐表</h2>
+  </div>
+  <p class="lead">用上一页的 Nacos 3.3.0 容器。库存替身起两份（18081、18082），<code>reserve</code> 返回自己的端口；订单服务用 OpenFeign 调它，注册一个 <code>LoadBalancerLifecycle</code>，在 LoadBalancer 开始挑实例的那一刻抓一次调用栈。JDK 17，Spring Boot 3.5.16，Spring Cloud 2025.0.3。<a href="https://github.com/archeu/study-labs/tree/main/java/cloud/feign-dubbo-loadbalancer">完整代码 →</a></p>
+<pre class="console"><b>$ ./run.sh demo</b>
+== ① 一次 inventoryClient.reserve() 背后
+inventoryClient 的类：jdk.proxy2.$Proxy89
+InvocationHandler：feign.ReflectiveFeign$FeignInvocationHandler
+LoadBalancer 开始挑实例时的调用栈（栈顶在上）：
+<span class="w">o.s.c.openfeign.loadbalancer.FeignBlockingLoadBalancerClient.execute
+feign.SynchronousMethodHandler.executeAndDecode
+feign.SynchronousMethodHandler.invoke
+feign.ReflectiveFeign$FeignInvocationHandler.invoke
+jdk.proxy2/jdk.proxy2.$Proxy89.reserve
+labs.cloud.feign_dubbo_loadbalancer.order.OrderApp.once</span>
+== ② 轮询：连调 200 次
+18081：100 次，平均 6 ms
+18082：100 次，平均 6 ms
+== ③ 18082 变慢 300 ms，再连调 200 次（轮询不看快慢）
+18081：100 次，平均 4 ms
+<span class="r">18082：100 次，平均 304 ms</span>
+== ④ LoadBalancer 缓存 35 s（默认）：18082 下线后，还有多少请求落到它
+  第 5 秒：18082 → DOWN（Nacos 约 0.6 s 推给订阅方）
+  05 s {18081=22, 18082=21}
+  06 s {18081=22, 18082=22}
+  …   <span class="c">每秒照样一边 22 次</span>
+  36 s {18081=23, 18082=22}
+  37 s {18081=32, 18082=14}
+<span class="r">  最后一次落到 18082：第 37 秒        ← 下线后又被调了 32 秒</span>
+== ⑤ 把缓存 ttl 改成 2 s，重启订单服务，再来一次
+  05 s {18081=22, 18082=22}
+  06 s {18081=41, 18082=3}
+<span class="w">  最后一次落到 18082：第 06 秒        ← 1 秒内就绕开了</span></pre>
+  <p class="note-p">第 ④ 项跑了两次：第一次观察窗口只有 30 秒，到第 29 秒 18082 还在接流量；第二次拉长到 50 秒，第 37 秒停。缓存条目从写入时开始算 35 秒，下线发生在这 35 秒里的哪个时刻是随机的，所以“又被调了多久”在 0～35 秒之间。18082 只是 DOWN、进程还在，这些请求都成功了；直接停进程的话，这 32 秒里落到它的 700 次左右就全是失败。订单服务启动时还打了一行 WARN：LoadBalancer 在用默认缓存，建议换成 Caffeine。</p>
+  <p class="note-p">到这里已经能交差了：接口能调、实例能轮着用、超时配上了。已知还没处理的：发版时那 35 秒（<a href="#p-cache">坑 2</a>），慢实例照样分一半（<a href="#p-rr">坑 3</a>），写接口要不要重试（<a href="#p-retry">坑 4</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节：一行方法调用里藏着的五个默认值</h2>
+  </div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-timeout"><b><em>1</em>不配超时，等于 60 秒<a class="rootmark" href="#m-call">← ④ 机制 2 最底层的 HTTP 客户端</a></b>
+      <dl><dt>现象</dt><dd>对面卡住时，订单服务的线程一个个挂在 <code>reserve()</code> 上，Tomcat 200 个线程被占满（全景第 9 站算过：每台约 300 个线程才够陪）。</dd><dt>根源</dt><dd>最底层 <code>feign.Request.Options</code> 的默认是连接 10 s、读 60 s；接口长得像本地方法，很容易忘了它会等。</dd><dt>做法</dt><dd class="fix">每个 <code>@FeignClient</code> 按名字配 <code>connect-timeout</code>、<code>read-timeout</code>，再配一个 <code>default</code> 兜底；值比上游的超时短（全景“每一跳的超时”表）。</dd></dl>
+    </div>
+    <div class="pit" id="p-cache"><b><em>2</em>实例下线了，还被调 35 秒<a class="rootmark" href="#m-call">← ④ 机制 2 两层缓存</a></b>
+      <dl><dt>现象</dt><dd>⑤ 实测：Nacos 0.6 s 就推出了新列表，订单服务又往 18082 发了 32 秒，每秒 22 次。</dd><dt>根源</dt><dd>LoadBalancer 外面包了一层按时间过期的缓存（<code>spring.cloud.loadbalancer.cache.ttl</code>，默认 35 s），不听 Nacos 的推送。</dd><dt>做法</dt><dd class="fix">发版先 DOWN、等 40 秒再停进程；或者把 ttl 调到几秒（⑤：2 s 时 1 秒内就绕开），并按 WARN 的建议换成 Caffeine 缓存。</dd></dl>
+    </div>
+    <div class="pit" id="p-rr"><b><em>3</em>慢的那台照样分一半<a class="rootmark" href="#m-lb">← ④ 机制 3 轮询只数次数</a></b>
+      <dl><dt>现象</dt><dd>⑤：18082 每次 300 ms，200 次里还是 100 次给它；在线程数固定时，整体吞吐被拖到原来的几分之一（下面的实验台）。</dd><dt>根源</dt><dd>轮询、随机只看次数，不看响应时间和在途请求数。</dd><dt>做法</dt><dd class="fix">靠熔断把慢的那台快速失败掉（下钻第 5 步）；或者换成看在途请求数的策略（Dubbo 最少活跃，自定义 <code>ReactorServiceInstanceLoadBalancer</code>）。</dd></dl>
+    </div>
+    <div class="pit" id="p-retry"><b><em>4</em>写接口被自动重试，库存冻了两次<a class="rootmark" href="#m-dubbo">← ④ 对照 Dubbo failover</a></b>
+      <dl><dt>现象</dt><dd>Dubbo 默认 failover，或者给 Feign 打开了重试：第一次其实成功了，只是超时，重试又冻结一次。</dd><dt>根源</dt><dd>超时只说明“不知道”（<a href="../arch/clock-timeout-retry.html">时钟、超时与重试</a>）；框架分不清读接口和写接口。</dd><dt>做法</dt><dd class="fix">写接口要么不重试（Dubbo 设 <code>cluster=failfast</code> 或 <code>retries=0</code>），要么带幂等键（9527）让对面去重（<a href="../arch/idempotency-design.html">幂等设计</a>）。</dd></dl>
+    </div>
+    <div class="pit" id="p-param"><b><em>5</em>参数名丢了，启动不报错、调用才报<a class="rootmark" href="#m-boot">← ④ 机制 1 解析注解</a></b>
+      <dl><dt>现象</dt><dd>本机实测（上一页）：编译没开 <code>-parameters</code>，<code>@RequestParam long ms</code> 不写名字，调用时 500。Feign 接口上同样的写法会在解析时出错。</dd><dt>根源</dt><dd>注解没写名字时，要靠字节码里的参数名；Spring Boot 的父 pom 默认帮你开了 <code>-parameters</code>，自己管 pom 时就没有。</dd><dt>做法</dt><dd class="fix">Feign 接口和 Controller 的 <code>@RequestParam</code>、<code>@PathVariable</code> 一律写上名字。</dd></dl>
+    </div>
+  </div>
+
+  <h3 id="lab">实验台：一台变慢时，四种挑法差多少</h3>
+  <div class="lab" id="lb" data-role="bk">
+    <div class="guess" id="lb-guess">
+      <p>先猜：两台库存，18082 每次慢到 300 ms，订单服务 20 个线程一直在调。用<b>最少活跃</b>（谁手上在途请求少给谁），18082 大约分到多少？</p>
+      <div class="opts" role="group" aria-label="猜一个答案">
+        <button type="button" data-g="50">还是一半</button><button type="button" data-g="17">六分之一左右</button><button type="button" data-g="2">只有百分之几</button><button type="button" data-g="0">一个都不给</button><button type="button" class="skip" data-g="skip">不猜，直接看</button>
+      </div>
+      <p class="res" id="lb-res" hidden></p>
+    </div>
+    <div class="ctl-grid">
+      <div><p class="lbl">挑法</p><div class="pick2" id="lb-st" role="group" aria-label="挑法">
+        <button type="button" data-v="rr" aria-pressed="true">轮询（默认）</button><button type="button" data-v="random" aria-pressed="false">随机</button><button type="button" data-v="weighted" aria-pressed="false">权重 1 : 0.2</button><button type="button" data-v="least" aria-pressed="false">最少活跃</button></div></div>
+      <div><p class="lbl">18082 每次多慢</p><div class="pick2" id="lb-ms" role="group" aria-label="多慢">
+        <button type="button" data-v="5" aria-pressed="false">不慢 5 ms</button><button type="button" data-v="50" aria-pressed="false">50 ms</button><button type="button" data-v="300" aria-pressed="true">300 ms</button><button type="button" data-v="3000" aria-pressed="false">3 s</button></div></div>
+    </div>
+    <div class="tiles4" id="lb-tiles"></div>
+    <p class="verdict" id="lb-verdict"></p>
+    <p class="note-p">模拟：18081 每次 5 ms，18082 按选的值；20 个调用线程各自一个接一个地发，一共 4000 次；没有超时和熔断。数字来自页面里的模拟，不是实测；轮询那一行和 ⑤ 第 ③ 项的实测一致（一边一半）。</p>
+  </div>
+
+  <h3 id="c2">第二圈 · 使用规范</h3>
+  <ul class="pains">
+    <li class="ok">每个 Feign 客户端单独配超时；<code>default</code> 配一个保守值兜底。<span class="note-p">防：坑 1。</span></li>
+    <li class="ok">底层换成 Apache HttpClient 5（加 <code>feign-hc5</code> 依赖即生效），配连接池大小和空闲回收。<span class="note-p">防：默认的 HttpURLConnection 难以控制连接复用（<a href="../network/http-client-pool-timeouts.html">HTTP 客户端连接池与超时</a>）。</span></li>
+    <li class="ok">LoadBalancer 换 Caffeine 缓存，ttl 和发版流程一起定。<span class="note-p">防：坑 2。</span></li>
+    <li class="ok">写接口不开自动重试，读接口重试要有次数上限和退避。<span class="note-p">防：坑 4 和重试风暴。</span></li>
+    <li class="ok">Feign 接口由调用方维护，别把提供方的 Controller 接口打成 jar 给大家依赖。<span class="note-p">防：<a href="service-split.html#p-shared">共享 jar 的变更耦合</a>。</span></li>
+    <li class="ok">用 <code>RequestInterceptor</code> 统一传链路 ID、灰度标记、用户 ID。<span class="note-p">防：全景第 4 站说的“灰度标记传丢了”（下钻第 6 步）。</span></li>
+  </ul>
+
+  <h3 id="c3">第三圈 · 版本和去向</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>Spring Cloud 2025.0（Boot 3.5，本页）</th><th>Spring Cloud 2025.1（Boot 4.0）</th></tr></thead>
+      <tbody>
+        <tr><th>OpenFeign</th><td>4.3.x，功能完结，只修 bug</td><td>5.0.x，同样只维护</td></tr>
+        <tr><th>官方建议</th><td colspan="2">迁到 Spring HTTP Service Clients：<code>@HttpExchange</code> 接口 + RestClient；配 <code>@LoadBalanced</code> 的 <code>RestClient.Builder</code> 就能用服务名</td></tr>
+        <tr><th>底层 HTTP 客户端</th><td colspan="2">默认 Feign 自带的 HttpURLConnection 实现；classpath 上有 HttpClient 5 就自动用它；HttpClient 4 从 OpenFeign 4 起不再支持</td></tr>
+        <tr><th>重试</th><td colspan="2">Spring Cloud 默认 <code>Retryer.NEVER_RETRY</code>，和原生 Feign（会重试 IOException）不同</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note-p">一条深处的结论：<b>每个客户端一个子容器</b>（Feign 按客户端名、LoadBalancer 按服务名）是为了让“调库存用 800 ms、调商品用 300 ms、调券要带一个特殊头”这些配置互不干扰。LoadBalancer 的子容器默认在第一次调用这个服务时才建，第一次调用会慢一些；要提前建好，配 <code>spring.cloud.loadbalancer.eager-load.clients</code>。</p>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>Spring HTTP Service Clients 迁移：把 InventoryClient 改成 <code>@HttpExchange</code>，对比两者的拦截器和错误处理。</li>
+    <li>Dubbo 3 实战：Triple 协议、应用级服务发现、failover / failfast、最少活跃在坏实例上的表现。</li>
+    <li>LoadBalancer 的过滤层：同区优先、健康检查、请求粘性，和 Nacos 权重怎么叠加。</li>
+    <li>熔断器和负载均衡配合：实例级熔断（摘一台）和资源级熔断（挡全部）的差别（下钻第 5 步）。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改订单服务</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>直接停进程</b>：把第 ④ 项的 DOWN 换成停掉 18082，统计 50 秒里的失败数；再加 spring-retry、打开 LoadBalancer 重试，失败数变成多少？reserve 被调了几次？（坑 2、坑 4）</li>
+    <li><b>换 HC5</b>：加 <code>feign-hc5</code>，<code>/demo/once</code> 打印的调用栈最底下换成了什么类？（第二圈）</li>
+    <li><b>读超时 100 ms</b>：再跑第 ③ 项，18082 那 100 次变成什么？如果它们是写请求呢？（坑 1、坑 4）</li>
+    <li><b>Nacos 权重</b>：打开 <code>spring.cloud.loadbalancer.nacos.enabled</code>，把 18082 权重调成 0.2，第 ③ 项的分布和平均耗时变成多少？和实验台的“权重”对得上吗？（机制 3）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>OpenFeign 把接口变成 JDK 代理，调用时拼出以服务名为主机的 HTTP 请求；Spring Cloud LoadBalancer 在调用方进程里从本地缓存的列表按轮询挑一台换成真实地址；不多一跳，但列表会旧（默认最多 35 秒）、轮询不看快慢、默认读超时 60 秒。</p></details>
+    <details><summary>2. 手写 RestClient 调用疼在哪？@LoadBalanced 解决了哪一半？</summary><p>挑实例、拼 URL、解码、超时、错误处理散在每个调用点。@LoadBalanced 让 URL 能直接写服务名，挑实例统一了；拼 URL 和解码还在业务代码里，这一半由 Feign 或 HTTP Service Clients 的声明式接口解决。</p></details>
+    <details><summary>3. 坑 2（下线后还被调 35 秒）的根源是 ④ 的哪条？</summary><p>机制 2 的两层缓存：Nacos 客户端那层会被推送更新，LoadBalancer 自己那层只按 ttl 过期，挑实例只读后者。</p></details>
+    <details><summary>4. 预测：把 ttl 设成 0（不缓存），会有什么代价？</summary><p>每次挑实例都要去 DiscoveryClient 取列表。Nacos 客户端那层本身是内存缓存，代价不大，但每次都要走一遍过滤和拷贝；换成每次都要远程查询的注册中心客户端，就会把注册中心打爆。所以 ttl 是在“新鲜”和“开销”之间取舍，常见做法是几秒。</p></details>
+    <details><summary>5. 预测：同样一台变慢 300 ms，订单服务用 Dubbo 默认配置调它，会和 OpenFeign 有什么不同？</summary><p>Dubbo 默认加权随机，分布和轮询差不多（一半）；默认超时 1000 ms，300 ms 不会超时，所以不会触发 failover 重试，表现和 Feign 一样慢一半。如果它慢到 3 秒：Dubbo 1 秒超时后换一台重试（最多再 2 次），写接口就有重复执行的风险；Feign 默认要等满 60 秒。</p></details>
+    <details><summary>6. 放回全景：第 6、7、8 站前后各发生了什么？如果 LoadBalancer 挑实例这一步坏了（比如列表为空），整条链路会怎样？</summary><p>之前：第 5 站读到 800 ms 的超时配置；之后：第 9、10 站一台变慢、熔断降级。列表为空时 LoadBalancer 返回“没有可用实例”，Feign 直接抛异常（503 类），三次调用都失败，下单直接报错，快速失败而不是等超时；这时要查的是 Nacos 订阅和命名空间（上一页坑 5、坑 6），不是库存服务本身。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM 虚拟机，JDK 17，Nacos 3.3.0 容器，Spring Boot 3.5.16 + Spring Cloud 2025.0.3 + Spring Cloud Alibaba 2025.0.0.0）：⑤ 的 <code>run.sh demo</code> 跑了 2 次，调用栈、轮询分布两次一致；缓存掐表第一次窗口太短（30 s），第二次拉长到 50 s。实验台的数字来自模拟（node 里跑过），不是实测。</p>
+  <p>按源码：Spring Cloud LoadBalancer 5.0.4 / 4.3 <code>LoadBalancerCacheProperties.ttl = 35s</code>、<code>RoundRobinLoadBalancer</code>（起点随机，<code>position.incrementAndGet() % 实例数</code>）；feign-core 13.6 <code>Request.Options()</code> 默认连接 10 s、读 60 s。</p>
+  <p>按文档：Spring Cloud OpenFeign 参考文档（功能完结、建议迁到 Spring HTTP Service Clients；有 LoadBalancer 时用 <code>FeignBlockingLoadBalancerClient</code>；默认 <code>Retryer.NEVER_RETRY</code>；HttpClient 5 在 classpath 上即启用）；Apache Dubbo 3 文档（默认加权随机、failover 重试 2 次、超时 1000 ms，3.x 应用级服务发现）。</p>
+  <p>相关：<a href="../java/pano-j10-order-through-microservices.html">全景：拆成微服务后的一次下单</a> · <a href="nacos-registry-config.html">Nacos 注册发现与配置中心</a> · <a href="../network/rpc-serialization-discovery-lb.html">RPC 原理</a> · <a href="../java/pano-j04-order-calls-inventory.html">J04 全景</a> · 回到地图：<a href="../java/roadmap.html#j10">Java 地图 J10</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 两台库存：fast 固定 5 ms，slow 固定 slowMs；conc 个调用线程各自串行地发请求（闭环），共发 n 个
+function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+function lbSim(strategy, slowMs, conc = 20, n = 4000, seed = 7) {
+  const rnd = rng(seed), lat = [5, slowMs], active = [0, 0], count = [0, 0];
+  let rr = 0, issued = 0, now = 0;
+  const done = [];                       // 每个请求的耗时
+  const events = [];                     // [结束时刻, 实例]
+  function pick() {
+    if (strategy === "rr") return (rr++) % 2;
+    if (strategy === "random") return rnd() < 0.5 ? 0 : 1;
+    if (strategy === "weighted") return rnd() < 1 / 1.2 ? 0 : 1;      // 慢的那台权重 0.2
+    if (active[0] !== active[1]) return active[0] < active[1] ? 0 : 1; // 最少活跃
+    return rnd() < 0.5 ? 0 : 1;
+  }
+  function issue() {
+    if (issued >= n) return;
+    issued++;
+    const i = pick(); active[i]++; count[i]++;
+    events.push([now + lat[i], i, now]);
+  }
+  for (let c = 0; c < conc; c++) issue();
+  while (events.length) {
+    let k = 0;
+    for (let j = 1; j < events.length; j++) if (events[j][0] < events[k][0]) k = j;
+    const [t, i, start] = events.splice(k, 1)[0];
+    now = t; active[i]--; done.push(t - start);
+    issue();
+  }
+  done.sort((a, b) => a - b);
+  const avg = done.reduce((a, b) => a + b, 0) / done.length;
+  return { slowShare: count[1] / n, avg, p99: done[Math.floor(done.length * 0.99) - 1], throughput: n / (now / 1000) };
+}
+/*SIM-END*/
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const NAMES = { rr: "轮询", random: "随机", weighted: "权重 1 : 0.2", least: "最少活跃" };
+  let st = "rr", ms = 300;
+  const base = lbSim("rr", 5);
+  function render() {
+    const r = lbSim(st, ms);
+    const tiles = [
+      { k: "18082 分到", v: (r.slowShare * 100).toFixed(1) + "%", sub: "4000 次里", bad: r.slowShare > 0.2 && ms > 5 },
+      { k: "平均耗时", v: r.avg.toFixed(1) + " ms", sub: "两台都 5 ms 时是 5.0", bad: r.avg > 20 },
+      { k: "p99", v: r.p99 + " ms", sub: "最慢的 1%", bad: r.p99 > 50 },
+      { k: "整体吞吐", v: Math.round(r.throughput).toLocaleString("en-US") + " 次/秒", sub: "两台都快时 " + Math.round(base.throughput).toLocaleString("en-US"), bad: r.throughput < base.throughput / 2 }
+    ];
+    $("#lb-tiles").innerHTML = tiles.map(t => `<div class="tile" data-role="${t.bad ? "bad" : "done"}"><small>${t.k}</small><b>${t.v}</b><span>${t.sub}</span></div>`).join("");
+    let v;
+    if (ms === 5) v = "两台一样快时，四种挑法没有差别。差别只在有一台出问题的时候出现。";
+    else if (st === "rr" || st === "random") v = "只数次数：慢的那台照样拿一半，20 个线程里大约一半时间卡在它身上，吞吐掉到 " + Math.round(r.throughput / base.throughput * 100) + "%。";
+    else if (st === "weighted") v = "权重是事先配好的：少给了，但不会随着它变得更慢而更少；而且权重要有人去改（Nacos 控制台，全景第 11 站）。";
+    else v = "看在途请求数：慢的那台手里总压着请求，新请求自然绕开它，只分到 " + (r.slowShare * 100).toFixed(1) + "%。代价是只能看到自己这个调用方发出的那部分请求。";
+    $("#lb-verdict").textContent = NAMES[st] + " · " + v;
+    $$("#lb-st button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === st)));
+    $$("#lb-ms button").forEach(b => b.setAttribute("aria-pressed", String(+b.dataset.v === ms)));
+  }
+  $$("#lb-st button").forEach(b => b.addEventListener("click", () => { st = b.dataset.v; render(); }));
+  $$("#lb-ms button").forEach(b => b.addEventListener("click", () => { ms = +b.dataset.v; render(); }));
+  $$("#lb-guess .opts button").forEach(b => b.addEventListener("click", () => {
+    const g = b.dataset.g;
+    $$("#lb-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", "false"); });
+    b.setAttribute("aria-pressed", "true");
+    if (g !== "skip") b.classList.add(g === "2" ? "right" : "wrong");
+    st = "least"; ms = 300; render();
+    const r = lbSim("least", 300);
+    const res = $("#lb-res"); res.hidden = false;
+    res.textContent = (g === "skip" ? "" : (g === "2" ? "猜对了。" : "不对。")) + "模拟里是 " + (r.slowShare * 100).toFixed(1) + "%：它每接一个请求要占 300 ms，在途数一直比 18081 高，只有两边在途数相等的那一瞬间才可能被挑中。轮询做不到，是因为 ④ 机制 3：它只数次数。";
+  }));
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

@@ -221,3 +221,4 @@
 |---|------|------|
 | 01 | [下单为什么要穿过五个服务：服务怎么拆](https://archeu.github.io/study-notes/cloud/service-split.html) | 单体四个痛点、模块化单体能解决哪些、按层按表按领域三种切法、拆开后原来免费的六样东西、变更事务运行时三种耦合、拆多细五条、交易靶场五个服务的理由、六个误用、绞杀者迁移与 co-change 找边界，三种切法推演台 |
 | 02 | [inventory-2 下线了，订单服务多久知道：Nacos 注册发现与配置中心](https://archeu.github.io/study-notes/cloud/nacos-registry-config.html) | 写死地址、DNS、Nginx 各疼在哪，Eureka、ZooKeeper、Consul、Nacos、K8s 对比，注册订阅推送与 500 ms 合并、连接即心跳与 20 秒探测、配置推送与重新绑定、1.x 心跳为什么被换掉、Nacos 3.3.0 七种情况实测掐表、六个坑与版本差异，调用方误发掐表台 |
+| 03 | [inventoryClient.reserve() 背后：OpenFeign、Dubbo 与负载均衡](https://archeu.github.io/study-notes/cloud/feign-dubbo-loadbalancer.html) | 手写 RestClient 疼在哪、OpenFeign / HTTP Service Clients / Dubbo / gRPC 对比、启动时接口变代理、调用栈一路到真实 IP、两层缓存、轮询只数次数、客户端负载均衡为什么赢、Dubbo 默认值对照、下线后又被调 32 秒实测，四种挑法实验台 |
