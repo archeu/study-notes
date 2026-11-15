@@ -39,6 +39,7 @@
 | 10 | [全景：拆成微服务后的一次下单](https://archeu.github.io/study-notes/java/pano-j10-order-through-microservices.html) | J10 场景全景：订单 9527 穿过网关鉴权、限流、灰度路由，Nacos 推来的超时配置，OpenFeign 串行调商品、券、库存，inventory-2 卡住却仍“健康”，Sentinel 慢调用熔断与降级、摘流量后 35 秒缓存才恢复，每一跳的超时预算表，分步演示 |
 | 11 | [全景：订单表从一张到八张](https://archeu.github.io/study-notes/java/pano-j11-order-table-sharding.html) | J11 场景全景：t_order 1.2 亿行按 user_id 拆成 2 库 8 表，库表余数为什么要同源，双写、分批搬运、校验到差 0、先切读再切写的回滚开关，ShardingSphere 改写路由，老订单号没有基因，跨片分页放大，按商家查交给 ES，binlog → Canal → Kafka 同步，换 TiDB / OceanBase / GoldenDB 这另一条路，分步演示 |
 | 12 | [全景：10 万人抢 1000 张券的那一秒](https://archeu.github.io/study-notes/java/pano-j12-coupon-rush.html) | J12 场景全景：算账和全链路压测定出 8 台、限流 1 万/秒，30 万次点击经 App 置灰、CDN 静态化、网关令牌桶、售罄标记、Redis Lua 预扣、RocketMQ 异步落库削到 1000 行，条件更新兜底防超发，Redis 切主库存回涨、机房断电同城双活切流，对数漏斗图，分步演示 |
+| 13 | [全景：凌晨三点，告警响了](https://archeu.github.io/study-notes/java/pano-j13-late-night-alert.html) | J13 场景全景：对账任务在事务里等支付渠道 30 秒，占满 order-3 连接池，下单 1/3 失败；Micrometer 指标、JSON 日志、OTel 链路三路埋点，Prometheus 规则 for 5m 加 Alertmanager 打电话，接警定级、大盘按实例和连接池缩范围、慢 trace 没有子 span、按 trace_id 查日志、问变更、Arthas 看线程和耗时、Nacos 开关止血、复盘五问和改进项，30 分钟时间尺，分步演示 |
 
 ## Spring
 
