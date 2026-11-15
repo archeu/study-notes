@@ -1,0 +1,1629 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>tc-1 断网了，谁来接着拍板：Raft 选主与日志复制</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column; J09 knowledge point 5 (Raft: leader election + log replication), stations 3 and 7 of the J09 panorama, basic-theory type. Roles: cg = majority / leader (consensus core), bk = terms and election timers, pd = log entries and replication, of = Seata TC business side (order service, global sessions), g2 = other consensus families in step 3; term colours in log slots: term 1 = pd, term 2 = bk, term 3+ = of. bad/done/other keep their repo-wide meaning. Interaction: one stepper in step 5 (13 steps of the MiniRaft partition timeline, prev/next/auto/reset, arrow keys, guess first). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>架构</span><span aria-hidden="true">/</span><span class="tb-here">Raft 选主与日志复制</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-good"/></marker>
+    <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-of"/></marker>
+    <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bk"/></marker>
+    <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-cg"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">多数派 · 任期 term · 随机选举超时 · RequestVote · AppendEntries · 一致性检查 · 过半即提交 · 投票限制 · no-op · PreVote · leader 租约 · ReadIndex · SOFAJRaft 1.3.14 · Seata 2.6.0 · JDK 17 实测</p>
+  <h1>tc-1 断网了，谁来接着拍板：Raft 选主与日志复制</h1>
+  <p class="lead">三台 TC 要像一台那样记账。Raft 的做法是：先选出<b>唯一的 leader</b>，所有写入只走它；leader 把每条记录复制给其他节点，<b>过半写下就算提交</b>。整套算法的安全性都靠一个事实：<b>任意两个多数派至少有一台重叠</b>。所以同一任期不会有两个 leader（每台每任期只投一票），新 leader 一定带着全部已提交的记录（日志不够新的拿不到票）。时间只用来发现 leader 死了，谁对谁错从来不看时间。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>朴素做法</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种思路</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>关键洞察</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>手推一遍</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>边界和变体</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j09-order-across-three-dbs.html#s-3">一次下单跨三个库 · 第 3、7 站</a></span><span>地图：<a href="../java/roadmap.html#j09">J09 · 共识：Raft 怎么选主、怎么复制日志</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>J09 第 5 个下钻知识点。前面几页一直默认 TC 是靠得住的：它记下“9527 要提交”，就会一直推 Confirm 直到成功。这一页回答 TC 凭什么靠得住：3 台机器怎么选出拍板的那一台，它挂了谁接手，接手的那台为什么不会忘掉已经拍过的板。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：TC 记下的决议，挂一台也不能丢</h2>
+  </div>
+  <p class="lead">在全景第 3、7 站，这一步要解决：订单服务问 TC“开一个全局事务”“9527 要提交”，TC 回了“好”，这条记录从此<b>必须一直在</b>。哪怕回完“好”的下一秒，那台 TC 的机器就烧了。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="左边是订单服务，向 TC 集群发 begin 和 commit。TC 集群有三台：tc-1 是 leader，tc-2、tc-3 是 follower，每台都有一份日志，写着 BEGIN 9527、COMMITTING 9527。tc-1 把记录复制给另外两台，有两台写下就回复订单服务成功。右边写着：tc-1 挂了以后，tc-2 或 tc-3 接手，接着推 Confirm。">
+  <rect x="14" y="78" width="168" height="92" rx="14" class="b-of"/>
+  <text x="98" y="108" text-anchor="middle" class="t-of">订单服务（TM）</text>
+  <text x="98" y="132" text-anchor="middle" class="t-mono">placeOrder()</text>
+  <text x="98" y="152" text-anchor="middle" class="t-xs">@GlobalTransactional</text>
+  <path d="M184,110 L262,110" class="e-of" marker-end="url(#ah-of)"/>
+  <text x="222" y="100" text-anchor="middle" class="t-xs">begin / commit</text>
+  <path d="M262,140 L186,140" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="222" y="158" text-anchor="middle" class="t-good">2/3 写下才回</text>
+  <rect x="264" y="14" width="452" height="222" rx="16" class="b-dash"/>
+  <text x="280" y="36" class="t-cg">Seata TC 集群 · store.mode = raft</text>
+  <g>
+    <rect x="280" y="50" width="200" height="74" rx="12" class="b-cg"/>
+    <text x="296" y="72" class="t-cg">tc-1 · leader</text>
+    <rect x="296" y="82" width="80" height="30" rx="6" class="lg1"/><text x="336" y="101" text-anchor="middle" class="t-monos">BEGIN</text>
+    <rect x="384" y="82" width="86" height="30" rx="6" class="lg1"/><text x="427" y="101" text-anchor="middle" class="t-monos">COMMITTING</text>
+  </g>
+  <g>
+    <rect x="500" y="50" width="200" height="74" rx="12" class="b-card"/>
+    <text x="516" y="72" class="t-b">tc-2 · follower</text>
+    <rect x="516" y="82" width="80" height="30" rx="6" class="lg1"/><text x="556" y="101" text-anchor="middle" class="t-monos">BEGIN</text>
+    <rect x="604" y="82" width="86" height="30" rx="6" class="lg1"/><text x="647" y="101" text-anchor="middle" class="t-monos">COMMITTING</text>
+  </g>
+  <g>
+    <rect x="500" y="148" width="200" height="74" rx="12" class="b-card"/>
+    <text x="516" y="170" class="t-b">tc-3 · follower</text>
+    <rect x="516" y="180" width="80" height="30" rx="6" class="lg1"/><text x="556" y="199" text-anchor="middle" class="t-monos">BEGIN</text>
+    <rect x="604" y="180" width="86" height="30" rx="6" class="lg1 lgu"/><text x="647" y="199" text-anchor="middle" class="t-monos">（还在路上）</text>
+  </g>
+  <path d="M482,92 L498,92" class="e-pd" marker-end="url(#ah-pd)"/>
+  <path d="M440,126 C440,170 470,186 498,186" class="e-pd" marker-end="url(#ah-pd)"/>
+  <text x="300" y="160" class="t-pd">复制日志</text>
+  <text x="300" y="180" class="t-xs">每条记录 = 一次会话变化</text>
+  <text x="300" y="196" class="t-xs">（9527 开始、9527 要提交……）</text>
+  <rect x="736" y="44" width="210" height="160" rx="14" class="b-bad"/>
+  <text x="752" y="72" class="t-bad">tc-1 的机器烧了</text>
+  <text x="752" y="98" class="t-s">tc-2、tc-3 里谁接手？</text>
+  <text x="752" y="122" class="t-s">接手的那台记不记得</text>
+  <text x="752" y="142" class="t-s">“9527 要提交”？</text>
+  <text x="752" y="170" class="t-s">两台会不会各说各的？</text>
+  <text x="752" y="192" class="t-xs">这一页回答这三个问题</text>
+</svg>
+  </div>
+  <figcaption>全景第 3 站开全局事务、第 7 站写“要提交”的决议，写的都是 TC 集群的日志。tc-3 的第二条还没到也没关系：tc-1 和 tc-2 两台写下，就是 2/3，已经可以回复订单服务。</figcaption>
+  </figure>
+  <div class="goals">
+    <div class="goal" data-role="pd"><b>记得住</b><p>回过“好”的记录，挂掉少数几台（3 台挂 1 台）也不能丢。</p></div>
+    <div class="goal" data-role="cg"><b>说一样的话</b><p>每台按<b>同样的顺序</b>执行同样的记录，任何时候最多一台在拍板，不会出现两个“主”。</p></div>
+    <div class="goal" data-role="bk"><b>自己换人</b><p>拍板的那台挂了，剩下的自己选出新的，几秒内恢复写入，不用半夜叫人。</p></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>朴素做法：主备复制，主挂了切备</h2>
+  </div>
+  <p class="lead">Java 后端最熟悉的高可用就是 MySQL 主从：写主库，binlog 复制到从库，主库挂了把从库提上来。拿它来做 TC，有三种配法，每种都缺一块。</p>
+  <div class="tries">
+    <div class="try"><h4>异步复制</h4><p>主库写完就回“好”，再慢慢发给备库。</p><p class="pain">主库在发出去之前挂了：备库没有“9527 要提交”。新主以为 9527 还在 Begin，60 秒后回滚；可旧主已经推了一半 Confirm。<b>决议丢了。</b></p></div>
+    <div class="try"><h4>同步复制到所有备库</h4><p>每个备库都写下才回“好”。</p><p class="pain">不丢了，但任何一台备库慢了或挂了，整个 TC 都写不进去。<b>多一台机器，反而多一个停机的理由。</b></p></div>
+    <div class="try"><h4>心跳断了就接管</h4><p>备库收不到主库心跳，就自己升成主库。</p><p class="pain">网络断开时主库其实活着，只是两边互相看不见：<b>两个主库</b>同时拍板，一个说 9527 提交，一个说回滚。这叫脑裂。</p></div>
+  </div>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 230" role="img" aria-label="脑裂示意。中间一道红色锯齿线表示网络断开。左边旧主库 tc-1 还活着，订单服务 A 在它这里提交 9527；右边备库 tc-2 收不到心跳，自己升为主库，订单服务 B 那边超时后在它这里回滚 9527。最下面库存服务同时收到 Confirm 和 Cancel。">
+  <rect x="40" y="26" width="300" height="104" rx="14" class="b-neu"/>
+  <text x="58" y="54" class="t-b">tc-1：我还是主库</text>
+  <text x="58" y="80" class="t-s">订单服务 A 发来 commit</text>
+  <text x="58" y="104" class="t-mono">9527 → COMMITTING</text>
+  <rect x="620" y="26" width="300" height="104" rx="14" class="b-neu"/>
+  <text x="638" y="54" class="t-b">tc-2：3 秒没心跳，我接管</text>
+  <text x="638" y="80" class="t-s">它这里 9527 还是 Begin，超时了</text>
+  <text x="638" y="104" class="t-mono">9527 → ROLLBACKING</text>
+  <path d="M480,14 L466,40 L494,66 L466,92 L494,118 L466,144 L480,160" class="e-bad"/>
+  <text x="480" y="180" text-anchor="middle" class="t-bad">网络断开：两边互相看不见</text>
+  <path d="M190,132 L300,196" class="e-good" marker-end="url(#ah-good)"/>
+  <path d="M770,132 L660,196" class="e-bad" marker-end="url(#ah-bad)"/>
+  <rect x="310" y="190" width="340" height="34" rx="10" class="b-bad"/>
+  <text x="480" y="212" text-anchor="middle" class="t-bad">库存服务：同一单先收到 Confirm，又收到 Cancel</text>
+</svg>
+  </div>
+  <figcaption>心跳只能说明“我听不到它”，说明不了“它死了”（<a href="clock-timeout-retry.html#m-unknown">超时 = 不知道</a>）。只要让“听不到”的一方自己拍板，就一定会在某次断网时出现两个主。</figcaption>
+  </figure>
+  <p class="pick-line"><b>缺的那一块</b>：一条“谁说了算”的规则，它不依赖时间准不准、网络通不通，只看<b>票数过没过半</b>。过半写下才算数，过半同意才能当主；少数派那一边宁可停下，也不自己拍板。</p>
+  <div class="pit" id="p-misuse"><b><em>!</em>不懂精华时的典型误用</b>
+    <dl><dt>做法</dt><dd>为了“高可用”把 TC 从 1 台加到 2 台，开 raft 模式。</dd><dt>结果</dt><dd>2 台的多数派是 2 台，挂任何一台都凑不够，整个集群停写。两台里任何一台出事都会停，比 1 台更容易停。要能挂 1 台，至少 3 台；要能挂 2 台，至少 5 台（<a href="#m-quorum">④ 多数派</a>）。</dd></dl>
+  </div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="g2">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种思路：多数派共识，还是外部选主 + 复制</h2>
+  </div>
+  <p class="lead">“几台机器对一串记录达成一致”叫<b>共识</b>（consensus）。业界有两大类做法：一类把选主和复制都交给多数派（Paxos、Raft、ZAB），一类让外部的协调者选主，数据面自己复制。</p>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>做法</th><th>怎么选主</th><th>怎么算写成功</th><th>用在哪</th><th>代价</th></tr></thead>
+    <tbody>
+      <tr><td><b>Paxos / Multi-Paxos</b></td><td>原始 Paxos 不需要固定 leader，谁都能提议；工程上的 Multi-Paxos 一般也选一个 leader 来提速</td><td>每个日志位置单独做一轮多数派表决</td><td>Google Chubby、Spanner 的 Paxos 组，微信 PhxPaxos</td><td>论文只讲“对一个值达成一致”，变成日志要自己补很多细节，难懂，更难写对</td></tr>
+      <tr data-role="cg"><td><b>Raft</b></td><td>强 leader；随机超时发起选举，过半票当选</td><td>leader 复制给 follower，过半写下即提交</td><td>etcd、Consul、TiKV、Kafka KRaft（拉模式变体）、SOFAJRaft（Seata TC 的 raft 模式、Nacos CP 模式）、RocketMQ DLedger</td><td>所有写都过 leader；leader 挂了要停 1～2 秒（⑤ 实测）</td></tr>
+      <tr><td><b>ZAB</b></td><td>选 epoch、zxid 最大的节点</td><td>提议，过半 ack，再广播提交</td><td>ZooKeeper</td><td>和 Raft 很像，但只有 ZooKeeper 自己在用；分布式锁那一页会再见到它</td></tr>
+      <tr data-role="other"><td><b>外部选主 + 主备复制</b></td><td>交给别人：Redis Sentinel 由多数哨兵投票；Kafka 分区由 controller 指定</td><td>Redis：异步复制，切换可能丢写；Kafka：ISR 里全部确认才算提交，不看过半</td><td>Redis 主从、<a href="../kafka/kafka-leader-election-elr.html">Kafka 分区副本（ISR、ELR）</a></td><td>选主可靠了，数据面仍要自己权衡“丢”还是“等”</td></tr>
+    </tbody>
+  </table></div>
+  <p class="tip">选择规则：要“自己选主、确认过的写一条不丢、挂少数几台照样能写”，就用多数派共识。Paxos、Raft、ZAB 能做到的事一样，按生态选：Java 里是 SOFAJRaft，Go 里是 etcd/raft。数据量大、吞吐要求高的数据面，常见做法是把元数据交给 Raft，数据本身走 ISR 一类的复制（Kafka 用 KRaft 管元数据就是这样）。</p>
+  <p class="pick-line"><b>本页学 Raft</b>：它的论文就叫《寻找一种可理解的共识算法》，设计目标是好懂；Seata TC 的 raft 模式用的 SOFAJRaft 是它的 Java 实现。Paxos 和 ZAB 放进“下一圈”。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>关键洞察：两个多数派一定重叠</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>状态机复制</b>：每台 TC 内存里都有同一张“全局会话表”。只要大家按<b>同样的顺序</b>执行<b>同样的命令</b>，表就一样。所以问题变成：让 3 台的<b>日志</b>一样。像 MySQL 从库按顺序重放主库的 binlog，区别在于这里谁当主、什么时候算写成功，由投票决定。</li>
+      <li><b>多数派（quorum）</b>：N 台里的 ⌊N/2⌋+1 台。3 台是 2，5 台是 3。</li>
+      <li><b>超时只是猜测</b>：等不到心跳，只说明“我没听到”，不说明“它死了”。见<a href="clock-timeout-retry.html#m-unknown">时钟、超时与重试</a>。Raft 允许猜错，猜错了也不会出错，只是多一次选举。</li>
+      <li><b>CAP 里选 C</b>：凑不够多数派的那一边宁可不可用。见 <a href="cap-base-consistency.html">CAP、BASE 与一致性模型</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-quorum">机制 1 · 多数派：任意两个多数派至少有一台重叠</h3>
+  <div class="duo">
+  <figure>
+  <div class="fig-box">
+<svg class="sv" viewBox="0 0 480 250" role="img" aria-label="左图 3 台：一个多数派圈住 tc-1、tc-2，另一个圈住 tc-2、tc-3，两圈在 tc-2 重叠。右图 5 台：一个多数派圈住 1、2、3，另一个圈住 3、4、5，在 3 重叠。">
+  <text x="20" y="26" class="t-h">3 台</text>
+  <ellipse cx="88" cy="110" rx="86" ry="48" class="qz"/>
+  <ellipse cx="152" cy="110" rx="86" ry="48" class="qz2"/>
+  <circle cx="56" cy="110" r="22" class="b-card"/><text x="56" y="115" text-anchor="middle" class="t-b">1</text>
+  <circle cx="120" cy="110" r="22" class="b-card"/><text x="120" y="115" text-anchor="middle" class="t-b">2</text>
+  <circle cx="184" cy="110" r="22" class="b-card"/><text x="184" y="115" text-anchor="middle" class="t-b">3</text>
+  <text x="120" y="186" text-anchor="middle" class="t-s">{1,2} 和 {2,3} 共享 2</text>
+  <text x="270" y="26" class="t-h">5 台</text>
+  <ellipse cx="320" cy="100" rx="64" ry="62" class="qz"/>
+  <ellipse cx="410" cy="150" rx="64" ry="62" class="qz2"/>
+  <circle cx="290" cy="74" r="18" class="b-card"/><text x="290" y="79" text-anchor="middle" class="t-b">1</text>
+  <circle cx="338" cy="64" r="18" class="b-card"/><text x="338" y="69" text-anchor="middle" class="t-b">2</text>
+  <circle cx="364" cy="126" r="18" class="b-card"/><text x="364" y="131" text-anchor="middle" class="t-b">3</text>
+  <circle cx="420" cy="180" r="18" class="b-card"/><text x="420" y="185" text-anchor="middle" class="t-b">4</text>
+  <circle cx="446" cy="128" r="18" class="b-card"/><text x="446" y="133" text-anchor="middle" class="t-b">5</text>
+  <text x="270" y="236" class="t-s">{1,2,3} 和 {3,4,5} 共享 3</text>
+  <text x="20" y="236" class="t-xs">3 + 3 &gt; 5，2 + 2 &gt; 3：鸽笼原理</text>
+</svg>
+  </div>
+  </figure>
+  <div>
+    <table class="qtab">
+      <thead><tr><th>节点数 N</th><th>多数派</th><th>最多能挂几台</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>1</td><td>0</td></tr>
+        <tr class="bad"><td>2</td><td>2</td><td>0</td></tr>
+        <tr class="ok"><td>3</td><td>2</td><td>1</td></tr>
+        <tr class="bad"><td>4</td><td>3</td><td>1</td></tr>
+        <tr class="ok"><td>5</td><td>3</td><td>2</td></tr>
+      </tbody>
+    </table>
+    <p class="tip">偶数台不划算：4 台和 3 台一样只能挂 1 台，还多一台可能出故障的机器。</p>
+  </div>
+  </div>
+  <p>后面每一条规则都在用这个重叠：<b>当选要过半票</b>，<b>提交要过半写下</b>。于是任何“新多数派”里，至少有一台见过“旧多数派”做过的事。</p>
+
+  <h3 id="m-term">机制 2 · 任期和选举：每台每个任期只投一票</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 300" role="img" aria-label="上半部分是三种角色的状态图：Follower 等不到心跳超时后变成 Candidate；Candidate 拿到过半票变成 Leader；Candidate 再次超时则任期加一重新选；Candidate 或 Leader 看到更大的任期就退回 Follower；Leader 联系不上多数派也退回 Follower。下半部分是任期时间轴：任期 1 选举后正常工作，任期 2 选举后正常工作，任期 3 平票没有选出 leader，任期 4 选出 leader。">
+  <rect x="40" y="40" width="170" height="70" rx="35" class="b-neu"/>
+  <text x="125" y="72" text-anchor="middle" class="t-h">Follower</text>
+  <text x="125" y="94" text-anchor="middle" class="t-xs">听 leader 的，投票</text>
+  <rect x="390" y="40" width="170" height="70" rx="35" class="b-bk"/>
+  <text x="475" y="72" text-anchor="middle" class="t-h">Candidate</text>
+  <text x="475" y="94" text-anchor="middle" class="t-xs">任期 +1，投自己，拉票</text>
+  <rect x="740" y="40" width="170" height="70" rx="35" class="b-cg"/>
+  <text x="825" y="72" text-anchor="middle" class="t-h">Leader</text>
+  <text x="825" y="94" text-anchor="middle" class="t-xs">接写入，发心跳</text>
+  <path d="M212,62 L388,62" class="e-bk" marker-end="url(#ah-bk)"/>
+  <text x="300" y="54" text-anchor="middle" class="t-bk">选举超时（等不到心跳）</text>
+  <path d="M562,62 L738,62" class="e-cg" marker-end="url(#ah-cg)"/>
+  <text x="650" y="54" text-anchor="middle" class="t-cg">拿到过半票</text>
+  <path d="M440,38 C420,4 530,4 510,38" class="e-bk" marker-end="url(#ah-bk)"/>
+  <text x="536" y="20" class="t-xs">又超时（平票）：任期再 +1</text>
+  <path d="M388,92 L212,92" class="e-mut" marker-end="url(#ah-ink)"/>
+  <text x="300" y="128" text-anchor="middle" class="t-xs">收到当前 leader 的心跳，或看到更大任期</text>
+  <path d="M800,112 C760,170 200,170 140,112" class="e-mut" marker-end="url(#ah-ink)"/>
+  <text x="470" y="180" text-anchor="middle" class="t-xs">看到更大任期，或联系不上多数派（JRaft：900 ms 租约内凑不够多数派）→ 退回 Follower</text>
+  <line x1="40" y1="232" x2="920" y2="232" class="e-axis"/>
+  <text x="40" y="200" class="t-b">任期就是一个只增不减的编号：</text>
+  <g>
+    <rect x="40" y="216" width="40" height="32" class="b-bk"/><rect x="80" y="216" width="170" height="32" class="b-cg"/>
+    <text x="145" y="272" text-anchor="middle" class="t-s">任期 1</text>
+    <rect x="256" y="216" width="40" height="32" class="b-bk"/><rect x="296" y="216" width="250" height="32" class="b-cg"/>
+    <text x="400" y="272" text-anchor="middle" class="t-s">任期 2</text>
+    <rect x="552" y="216" width="60" height="32" class="b-bk"/>
+    <text x="582" y="272" text-anchor="middle" class="t-bad">任期 3：平票</text>
+    <rect x="618" y="216" width="40" height="32" class="b-bk"/><rect x="658" y="216" width="262" height="32" class="b-cg"/>
+    <text x="780" y="272" text-anchor="middle" class="t-s">任期 4</text>
+  </g>
+  <text x="40" y="294" class="t-xs">青色 = 选举中，紫色 = 有 leader 正常工作。每个任期最多一个 leader，也可能一个都没有。</text>
+</svg>
+  </div>
+  <figcaption>节点之间交换任期号。看到比自己大的任期，立刻更新并退回 Follower；收到比自己小的任期的消息，直接拒绝。所以一个被隔离的旧 leader 一回来，第一次通信就会发现自己过时了。</figcaption>
+  </figure>
+  <p>为什么同一任期不会有两个 leader：每台节点把“任期 N 投给了谁”<b>先写盘</b>，再回复，一个任期只投一次；当选要过半票；两个过半票的集合必然重叠，重叠的那台不可能同一任期投给两个人。</p>
+  <p>为什么超时要随机：大家同时超时，就会同时参选、各投自己、1:1:1 平票，下一轮又同时超时。随机错开后，通常第一个醒来的人在别人醒来之前就拿够了票。SOFAJRaft 的选举超时是 <code>electionTimeoutMs</code> 加 0～<code>maxElectionDelayMs</code> 的随机数，默认是 [1000, 2000) ms；心跳间隔是选举超时的 1/10，即 100 ms。</p>
+
+  <h3 id="m-repl">机制 3 · 日志复制：一条记录怎么从“写下”变成“提交”</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="时序图，四条竖线：订单服务、tc-1 leader、tc-2、tc-3。一，订单服务发 commit 9527；二，tc-1 把 COMMITTING 9527 追加到自己日志 index 3 并落盘；三，并行发 AppendEntries 给 tc-2、tc-3，带上前一条的 index 2 和任期 1；四，tc-2 检查自己的 index 2 也是任期 1，追加并落盘后回成功；五，tc-1 数到 2/3，commitIndex 变成 3，交给状态机，把全局会话 9527 改成 Committing；六，回复订单服务成功。tc-3 的回复晚到，不影响。">
+  <g class="t-b">
+    <text x="110" y="24" text-anchor="middle" class="t-of">订单服务</text>
+    <text x="380" y="24" text-anchor="middle" class="t-cg">tc-1（leader）</text>
+    <text x="640" y="24" text-anchor="middle" class="t-b">tc-2</text>
+    <text x="860" y="24" text-anchor="middle" class="t-b">tc-3</text>
+  </g>
+  <line x1="110" y1="34" x2="110" y2="320" class="e-axis"/>
+  <line x1="380" y1="34" x2="380" y2="320" class="e-axis"/>
+  <line x1="640" y1="34" x2="640" y2="320" class="e-axis"/>
+  <line x1="860" y1="34" x2="860" y2="320" class="e-axis"/>
+  <path d="M110,56 L376,56" class="e-of" marker-end="url(#ah-of)"/>
+  <text x="124" y="50" class="t-s">① commit(XID 9527)</text>
+  <rect x="300" y="68" width="160" height="40" rx="8" class="b-pd"/>
+  <text x="380" y="86" text-anchor="middle" class="t-mono">② 追加 index 3</text>
+  <text x="380" y="101" text-anchor="middle" class="t-xs">COMMITTING 9527 · 落盘</text>
+  <path d="M384,124 L636,138" class="e-pd" marker-end="url(#ah-pd)"/>
+  <path d="M384,124 L856,152" class="e-pd" marker-end="url(#ah-pd)"/>
+  <text x="400" y="122" class="t-pd">③ AppendEntries(term 1, prevIndex 2, prevTerm 1, [index 3], commit 2)</text>
+  <rect x="560" y="146" width="160" height="40" rx="8" class="b-pd"/>
+  <text x="640" y="164" text-anchor="middle" class="t-mono">④ index 2 是任期 1？</text>
+  <text x="640" y="179" text-anchor="middle" class="t-xs">对得上 → 追加、落盘</text>
+  <path d="M636,198 L384,212" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="520" y="222" class="t-good">成功，match = 3</text>
+  <rect x="270" y="226" width="220" height="44" rx="8" class="b-cg"/>
+  <text x="380" y="244" text-anchor="middle" class="t-b">⑤ 2/3 有 index 3 → 提交</text>
+  <text x="380" y="261" text-anchor="middle" class="t-xs">交给状态机：9527 改成 Committing</text>
+  <path d="M376,286 L114,286" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="124" y="280" class="t-good">⑥ 成功</text>
+  <path d="M856,250 L384,300" class="e-mut" marker-end="url(#ah-ink)"/>
+  <text x="640" y="306" class="t-xs">tc-3 的回复晚到，不影响</text>
+</svg>
+  </div>
+  <figcaption>leader 不等最慢的那台。follower 什么时候知道 index 3 已经提交了？下一条 AppendEntries（哪怕是空的心跳）里的 <code>leaderCommit</code> 会告诉它。</figcaption>
+  </figure>
+  <p><b>一致性检查</b>是复制的关键：AppendEntries 里带着“新条目前一条的 index 和任期”。follower 对不上就拒绝，leader 把这台的 <code>nextIndex</code> 往前退一格再发，直到找到两边一致的位置，再把 follower 那之后的内容<b>整段覆盖</b>。由此得到一个不变式：两份日志只要某个 index 上的任期相同，那么从开头到这里全部相同（论文叫 Log Matching）。</p>
+
+  <h3 id="m-safe">机制 4 · 投票限制：日志不够新的，拿不到票</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 220" role="img" aria-label="tc-2 的日志有 5 条，前 5 条都已提交；tc-3 宕机期间错过了 index 4、5，只有 3 条。tc-1 挂了，tc-3 先超时，向 tc-2 要票，带上自己最后一条是 index 3 任期 1；tc-2 比较：自己最后一条是 index 5 任期 1，更新，所以不投。后来 tc-2 超时参选，tc-3 投给它，tc-2 当选后把 index 4、5 补给 tc-3。">
+  <text x="20" y="46" class="t-b">tc-2</text>
+  <text x="20" y="110" class="t-b">tc-3</text>
+  <text x="110" y="22" text-anchor="middle" class="t-xs">1</text>
+  <text x="196" y="22" text-anchor="middle" class="t-xs">2</text>
+  <text x="282" y="22" text-anchor="middle" class="t-xs">3</text>
+  <text x="368" y="22" text-anchor="middle" class="t-xs">4</text>
+  <text x="454" y="22" text-anchor="middle" class="t-xs">5</text>
+  <rect x="70" y="28" width="80" height="30" rx="6" class="lg1"/><text x="110" y="47" text-anchor="middle" class="t-monos">no-op</text>
+  <rect x="156" y="28" width="80" height="30" rx="6" class="lg1"/><text x="196" y="47" text-anchor="middle" class="t-monos">BEGIN 9527</text>
+  <rect x="242" y="28" width="80" height="30" rx="6" class="lg1"/><text x="282" y="47" text-anchor="middle" class="t-monos">COMMITTING</text>
+  <rect x="328" y="28" width="80" height="30" rx="6" class="lg1"/><text x="368" y="47" text-anchor="middle" class="t-monos">BEGIN 9528</text>
+  <rect x="414" y="28" width="80" height="30" rx="6" class="lg1"/><text x="454" y="47" text-anchor="middle" class="t-monos">COMMITTING</text>
+  <rect x="70" y="92" width="80" height="30" rx="6" class="lg1"/><text x="110" y="111" text-anchor="middle" class="t-monos">no-op</text>
+  <rect x="156" y="92" width="80" height="30" rx="6" class="lg1"/><text x="196" y="111" text-anchor="middle" class="t-monos">BEGIN 9527</text>
+  <rect x="242" y="92" width="80" height="30" rx="6" class="lg1"/><text x="282" y="111" text-anchor="middle" class="t-monos">COMMITTING</text>
+  <rect x="328" y="92" width="166" height="30" rx="6" class="b-dash"/><text x="411" y="111" text-anchor="middle" class="t-xs">宕机期间错过</text>
+  <path d="M504,107 C556,107 556,43 504,43" class="e-bk" marker-end="url(#ah-bk)"/>
+  <text x="568" y="50" class="t-bk">tc-3：投我吧，我最后一条是（任期 1，index 3）</text>
+  <text x="568" y="78" class="t-bad">tc-2：我最后一条是（任期 1，index 5），更新，不投</text>
+  <text x="568" y="104" class="t-xs">先比最后一条的任期，任期相同再比长度</text>
+  <rect x="80" y="140" width="840" height="64" rx="12" class="b-cg"/>
+  <text x="100" y="164" class="t-b">为什么这样就够了：已提交 = 在多数派上；当选 = 拿到多数派的票；两者至少重叠一台。</text>
+  <text x="100" y="188" class="t-s">重叠的那台手里有这条已提交记录，它只投给“至少和自己一样新”的人，所以赢家一定也有。新 leader 不用向别人要数据。</text>
+</svg>
+  </div>
+  <figcaption>这正是 <code>MiniRaft restrict</code> 跑出来的场景：tc-3 在 2410 ms 先参选，tc-2 拒绝；tc-2 在 2960 ms 参选当选，再把 9528 的两条补给 tc-3。</figcaption>
+  </figure>
+  <p>还剩一个坑：新 leader 手里有旧任期留下的、还没确认提交的记录，它不能靠“数一数有几台有”来提交它们（⑥ 第三圈讲为什么）。Raft 的规则是<b>只按副本数提交本任期的记录</b>，旧记录跟着一起提交。所以新 leader 上任先写一条空记录 <b>no-op</b>，它一提交，前面的全部跟着提交。etcd、MiniRaft 都这么做。</p>
+
+  <h3 id="m-design">为什么这样设计</h3>
+  <div class="design">
+    <div class="card" data-role="other">
+      <h3>被放弃的：固定超时，或者按编号排队</h3>
+<svg class="sv" viewBox="0 0 440 150" role="img" aria-label="固定超时：三台的计时条一样长，同时在 1000 毫秒到期，同时参选，各投自己，平票，下一轮仍然同时到期。">
+  <text x="10" y="20" class="t-xs">计时都是 1000 ms</text>
+  <rect x="60" y="32" width="300" height="18" rx="4" class="b-neu"/><text x="10" y="46" class="t-s">tc-1</text>
+  <rect x="60" y="60" width="300" height="18" rx="4" class="b-neu"/><text x="10" y="74" class="t-s">tc-2</text>
+  <rect x="60" y="88" width="300" height="18" rx="4" class="b-neu"/><text x="10" y="102" class="t-s">tc-3</text>
+  <line x1="360" y1="26" x2="360" y2="112" class="e-bad"/>
+  <text x="368" y="72" class="t-bad">1 : 1 : 1</text>
+  <text x="10" y="136" class="t-bad">MiniRaft split：5.5 秒、5 轮，一个 leader 都没选出</text>
+</svg>
+      <p>按编号排队（编号小的先上）也不行：编号最小的那台日志可能最旧，拿不到票，大家还是要等它失败再轮到下一个。</p>
+    </div>
+    <div class="card" data-role="bk">
+      <h3>Raft 选的：随机超时</h3>
+<svg class="sv" viewBox="0 0 440 150" role="img" aria-label="随机超时：tc-1 的计时条最短，先到期参选，5 毫秒后另外两台收到拉票请求，它们的计时还没到，直接投票，tc-1 当选。">
+  <text x="10" y="20" class="t-xs">[1000, 2000) ms 里随机</text>
+  <rect x="60" y="32" width="190" height="18" rx="4" class="b-bk"/><text x="10" y="46" class="t-s">tc-1</text>
+  <rect x="60" y="60" width="300" height="18" rx="4" class="b-neu"/><text x="10" y="74" class="t-s">tc-2</text>
+  <rect x="60" y="88" width="250" height="18" rx="4" class="b-neu"/><text x="10" y="102" class="t-s">tc-3</text>
+  <line x1="250" y1="26" x2="250" y2="112" class="e-cg"/>
+  <text x="258" y="46" class="t-cg">先醒，拉票 → 2/3 当选</text>
+  <text x="10" y="136" class="t-good">MiniRaft：换 1000 个随机种子，1000 次第 1 轮选出</text>
+</svg>
+      <p>最简单的打破对称的办法。前提是网络往返（这里 5 ms）远小于随机区间（1000 ms）。</p>
+    </div>
+  </div>
+  <div class="design">
+    <div class="card" data-role="other">
+      <h3>被放弃的：谁都能当选，当选后再去补齐</h3>
+      <p>Paxos 一类做法允许日志旧的节点当选，再从别人那里把缺的补回来。正确，但新 leader 上任要先跑一轮“收集”，日志要能双向流动，实现复杂。</p>
+    </div>
+    <div class="card" data-role="cg">
+      <h3>Raft 选的：日志够新才能当选，日志只从 leader 流向 follower</h3>
+      <p>投票时多比较一次 <code>(lastTerm, lastIndex)</code>，换来“新 leader 一定已经有全部已提交记录”。之后复制只有一个方向：follower 和 leader 不一致，就以 leader 为准覆盖。</p>
+    </div>
+  </div>
+  <p class="verdict" data-role="cg"><b>决定胜负的约束</b>：共识算法要在网络会断、机器会停顿、时钟不可信的环境里<b>永不出错</b>，同时还要让人能读懂、能写对。Raft 用“强 leader + 过半 + 任期号”把正确性只押在票数上，时间只影响多久恢复。代价是所有写都过 leader，leader 挂了要停一会儿。</p>
+
+  <h3 id="m-api">最少的“语法”：两种 RPC，和 Seata 那几行配置</h3>
+  <div class="rpc">
+    <div class="card" data-role="bk">
+      <h3>RequestVote（拉票）</h3>
+      <dl><dt>term</dt><dd>我的新任期</dd><dt>lastLogIndex</dt><dd>我最后一条的位置</dd><dt>lastLogTerm</dt><dd>我最后一条的任期</dd><dt>→ granted</dt><dd>任期对、这任期还没投过、你的日志不比我旧，就投</dd></dl>
+    </div>
+    <div class="card" data-role="pd">
+      <h3>AppendEntries（复制，也当心跳）</h3>
+      <dl><dt>term</dt><dd>leader 的任期</dd><dt>prevLogIndex</dt><dd>新条目前一条的位置</dd><dt>prevLogTerm</dt><dd>那一条的任期，用来做一致性检查</dd><dt>entries[]</dt><dd>新条目，空的就是心跳</dd><dt>leaderCommit</dt><dd>leader 已提交到哪</dd></dl>
+    </div>
+  </div>
+  <div class="codebox" data-role="of"><div class="code-bar"><b>Seata 2.6.0 TC 开 raft 模式（示例）</b><code>快照、批量、序列化这些参数放到 ⑥</code></div>
+<pre><code>seata:
+  store:
+    mode: raft                       # 2.0.0 起支持
+  server:
+    raft:
+      group: default
+      server-addr: 10.0.1.11:9091,10.0.2.11:9091,10.0.3.11:9091   # 三台各在一个可用区
+      election-timeout-ms: 1000      # 默认 1000；心跳由 JRaft 取它的 1/10
+      sync: true                     # 默认 true：日志落盘再算写下
+# 客户端（TM / RM）：registry.type = raft，从 TC 的 /metadata/v1/cluster 拿到谁是 leader，只连 leader</code></pre>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>手推一遍：tc-1 断网的那 3 秒</h2>
+  </div>
+  <p class="lead">下面 13 步是 <code>MiniRaft partition</code> 的输出，每次跑都一样。时间参数取 SOFAJRaft 的量级：选举超时 1000～2000 ms，心跳 100 ms，leader 租约 900 ms，网络单程 5 ms。前半段是全景第 3、7 站的正常路径，后半段 tc-1 断网。</p>
+
+  <div class="guess" data-role="pd" id="rs-guess">
+    <p><b>先猜</b>：第 7 步 tc-1 断网以后，订单服务又在它那里开了一单，tc-1 把 <code>BEGIN 9528</code> 写进了自己的日志。网络恢复以后，这一条会怎样？</p>
+    <div class="opts" id="rs-opts">
+      <button type="button" data-g="a" aria-pressed="false">A. 复制给 tc-2、tc-3，大家都有</button>
+      <button type="button" data-g="b" aria-pressed="false">B. 被删掉，换成新 leader 的内容</button>
+      <button type="button" data-g="c" aria-pressed="false">C. 留在 tc-1，和另外两台不一样</button>
+      <button type="button" data-g="skip" class="skip" aria-pressed="false">不猜，直接看</button>
+    </div>
+    <p class="res" id="rs-res" hidden></p>
+  </div>
+
+  <div class="stepper" tabindex="0" id="rs-step" aria-label="Raft 分步演示，左右方向键切换">
+    <div class="fig-box wide">
+      <svg class="sv" id="rs-svg" viewBox="0 0 960 300" role="img" aria-label="三台 TC 的角色、任期和日志，随步骤变化。"></svg>
+    </div>
+    <div class="legend"><span><i class="l1"></i>任期 1 写的记录</span><span><i class="l2"></i>任期 2 写的记录</span><span><i class="lu"></i>虚线 = 这台还不知道它已提交</span><span><i class="lx"></i>被删掉的记录</span></div>
+    <p class="st-cap" id="rs-cap" aria-live="polite"></p>
+    <div class="msgs" id="rs-msgs"></div>
+    <div class="st-ctl">
+      <button type="button" class="btn" id="rs-prev">← 上一步</button>
+      <button type="button" class="btn primary" id="rs-next">下一步 →</button>
+      <button type="button" class="btn" id="rs-auto">自动播放</button>
+      <button type="button" class="btn" id="rs-reset">从头来</button>
+      <span class="pos" id="rs-pos"></span>
+    </div>
+    <div class="dots" id="rs-dots" aria-label="跳到第几步"></div>
+  </div>
+
+  <h3 id="e-code">一段短实现：MiniRaft 里决定对错的三处</h3>
+  <div class="codebox" data-role="pd"><div class="code-bar"><b>MiniRaft.java（节选）</b><code>300 行，单线程事件队列，结果可重复</code><a href="https://github.com/archeu/study-labs/tree/main/java/arch/raft-consensus">完整代码 →</a></div>
+<pre><code>// ① 投票：任期对、这任期没投过别人、你的日志不比我旧
+boolean upToDate = r.lastTerm &gt; termAt(lastIndex())
+        || (r.lastTerm == termAt(lastIndex()) &amp;&amp; r.lastIndex &gt;= lastIndex());
+boolean grant = r.term == term &amp;&amp; (votedFor == null || votedFor.equals(r.from)) &amp;&amp; upToDate;
+if (grant) { votedFor = r.from; resetElectionTimer(); }      // 真实现里 term、votedFor 要先落盘
+
+// ② 复制：前一条对不上就拒绝；对上了，冲突的部分删掉再追加
+if (r.prevIndex &gt; lastIndex() || termAt(r.prevIndex) != r.prevTerm) { reply(false); return; }
+int i = r.prevIndex;
+for (Entry e : r.entries) {
+    i++;
+    if (i &lt;= lastIndex() &amp;&amp; termAt(i) != e.term) log.subList(i - 1, log.size()).clear();
+    if (i &gt; lastIndex()) log.add(e);
+}
+commitIndex = Math.max(commitIndex, Math.min(r.leaderCommit, r.prevIndex + r.entries.size()));
+
+// ③ 提交：只按副本数提交“本任期”的记录，旧的跟着一起提交
+for (int n = lastIndex(); n &gt; commitIndex; n--) {
+    if (termAt(n) != term) break;
+    int cnt = 1;                                              // leader 自己
+    for (int m : matchIndex.values()) if (m &gt;= n) cnt++;
+    if (cnt &gt;= majority()) { commitIndex = n; break; }
+}</code></pre>
+  </div>
+<pre class="console"><b>$ java ... MiniRaft restrict</b>
+  t= 2410 ms  tc-3  等了 1050 ms 没心跳 → 任期 2，投自己，向其他节点要票（我最后一条 index=3 term=1）
+  t= 2415 ms  tc-2  <span class="r">不投 tc-3（它最后一条 term=1 index=3，不如我的 term=1 index=5 新）</span>
+  t= 2960 ms  tc-2  等了 1600 ms 没心跳 → 任期 3，投自己，向其他节点要票（我最后一条 index=5 term=1）
+  t= 2965 ms  tc-3  看到更大的任期 3（来自 tc-2），从 CANDIDATE 退回 FOLLOWER
+  t= 2970 ms  tc-2  拿到 2/3 票 → 任期 3 的 leader
+  t= 2975 ms  tc-3  对不上：leader 说 index 5 是 term 1，我这里还没有这一条 → 拒绝，让它往前退一格
+  t= 2985 ms  tc-3  对不上：leader 说 index 4 是 term 1，我这里还没有这一条 → 拒绝，让它往前退一格
+  t= 2995 ms  tc-3  <span class="hi">追加 index 4（t1:BEGIN 9528）  追加 index 5（t1:COMMITTING 9528）  追加 index 6（t3:no-op）</span>
+<b>$ java ... MiniRaft split</b>
+  结果：5.5 秒、5 轮选举，<span class="r">一个 leader 都没选出来（每轮都是 1:1:1）</span>
+  对照：恢复随机超时（1000~2000 ms），换 1000 个随机种子各跑一次，第 1 轮就选出 leader 的有 <span class="hi">1000</span> 次</pre>
+
+  <h3 id="e-jraft">换成真的：SOFAJRaft 1.3.14 起 3 个进程 <span class="tag-real">实测</span></h3>
+  <p>MiniRaft 是模拟。下面换成 Seata 2.6.0 的 TC 实际依赖的 SOFAJRaft 1.3.14：3 个独立 JVM 进程，本机回环网络，日志落盘。当上 leader 的那台每 20 ms 提交一条 <code>BEGIN n</code>；父进程负责 <code>kill -9</code> 或 SIGTERM，掐表。</p>
+  <div class="codebox" data-role="pd"><div class="code-bar"><b>JRaftNode.java（节选）</b><code>NodeOptions + StateMachine + node.apply(Task)</code><a href="https://github.com/archeu/study-labs/tree/main/java/arch/raft-consensus">完整代码 →</a></div>
+<pre><code>NodeOptions opts = new NodeOptions();
+opts.setElectionTimeoutMs(1000);                  // = seata.server.raft.election-timeout-ms 默认值
+opts.setInitialConf(conf("127.0.0.1:18081,127.0.0.1:18082,127.0.0.1:18083"));
+opts.setLogUri(dir + "/log"); opts.setRaftMetaUri(dir + "/meta");   // 日志、任期和投票都落盘
+opts.setFsm(new StateMachineAdapter() {
+    public void onApply(Iterator it) {            // 已经过半提交的记录，按顺序到这里
+        while (it.hasNext()) { /* Seata：改全局会话表 */ if (it.done() != null) it.done().run(Status.OK()); it.next(); }
+    }
+    public void onLeaderStart(long term) { ... }  // 当上 leader
+});
+Node node = new RaftGroupService("seata-tc", new PeerId("127.0.0.1", port), opts).start();
+
+Task task = new Task(); task.setData(ByteBuffer.wrap("BEGIN 9527".getBytes(UTF_8)));
+task.setDone(status -&gt; ...);                      // 过半提交 + 状态机执行完才回调
+node.apply(task);</code></pre>
+  </div>
+<pre class="console"><b>$ java -cp target/classes:$(cat target/cp.txt) labs.arch.raft_consensus.JRaftLab /tmp/jraft-data 3</b>
+[1] 冷启动：3 个 JVM 起好用了 1898 ms；最后一个起好之后 1338 ms，tc-2 当选，任期 1
+[2] leader tc-2 每 20 ms 提交一条，3 秒共 151 条：过半提交 <span class="hi">p50 = 7.05 ms，p99 = 25.71 ms</span>，最大 58.08 ms
+[3] kill -9 当前 leader，3 轮：
+  第 1 轮：杀 tc-2 → <span class="r">1631 ms</span> 后 tc-1 当选（任期 2）；写不进的窗口 1655 ms
+  第 2 轮：杀 tc-1 → <span class="r">1104 ms</span> 后 tc-2 当选（任期 3）；写不进的窗口 1114 ms
+  第 3 轮：杀 tc-2 → <span class="r">1295 ms</span> 后 tc-3 当选（任期 4）；写不进的窗口 1318 ms
+[3] SIGTERM 优雅停机 当前 leader，3 轮：
+  第 1 轮：杀 tc-3 →   <span class="hi">87 ms</span> 后 tc-1 当选（任期 5）；写不进的窗口  119 ms
+  第 2 轮：杀 tc-1 →   <span class="hi">99 ms</span> 后 tc-2 当选（任期 6）；写不进的窗口  128 ms
+  第 3 轮：杀 tc-2 →   <span class="hi">86 ms</span> 后 tc-1 当选（任期 7）；写不进的窗口  110 ms
+[4] kill -9 两个 follower [tc-2, tc-3]：leader tc-1 在 <span class="r">964 ms</span> 后退位（Majority of the group dies: 2/3）；之后提交成功 0 条</pre>
+  <div class="lab-res" data-role="pd"><b>读出来的结论</b>（本机 2 核 ARM，JDK 17.0.21，跑了 2 次，第二次的数字在括号里）
+    <ul>
+      <li>一条记录过半提交（含 fsync）p50 约 7 ms，p99 约 25 ms（6.67 / 23.28 ms）。这是 TC 每开一个全局事务、每改一次状态都要付的钱。</li>
+      <li><code>kill -9</code> leader：1.1～1.6 秒选出新 leader（1.08～2.10 秒），这段时间写不进。和 [1000, 2000) ms 的随机选举超时对得上。</li>
+      <li>SIGTERM 优雅停机：90 ms 左右就换好了。JRaft 停机时 leader 会主动叫醒一个 follower 立刻参选，不用等超时。</li>
+      <li>杀掉两个 follower：leader 约 0.9～1 秒后自己退位（910 ms），之后一条也写不进。和 900 ms 的 leader 租约对得上。</li>
+      <li>3 个进程的任期在 6 轮换主后到了 7：任期只增不减，每次换主加 1（这里没有出现平票）。</li>
+    </ul>
+  </div>
+  <div class="done-box"><b>到这里已经能交差了</b>：能说清 3 台 TC 怎么选主、一条“要提交”的决议怎么变成“提交”、leader 挂了谁接手、为什么不会丢已提交的记录；也知道 Seata raft 模式那几行配置是什么意思、挂一次 leader 要付 1～2 秒的代价。
+    <br><b>已知还没处理的细节</b>：节点数和机房怎么摆（<a href="#p-even">⑥ 坑 1</a>），超时能不能调小（<a href="#p-short">坑 2</a>），客户端超时怎么办（<a href="#p-unknown">坑 4</a>），滚动重启（<a href="#p-kill">坑 6</a>），为什么新 leader 要先写 no-op（<a href="#d-fig8">第三圈</a>），读能不能直接读 leader（<a href="#d-read">第三圈</a>）。</div>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>边界和变体：注意事项、规范、深处</h2>
+  </div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-even"><b><em>1</em>两台、四台，或者三台放在两个机房<a class="rootmark" href="#m-quorum">← ④ 多数派</a></b>
+      <dl><dt>现象</dt><dd>部署了“高可用”的 TC，挂一台（或一个机房断网）整个集群停写。</dd><dt>根源</dt><dd>2 台的多数派是 2，4 台是 3，都只比 1 台、3 台多一个出故障的机会。3 台放两个机房，放了 2 台的那个机房一断，剩下的 1 台凑不够多数派。</dd><dt>做法</dt><dd class="fix">3 台或 5 台，分在 3 个可用区。</dd></dl>
+    </div>
+    <div class="pit" id="p-short"><b><em>2</em>嫌换主慢，把选举超时调到 100 ms<a class="rootmark" href="#m-term">← ④ 超时只是猜测</a></b>
+      <dl><dt>现象</dt><dd>大促时 leader 来回换，每次换都有一段写不进，全局事务开不了、决议写不下。</dd><dt>根源</dt><dd>一次 300 ms 的 Full GC 或磁盘卡顿，就让 follower 以为 leader 死了。Raft 不会因此出错，但会一直选举。</dd><dt>做法</dt><dd class="fix">选举超时要远大于网络往返，也要大于 leader 的最长停顿（GC、fsync）。默认 1000 ms 先别动，先看 GC 日志。</dd></dl>
+    </div>
+    <div class="pit" id="p-stale"><b><em>3</em>以为 leader 说的就是最新的<a class="rootmark" href="#m-term">← ④ 任期</a></b>
+      <dl><dt>现象</dt><dd>被隔离的旧 leader 在退位前还会回答读请求，读到的是已经过时的状态。</dd><dt>根源</dt><dd>旧 leader 要过 900 ms 租约才发现自己凑不够多数派，这段时间它还以为自己是 leader。</dd><dt>做法</dt><dd class="fix">需要强一致的读走 ReadIndex（JRaft 默认 <code>ReadOnlySafe</code>），见<a href="#d-read">第三圈</a>。Seata 的 follower 对写请求直接拒绝（<code>NotRaftLeader</code>）。</dd></dl>
+    </div>
+    <div class="pit" id="p-unknown"><b><em>4</em>客户端超时了，就当没写进去<a class="rootmark" href="#m-repl">← ④ 复制</a></b>
+      <dl><dt>现象</dt><dd>换主那 1～2 秒里，第 7 站的 commit 超时了，订单服务报“下单失败”，其实 9527 已经是 Committing，后面照样推了 Confirm。</dd><dt>根源</dt><dd>记录可能已经过半写下、只是回复丢了；新 leader 一定有它。超时只说明“不知道”。</dd><dt>做法</dt><dd class="fix">超时后去查（按 XID 查全局事务状态），或带幂等键重试。见<a href="clock-timeout-retry.html#m-unknown">时钟、超时与重试</a>。</dd></dl>
+    </div>
+    <div class="pit" id="p-rejoin"><b><em>5</em>被隔离的节点一回来，就把 leader 搅下台<a class="rootmark" href="#m-term">← ④ 看到更大任期就退位</a></b>
+      <dl><dt>现象</dt><dd>一台机器网络抖了几秒，回来以后整个集群又停了 1 秒左右。</dd><dt>根源</dt><dd>它在那边一次次超时参选，任期涨到 5；回来后 leader 看到更大的任期，只能退位重选。MiniRaft <code>rejoin</code>：关 PreVote 时 tc-3 任期涨到 5，回来后约 1080 ms 没有 leader；开 PreVote，任期不涨，0 ms。</dd><dt>做法</dt><dd class="fix">开 PreVote：先问“如果我参选你会投我吗”，过半同意才真涨任期。JRaft 一直开着；etcd 3.5.0 起默认开。</dd></dl>
+    </div>
+    <div class="pit" id="p-kill"><b><em>6</em>滚动发布时 kill -9，或者先重启 leader<a class="rootmark" href="#m-term">← ④ 选举超时</a></b>
+      <dl><dt>现象</dt><dd>发一次版，TC 卡三次，每次 1～2 秒。</dd><dt>根源</dt><dd>⑤ 实测：<code>kill -9</code> leader 要等选举超时，1.1～2.1 秒；SIGTERM 让 JRaft 正常关闭，leader 会叫醒一个 follower 立刻参选，约 90 ms。</dd><dt>做法</dt><dd class="fix">用 SIGTERM，给足优雅停机时间；先重启 follower，最后处理 leader。</dd></dl>
+    </div>
+    <div class="pit" id="p-disk"><b><em>7</em>Raft 日志和别的东西挤一块盘<a class="rootmark" href="#m-repl">← ④ 写下 = 落盘</a></b>
+      <dl><dt>现象</dt><dd>开全局事务的 p99 从几十毫秒涨到几百，偶尔还换主。</dd><dt>根源</dt><dd>每条记录要 leader 和至少一个 follower 都 fsync 才算写下（Seata <code>sync</code> 默认 <code>true</code>）。盘被应用日志、备份打满，fsync 变慢，提交就慢；慢到超过选举超时，心跳也会断。</dd><dt>做法</dt><dd class="fix">Raft 数据目录放独立的 SSD；监控 fsync 耗时、提交耗时、换主次数和任期增长。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <ul class="rules-list">
+    <li><b>3 台或 5 台，分在 3 个可用区</b>。防的是：偶数台和“两机房三节点”的假高可用（坑 1）。</li>
+    <li><b>选举超时保持默认，先量 GC 和 fsync 再调</b>。防的是：误判导致频繁换主（坑 2）。</li>
+    <li><b>发布用优雅停机，先 follower 后 leader</b>。防的是：每台都触发一次 1～2 秒的停写（坑 6）。</li>
+    <li><b>客户端把“不是 leader”和“超时”都当成“不知道”</b>：刷新 leader 地址、查询或幂等重试。防的是：把已提交当失败（坑 4）。</li>
+    <li><b>只往 Raft 里放小而关键的东西</b>：会话、决议、元数据。Seata 复制的是会话的增删改和锁的释放，业务数据还在各自的库里。防的是：拿共识日志当数据库，写入量把 leader 压垮。</li>
+    <li><b>盯四个指标</b>：换主次数、任期增长速度、提交耗时 p99、follower 落后的条数。任期涨得快而 leader 没变，多半有节点在反复超时。</li>
+  </ul>
+
+  <h3>第三圈 · 深处</h3>
+  <h4 id="d-fig8">1. 为什么不能靠“数一数”提交旧任期的记录（论文图 8）</h4>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="5 台 S1 到 S5，三个画面。画面 c：S1 在任期 4 当选，把自己任期 2 留下的 index 2 复制给了 S3，此时 S1、S2、S3 都有，是多数派。画面 d：如果 S1 现在就把它当成已提交，然后挂掉，S5 最后一条是任期 3，比任期 2 新，可以拿到 S2、S3、S4 的票当选，用任期 3 的记录把 index 2 全部覆盖，已提交的记录丢了。画面 e：正确做法是 S1 先把任期 4 的新记录复制到多数派，此时 S5 的日志不够新，拿不到票，index 2 才真正安全。">
+  <g>
+    <text x="20" y="22" class="t-h">c · S1 任期 4 当选</text>
+    <text x="20" y="40" class="t-xs">把任期 2 的旧记录补给 S3</text>
+  </g>
+  <g>
+    <text x="340" y="22" class="t-bad">d · 如果此刻就算“已提交”</text>
+    <text x="340" y="40" class="t-xs">S1 挂了，S5（最后一条任期 3）当选</text>
+  </g>
+  <g>
+    <text x="660" y="22" class="t-good">e · Raft 的做法</text>
+    <text x="660" y="40" class="t-xs">先把任期 4 的记录写进多数派</text>
+  </g>
+  <g>
+  <text x="20" y="74" class="t-b">S1</text>
+  <rect x="50" y="56" width="36" height="26" rx="5" class="lg1"/><text x="68" y="74" text-anchor="middle" class="t-mono">1</text>
+  <rect x="90" y="56" width="36" height="26" rx="5" class="lg2"/><text x="108" y="74" text-anchor="middle" class="t-mono">2</text>
+  <rect x="130" y="56" width="36" height="26" rx="5" class="b-cg"/><text x="148" y="74" text-anchor="middle" class="t-mono">4</text>
+  <text x="176" y="74" class="t-cg">leader · 任期 4</text>
+  <text x="20" y="108" class="t-b">S2</text>
+  <rect x="50" y="90" width="36" height="26" rx="5" class="lg1"/><text x="68" y="108" text-anchor="middle" class="t-mono">1</text>
+  <rect x="90" y="90" width="36" height="26" rx="5" class="lg2"/><text x="108" y="108" text-anchor="middle" class="t-mono">2</text>
+  <text x="20" y="142" class="t-b">S3</text>
+  <rect x="50" y="124" width="36" height="26" rx="5" class="lg1"/><text x="68" y="142" text-anchor="middle" class="t-mono">1</text>
+  <rect x="90" y="124" width="36" height="26" rx="5" class="lg2"/><text x="108" y="142" text-anchor="middle" class="t-mono">2</text>
+  <text x="20" y="176" class="t-b">S4</text>
+  <rect x="50" y="158" width="36" height="26" rx="5" class="lg1"/><text x="68" y="176" text-anchor="middle" class="t-mono">1</text>
+  <text x="20" y="210" class="t-b">S5</text>
+  <rect x="50" y="192" width="36" height="26" rx="5" class="lg1"/><text x="68" y="210" text-anchor="middle" class="t-mono">1</text>
+  <rect x="90" y="192" width="36" height="26" rx="5" class="lg3"/><text x="108" y="210" text-anchor="middle" class="t-mono">3</text>
+  <text x="340" y="74" class="t-b">S1</text>
+  <rect x="370" y="56" width="36" height="26" rx="5" class="b-dash"/><text x="388" y="74" text-anchor="middle" class="t-mono">1</text>
+  <rect x="410" y="56" width="36" height="26" rx="5" class="b-dash"/><text x="428" y="74" text-anchor="middle" class="t-mono">2</text>
+  <rect x="450" y="56" width="36" height="26" rx="5" class="b-dash"/><text x="468" y="74" text-anchor="middle" class="t-mono">4</text>
+  <text x="496" y="74" class="t-bad">挂了</text>
+  <text x="340" y="108" class="t-b">S2</text>
+  <rect x="370" y="90" width="36" height="26" rx="5" class="lg1"/><text x="388" y="108" text-anchor="middle" class="t-mono">1</text>
+  <rect x="410" y="90" width="36" height="26" rx="5" class="lg3 ovr"/><text x="428" y="108" text-anchor="middle" class="t-mono">3</text>
+  <text x="340" y="142" class="t-b">S3</text>
+  <rect x="370" y="124" width="36" height="26" rx="5" class="lg1"/><text x="388" y="142" text-anchor="middle" class="t-mono">1</text>
+  <rect x="410" y="124" width="36" height="26" rx="5" class="lg3 ovr"/><text x="428" y="142" text-anchor="middle" class="t-mono">3</text>
+  <text x="340" y="176" class="t-b">S4</text>
+  <rect x="370" y="158" width="36" height="26" rx="5" class="lg1"/><text x="388" y="176" text-anchor="middle" class="t-mono">1</text>
+  <rect x="410" y="158" width="36" height="26" rx="5" class="lg3 ovr"/><text x="428" y="176" text-anchor="middle" class="t-mono">3</text>
+  <text x="340" y="210" class="t-b">S5</text>
+  <rect x="370" y="192" width="36" height="26" rx="5" class="lg1"/><text x="388" y="210" text-anchor="middle" class="t-mono">1</text>
+  <rect x="410" y="192" width="36" height="26" rx="5" class="lg3"/><text x="428" y="210" text-anchor="middle" class="t-mono">3</text>
+  <text x="496" y="210" class="t-cg">leader · 任期 5</text>
+  <text x="660" y="74" class="t-b">S1</text>
+  <rect x="690" y="56" width="36" height="26" rx="5" class="lg1"/><text x="708" y="74" text-anchor="middle" class="t-mono">1</text>
+  <rect x="730" y="56" width="36" height="26" rx="5" class="lg2"/><text x="748" y="74" text-anchor="middle" class="t-mono">2</text>
+  <rect x="770" y="56" width="36" height="26" rx="5" class="b-cg"/><text x="788" y="74" text-anchor="middle" class="t-mono">4</text>
+  <text x="816" y="74" class="t-cg">leader · 任期 4</text>
+  <text x="660" y="108" class="t-b">S2</text>
+  <rect x="690" y="90" width="36" height="26" rx="5" class="lg1"/><text x="708" y="108" text-anchor="middle" class="t-mono">1</text>
+  <rect x="730" y="90" width="36" height="26" rx="5" class="lg2"/><text x="748" y="108" text-anchor="middle" class="t-mono">2</text>
+  <rect x="770" y="90" width="36" height="26" rx="5" class="b-cg"/><text x="788" y="108" text-anchor="middle" class="t-mono">4</text>
+  <text x="660" y="142" class="t-b">S3</text>
+  <rect x="690" y="124" width="36" height="26" rx="5" class="lg1"/><text x="708" y="142" text-anchor="middle" class="t-mono">1</text>
+  <rect x="730" y="124" width="36" height="26" rx="5" class="lg2"/><text x="748" y="142" text-anchor="middle" class="t-mono">2</text>
+  <rect x="770" y="124" width="36" height="26" rx="5" class="b-cg"/><text x="788" y="142" text-anchor="middle" class="t-mono">4</text>
+  <text x="660" y="176" class="t-b">S4</text>
+  <rect x="690" y="158" width="36" height="26" rx="5" class="lg1"/><text x="708" y="176" text-anchor="middle" class="t-mono">1</text>
+  <text x="660" y="210" class="t-b">S5</text>
+  <rect x="690" y="192" width="36" height="26" rx="5" class="lg1"/><text x="708" y="210" text-anchor="middle" class="t-mono">1</text>
+  <rect x="730" y="192" width="36" height="26" rx="5" class="lg3"/><text x="748" y="210" text-anchor="middle" class="t-mono">3</text>
+  <text x="816" y="210" class="t-mut">日志不够新，选不上</text>
+  </g>
+  <text x="340" y="228" class="t-bad">index 2 被任期 3 覆盖：“已提交”的丢了</text>
+  <text x="660" y="228" class="t-good">index 2、3 都安全了</text>
+  <text x="20" y="246" class="t-xs">格子里的数字是写下这条记录时的任期；第 1 列是 index 1，第 2 列是 index 2，第 3 列是 index 3。</text>
+</svg>
+  </div>
+  <figcaption>在画面 c，index 2 已经在 3/5 台上，但它是任期 2 写的。S5 的最后一条是任期 3，按投票规则比 S2、S3、S4 都新，照样能当选，然后把 index 2 覆盖掉。只有当 S1 把<b>本任期</b>的一条记录写进多数派，S5 才再也赢不了。这就是“只按副本数提交本任期的记录”，也是新 leader 先写 no-op 的原因。</figcaption>
+  </figure>
+
+  <h4 id="d-read">2. 读：直接读 leader 不够，ReadIndex 和租约读</h4>
+  <p>写要过半，读如果直接读 leader 的内存，就可能读到第一圈坑 3 说的旧数据。两种办法：</p>
+  <ul class="rules-list">
+    <li><b>ReadIndex</b>：leader 记下当前的 commitIndex，发一轮心跳确认自己仍被多数派承认，等状态机执行到这个位置再读。多一次网络往返，不依赖时钟。JRaft 默认 <code>ReadOnlySafe</code> 就是它。</li>
+    <li><b>租约读（lease read）</b>：leader 在租约内（JRaft 是选举超时的 90%，900 ms）认为没人能选出新 leader，直接读。省一次往返，但<b>依赖各台时钟走得一样快</b>：时钟一快一慢，两个“leader”就可能同时读写。JRaft 里叫 <code>ReadOnlyLeaseBased</code>。又回到了<a href="clock-timeout-retry.html#m-clock">时钟那一页</a>。</li>
+  </ul>
+
+  <h4 id="d-jraft">3. SOFAJRaft 1.3.14 里的这些数字从哪来</h4>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>行为</th><th>源码里的规则</th><th>默认</th><th>本页实测</th></tr></thead>
+    <tbody>
+      <tr><td>选举超时</td><td><code>randomTimeout</code>：<code>nextInt(timeoutMs, timeoutMs + maxElectionDelayMs)</code></td><td class="mono">[1000, 2000) ms</td><td>kill -9 后 1078～2100 ms 选出</td></tr>
+      <tr><td>心跳</td><td><code>max(electionTimeout / electionHeartbeatFactor, 10)</code></td><td class="mono">100 ms</td><td>—</td></tr>
+      <tr><td>PreVote</td><td>选举超时回调直接调 <code>preVote()</code>，没有开关；leader 还有效时 follower 不配合</td><td class="mono">一直开</td><td>—</td></tr>
+      <tr><td>失去多数派退位</td><td>每 <code>electionTimeout &gt;&gt; 1</code>（500 ms）检查一次，和多数派的通信是否都在 <code>leaderLeaseTimeoutMs</code> 内</td><td class="mono">900 ms 租约</td><td>910、964 ms 退位</td></tr>
+      <tr><td>优雅停机</td><td>leader 关闭时叫醒一个 follower 立即选举</td><td>—</td><td>75～99 ms 换好</td></tr>
+      <tr><td>读</td><td><code>RaftOptions.readOnlyOptions</code></td><td class="mono">ReadOnlySafe</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <h4 id="d-seata">4. Seata 在 Raft 上放了什么，客户端怎么找到 leader</h4>
+  <p>TC 的状态机是 <code>RaftStateMachine</code>，日志里的每条记录是一种 <code>RaftSyncMsgType</code>，一共 12 种：全局会话的新增、删除、改状态；分支会话的新增、删除、改状态；全局锁和分支锁的释放；集群元数据刷新；事务分组映射的增删改。follower 收到已提交的记录，按类型执行，把自己的会话表改成和 leader 一样。</p>
+  <p>客户端配 <code>registry.type = raft</code>，从 TC 的 <code>/metadata/v1/cluster</code> 取集群元数据，再用 <code>/metadata/v1/watch</code> 长轮询等变化（请求里带着各分组的任期），只把请求发给 leader。请求落到 follower 上，follower 直接拒绝，抛 <code>NotRaftLeader</code>（“The current TC is not a leader node”），不帮忙转发。</p>
+
+  <h4>版本差异</h4>
+  <div class="tbl-wrap"><table class="cmp">
+    <thead><tr><th>组件</th><th>版本</th><th>变化</th></tr></thead>
+    <tbody>
+      <tr><td>Seata</td><td class="mono">1.x</td><td>TC 存储只有 file / db / redis，多台 TC 共享一个库，库本身的高可用另算</td></tr>
+      <tr><td>Seata</td><td class="mono">2.0.0+</td><td><code>store.mode = raft</code>：TC 之间自己用 Raft 复制会话，不再依赖外部库</td></tr>
+      <tr><td>Seata</td><td class="mono">2.6.0</td><td>依赖 <code>jraft-core 1.3.14</code></td></tr>
+      <tr><td>etcd</td><td class="mono">3.4 → 3.5.0</td><td><code>--pre-vote</code> 默认从关变成开；默认心跳 100 ms、选举超时 1000 ms</td></tr>
+      <tr><td>Raft 论文</td><td class="mono">2014</td><td>建议选举超时 150～300 ms（论文里的机房网络）；生产实现普遍放宽到 1 秒级</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>成员变更：3 台扩到 5 台时怎么保证不出现两个多数派（联合共识、一次只变一台）</li>
+    <li>快照和日志压缩：Seata <code>snapshot-interval</code> 默认 600 秒，新节点怎么追上</li>
+    <li>leader 转移：滚动发布时主动把 leader 交出去（<code>transferLeadershipTo</code>）</li>
+    <li>Multi-Raft：TiKV 把数据切成成千上万个 Raft 组，怎么调度</li>
+    <li>Kafka KRaft：follower 拉取而不是 leader 推送的 Raft 变体，接 <a href="../java/pano-j08-order-event-life.html">J08 全景</a></li>
+    <li>ZAB 和 Paxos：和 Raft 一一对照；ZooKeeper 分布式锁是下钻第 6 个知识点</li>
+    <li>全景下一圈：TC 的 leader 所在机房断网 30 秒，正在第 7、8 站之间的事务怎么办</li>
+    <li>拜占庭容错：节点会撒谎时（区块链），多数派不够，要 3f+1 台</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改 MiniRaft 和 JRaftLab</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>拆掉投票限制</b>：在 <code>MiniRaft.onVoteReq</code> 里把 <code>upToDate</code> 改成恒为 <code>true</code>，跑 <code>restrict</code>。先猜：tc-3 当选后，已提交的 <code>BEGIN 9528</code>、<code>COMMITTING 9528</code> 还在吗？放到 Seata 里是哪一单出了什么事？（用上 ④ 机制 4）</li>
+    <li><b>不写 no-op</b>：删掉 <code>becomeLeader</code> 里追加 no-op 的那一行，跑 <code>partition</code>。tc-2 当选后，index 3 的 <code>COMMITTING 9527</code> 在它那里什么时候才算提交？断网期间一直没有新订单呢？（用上第三圈 1）</li>
+    <li><b>把超时调短</b>：<code>JRaftNode</code> 的 <code>setElectionTimeoutMs(1000)</code> 改成 300，再跑 <code>JRaftLab</code>。kill -9 后写不进的窗口缩到多少？再想一次 300 ms 的 Full GC 会发生什么。（用上坑 2）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>先过半票选出唯一的 leader，写入只走 leader、过半写下才算提交；两个多数派必然重叠，所以同一任期最多一个 leader、新 leader 一定有全部已提交记录。时间只用来发现 leader 死了，不决定对错。</p></details>
+    <details><summary>2. 主备复制当 TC 用，三种配法分别缺什么？</summary><p>异步复制：主库挂在复制之前，决议丢。同步复制到全部备库：任何一台慢或挂就全停。心跳断了就接管：网络断开时出现两个主，各拍各的板（脑裂）。缺的都是同一块：用“过半”来决定谁说了算。</p></details>
+    <details><summary>3. ⑥ 坑 1（两台 TC、两机房三台）根源是 ④ 的哪条？</summary><p>机制 1 多数派：N 台的多数派是 ⌊N/2⌋+1。2 台要 2 台都在；两机房三台，大机房一断只剩 1 台，凑不够 2。容错能力只和“少数派最多几台”有关，偶数台白多一台。</p></details>
+    <details><summary>4. 预测：5 台 TC，2 台在机房 A（含 leader），3 台在机房 B。A、B 之间断网 10 秒，两边各会怎样？</summary><p>B 有 3 台，是多数派：1～2 秒后选出新 leader（任期 +1），可以继续开事务、写决议。A 的旧 leader 只能联系上 2 台，900 ms 租约后自己退位；在那之前它收到的写入都凑不够 3 台，不会提交，客户端超时。网络恢复后，A 的两台看到更大的任期，未提交的记录被 B 的 leader 覆盖。</p><p class="from">从机制 1（多数派重叠）、机制 2（看到更大任期就退位）、机制 3（覆盖不一致的部分）推出。</p></details>
+    <details><summary>5. 预测：投票时如果不比较日志新旧，⑤ 第 9 步会出什么事？</summary><p>假如第 6 步 tc-3 恰好没收到 index 3（丢包），断网后又是它先超时。不比较日志的话 tc-2 也会投它，它当选后用自己的日志覆盖 tc-2：index 3 的 <code>COMMITTING 9527</code> 当时在 tc-1、tc-2 上，正好过半、已经提交，现在没了。TC 新 leader 认为 9527 还在 Begin，60 秒后回滚；可旧 leader 可能已经推过 Confirm：一半提交一半回滚。</p><p class="from">从机制 4 推出：投票限制保证赢家有全部已提交记录。</p></details>
+    <details><summary>6. 预测：把 election-timeout-ms 调到 100，TC 的 JVM 偶尔有一次 300 ms 的 Full GC。会看到什么？</summary><p>每次 GC 停顿，follower 都以为 leader 死了，发起选举，任期 +1；leader 醒来看到更大任期就退位。每次换主都有一段写不进，开全局事务和写决议失败或超时。数据不会错，可用性变差。</p><p class="from">从机制 2 推出：超时只是猜测，猜错不会出错，但会白白选举。</p></details>
+    <details><summary>7. 放回全景：第 3 站前后各发生了什么？如果 3 台 TC 挂了 2 台，整条链路会怎样？</summary><p>之前：第 1 站幂等键挡掉重复点击、第 2 站发出订单号 9527；之后：第 4、5、6 站带着 XID 做三个分支的 Try。挂 2 台时剩下 1 台凑不够多数派：新的 <code>@GlobalTransactional</code> 拿不到 XID，下单直接报错；已经写成 Committing 的事务，等多数派恢复后由新 leader 继续推 Confirm；还在 Begin 的，恢复后按超时回滚。这一段时间里各分支冻结的库存和锁住的券都卡着，直到 TC 恢复。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过：<code>MiniRaft</code>（单线程虚拟时钟，结果每次一样）的 elect、replicate、partition、restrict、split、rejoin；<code>JRaftLab</code> 用 SOFAJRaft 1.3.14 起 3 个进程，跑了 2 次，⑤ 的输出是第 1 次，第 2 次的数字写在括号里。2 核 ARM，JDK 17.0.21，代码按 <code>--release 8</code> 编译。⑤ 的分步演示是 MiniRaft partition 的时间线，不是实时模拟。</p>
+  <p>按源码和文档：Raft 论文 §5.2（随机超时 150～300 ms）、§5.4.1（投票限制）、§5.4.2 与图 8（只按副本数提交本任期记录）、§9.3；etcd/raft <code>becomeLeader</code> 追加空记录、<code>isUpToDate</code>；etcd 3.5 <code>embed/config.go</code>（PreVote 默认开，TickMs 100，ElectionMs 1000）；SOFAJRaft 1.3.14 <code>NodeOptions</code>、<code>RaftOptions</code>、<code>NodeImpl</code>（randomTimeout、heartbeatTimeout、preVote、handleStepDownTimeout、checkDeadNodes0）；Apache Seata 2.6.0 <code>dependencies/pom.xml</code>、<code>ServerRaftProperties</code>、<code>RaftStateMachine</code>、<code>RaftSyncMsgType</code>、<code>RaftCoordinator</code>、<code>RaftRegistryServiceImpl</code>。配置示例里的地址和端口是示意。</p>
+  <p>相关：<a href="../java/pano-j09-order-across-three-dbs.html">全景：一次下单跨三个库</a> · <a href="cap-base-consistency.html">CAP、BASE 与一致性模型</a> · <a href="distributed-transactions.html">分布式事务</a> · <a href="clock-timeout-retry.html">时钟、超时与重试</a> · <a href="../kafka/kafka-leader-election-elr.html">Kafka 的 ISR、ELR 与 unclean 选举</a> · <a href="../java/roadmap.html#j09">Java 地图 J09</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// ⑤ 的 13 步：MiniRaft partition 的时间线（bootstrap 固定超时 1100 / 1500 / 1800 ms，之后 seed=3）。
+// 每一步是一串操作，stateAt(i) 从头重放到第 i 步，得到三台的角色、任期、投票、日志、commitIndex。
+const RS_NODES = ['tc-1', 'tc-2', 'tc-3'];
+const RS_STEPS = [
+  {t: '0 ms', h: '启动：三台都是 follower，任期 0',
+   p: '每台开一个选举计时器：tc-1 1100 ms、tc-2 1500 ms、tc-3 1800 ms（JRaft 里是 1000 ms 加 0～1000 ms 的随机数）。谁先到点还没听到心跳，谁先参选。',
+   ops: []},
+  {t: '1100 ms', h: 'tc-1 先醒：任期 +1，投自己，拉票',
+   p: 'tc-1 变成 Candidate，任期改成 1，把“任期 1 投给 tc-1”写盘，再向另外两台发 RequestVote，带上自己最后一条日志的位置（空日志：index 0，任期 0）。',
+   ops: [['role', 'tc-1', 'C'], ['term', 'tc-1', 1], ['vote', 'tc-1', 'tc-1'],
+         ['msg', 'tc-1 → tc-2、tc-3', 'RequestVote(term 1, last 0/0)', 'vote']]},
+  {t: '1105 ms', h: 'tc-2、tc-3 投票',
+   p: '它们看到更大的任期 1，先把自己的任期改成 1；这一任期还没投过，tc-1 的日志也不比自己旧，于是投给 tc-1，并重置自己的计时器。',
+   ops: [['term', 'tc-2', 1], ['vote', 'tc-2', 'tc-1'], ['term', 'tc-3', 1], ['vote', 'tc-3', 'tc-1'],
+         ['msg', 'tc-2 → tc-1', '同意', 'vote'], ['msg', 'tc-3 → tc-1', '同意', 'vote']]},
+  {t: '1110～1120 ms', h: 'tc-1 拿到 2/3 票，成为任期 1 的 leader',
+   p: '第二张票一到就过半，不用等第三张。新官上任先写一条空记录 no-op，复制出去，1120 ms 过半写下、提交。之后每 100 ms 发一次 AppendEntries 当心跳，follower 的计时器一直被重置。',
+   ops: [['role', 'tc-1', 'L'], ['append', 'tc-1', 1, 'no-op'], ['append', 'tc-2', 1, 'no-op'], ['append', 'tc-3', 1, 'no-op'],
+         ['commit', 'tc-1', 1], ['msg', 'tc-1 → tc-2、tc-3', 'AppendEntries(term 1, prev 0/0, [1: no-op])', 'ae']]},
+  {t: '1200 ms', h: '全景第 3 站：开全局事务 9527',
+   p: '订单服务找 leader 要 XID。tc-1 把 BEGIN 9527 追加到 index 2、落盘，发给两个 follower。这时只有它自己有，还不能回复。',
+   ops: [['append', 'tc-1', 1, 'BEGIN 9527'],
+         ['msg', 'tc-1 → tc-2、tc-3', 'AppendEntries(term 1, prev 1/1, [2: BEGIN 9527], commit 1)', 'ae']]},
+  {t: '1205～1210 ms', h: '过半写下 → 提交，XID 回给订单服务',
+   p: 'tc-2、tc-3 检查 index 1 都是任期 1，对得上，追加、落盘、回成功，同时从 leaderCommit 得知 index 1 已提交。tc-1 数到过半，index 2 提交，交给状态机，全局会话 9527 进入 Begin，XID 返回。',
+   ops: [['append', 'tc-2', 1, 'BEGIN 9527'], ['append', 'tc-3', 1, 'BEGIN 9527'],
+         ['commit', 'tc-2', 1], ['commit', 'tc-3', 1], ['commit', 'tc-1', 2],
+         ['msg', 'tc-2 → tc-1', '成功 match=2', 'ae'], ['msg', 'tc-3 → tc-1', '成功 match=2', 'ae']]},
+  {t: '1250～1260 ms', h: '全景第 7 站：写下“9527 要提交”',
+   p: '三个分支的 Try 都成功了，订单服务发 commit。COMMITTING 9527 写进 index 3，tc-2、tc-3 追加，tc-1 数到过半，提交，回复订单服务“成功”。follower 这时还不知道 index 3 已提交，要等下一次心跳。',
+   ops: [['append', 'tc-1', 1, 'COMMITTING 9527'], ['append', 'tc-2', 1, 'COMMITTING 9527'], ['append', 'tc-3', 1, 'COMMITTING 9527'],
+         ['commit', 'tc-1', 3], ['commit', 'tc-2', 2], ['commit', 'tc-3', 2],
+         ['msg', 'tc-1 → tc-2、tc-3', 'AppendEntries(term 1, prev 2/1, [3: COMMITTING 9527], commit 2)', 'ae']]},
+  {t: '1300 ms', h: 'tc-1 断网；订单服务又在它这里开了一单 9528',
+   p: '订单服务和 tc-1 还连着，另外两台和它断开了。tc-1 照样把 BEGIN 9528 追加到 index 4，可发出去的 AppendEntries 全丢了，凑不够过半，这条不会提交，订单服务等不到 XID。',
+   ops: [['cut', 'tc-1'], ['append', 'tc-1', 1, 'BEGIN 9528'],
+         ['msg', 'tc-1 → tc-2、tc-3', 'AppendEntries(..., [4: BEGIN 9528])', 'lost']]},
+  {t: '2210 ms', h: 'tc-1 联系不上多数派，自己退位',
+   p: '900 ms 的租约里一直没收到另外两台的回复，tc-1 退回 Follower，不再接受写入。订单服务开 9528 的请求超时失败，要重试。index 4 还躺在 tc-1 的日志里，没有提交。',
+   ops: [['role', 'tc-1', 'F']]},
+  {t: '2383 ms', h: 'tc-2 先醒：任期 2，拉票',
+   p: 'tc-2、tc-3 最后一次收到心跳是在断网前，计时器陆续到点。tc-2 先醒，任期改成 2，投自己，带上自己最后一条（index 3，任期 1）向 tc-3 拉票；发给 tc-1 的那份丢了。',
+   ops: [['role', 'tc-2', 'C'], ['term', 'tc-2', 2], ['vote', 'tc-2', 'tc-2'],
+         ['msg', 'tc-2 → tc-3', 'RequestVote(term 2, last 3/1)', 'vote'], ['msg', 'tc-2 → tc-1', 'RequestVote(term 2, last 3/1)', 'lost']]},
+  {t: '2388～2403 ms', h: 'tc-2 当选任期 2 的 leader，写 no-op，旧记录跟着提交',
+   p: 'tc-3 的日志（index 3，任期 1）和 tc-2 一样新，投票。tc-2 拿到 2/3 票，当选，先写一条任期 2 的 no-op 到 index 4。2403 ms no-op 过半写下，index 3 的 COMMITTING 9527 跟着在新 leader 这里确认提交，Seata 会接着推 Confirm。',
+   ops: [['term', 'tc-3', 2], ['vote', 'tc-3', 'tc-2'], ['role', 'tc-2', 'L'],
+         ['append', 'tc-2', 2, 'no-op'], ['append', 'tc-3', 2, 'no-op'], ['commit', 'tc-2', 4],
+         ['msg', 'tc-3 → tc-2', '同意', 'vote'], ['msg', 'tc-2 → tc-3', 'AppendEntries(term 2, prev 3/1, [4: no-op], commit 2)', 'ae']]},
+  {t: '3859～4310 ms', h: '新 leader 照常干活：开全局事务 9529',
+   p: '下一单 9529 找到 tc-2，写进 index 5，tc-3 追加，过半提交。另一边，被隔离的 tc-1 在 3859 ms 超时参选，任期也变成 2，但谁也联系不上，只能一直当 Candidate。',
+   ops: [['role', 'tc-1', 'C'], ['term', 'tc-1', 2], ['vote', 'tc-1', 'tc-1'],
+         ['append', 'tc-2', 2, 'BEGIN 9529'], ['append', 'tc-3', 2, 'BEGIN 9529'], ['commit', 'tc-2', 5], ['commit', 'tc-3', 4],
+         ['msg', 'tc-2 → tc-3', 'AppendEntries(term 2, prev 4/2, [5: BEGIN 9529], commit 4)', 'ae'],
+         ['msg', 'tc-1 → tc-2、tc-3', 'RequestVote(term 2, last 4/1)', 'lost']]},
+  {t: '4350～4398 ms', h: '网络恢复：tc-1 认输，BEGIN 9528 被覆盖',
+   p: 'tc-1 收到任期 2 的 leader tc-2 的心跳，退回 Follower。一致性检查发现 index 4 两边任期不同（1 对 2），tc-1 删掉自己从 index 4 起的内容，换成 leader 的。9528 从没过半、从没提交，删掉不违反任何承诺；订单服务早已超时重试。三台的日志又完全一样了。',
+   ops: [['cut', null], ['role', 'tc-1', 'F'], ['trunc', 'tc-1', 4],
+         ['append', 'tc-1', 2, 'no-op'], ['append', 'tc-1', 2, 'BEGIN 9529'], ['commit', 'tc-1', 5], ['commit', 'tc-3', 5],
+         ['msg', 'tc-2 → tc-1', 'AppendEntries(term 2, prev 3/1, [4: no-op, 5: BEGIN 9529], commit 5)', 'ae']]}
+];
+function rsInit() {
+  const nodes = {};
+  RS_NODES.forEach(n => { nodes[n] = {role: 'F', term: 0, vote: null, log: [], commit: 0, gone: []}; });
+  return {nodes, cut: null, msgs: [], fresh: []};
+}
+function rsApply(st, op) {
+  const [k, n] = op, nd = st.nodes[n];
+  if (k === 'role') nd.role = op[2];
+  else if (k === 'term') nd.term = op[2];
+  else if (k === 'vote') nd.vote = op[2];
+  else if (k === 'append') { nd.log.push({term: op[2], cmd: op[3]}); st.fresh.push(n + ':' + nd.log.length); }
+  else if (k === 'commit') { if (op[2] > nd.commit) nd.commit = op[2]; }
+  else if (k === 'trunc') { nd.gone = nd.log.slice(op[2] - 1); nd.log = nd.log.slice(0, op[2] - 1); }
+  else if (k === 'cut') st.cut = n;
+  else if (k === 'msg') st.msgs.push({path: op[1], label: op[2], kind: op[3]});
+}
+function stateAt(i) {
+  const st = rsInit();
+  for (let s = 0; s <= i; s++) {
+    st.msgs = []; st.fresh = [];
+    RS_NODES.forEach(n => { st.nodes[n].gone = []; });
+    RS_STEPS[s].ops.forEach(op => rsApply(st, op));
+  }
+  return st;
+}
+/*SIM-END*/
+(function () {
+  const $ = id => document.getElementById(id);
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = $('rs-svg');
+  const mk = (tag, attrs, parent, text) => {
+    const e = document.createElementNS(NS, tag);
+    for (const a in attrs) e.setAttribute(a, attrs[a]);
+    if (text != null) e.textContent = text;
+    (parent || svg).appendChild(e); return e;
+  };
+  const ROWY = [64, 142, 220], SX = i => 240 + (i - 1) * 116, SW = 104;
+  const clock = mk('text', {x: 20, y: 30, class: 't-h'}, null, '');
+  for (let i = 1; i <= 5; i++) mk('text', {x: SX(i) + SW / 2, y: 50, 'text-anchor': 'middle', class: 't-xs'}, null, 'index ' + i);
+  mk('text', {x: SX(6) + SW / 2, y: 50, 'text-anchor': 'middle', class: 't-bad'}, null, '被删掉的');
+  const R = {};
+  RS_NODES.forEach((n, r) => {
+    const y = ROWY[r];
+    const g = mk('g', {class: 'rs-node'});
+    const box = mk('rect', {x: 20, y: y, width: 200, height: 64, rx: 12, class: 'rb b-neu'}, g);
+    const name = mk('text', {x: 34, y: y + 22, class: 't-h'}, g, '');
+    const term = mk('text', {x: 34, y: y + 41, class: 't-s'}, g, '');
+    const com = mk('text', {x: 34, y: y + 57, class: 't-xs'}, g, '');
+    const slots = [];
+    for (let i = 1; i <= 6; i++) {
+      const sg = mk('g', {class: 'rs-slot s-none'});
+      const rect = mk('rect', {x: SX(i), y: y + 10, width: SW, height: 44, rx: 7, class: 'lg1'}, sg);
+      const t1 = mk('text', {x: SX(i) + SW / 2, y: y + 29, 'text-anchor': 'middle', class: 't-mono'}, sg, '');
+      const t2 = mk('text', {x: SX(i) + SW / 2, y: y + 46, 'text-anchor': 'middle', class: 't-xs'}, sg, '');
+      slots.push({sg, rect, t1, t2});
+    }
+    const cut = mk('g', {class: 'rs-cut off'});
+    mk('rect', {x: 12, y: y - 4, width: 936, height: 72, rx: 14, class: 'e-badd'}, cut);
+    mk('text', {x: 940, y: y + 4 + 12, 'text-anchor': 'end', class: 't-bad'}, cut, '断网');
+    R[n] = {box, name, term, com, slots, cut};
+  });
+  const ROLE = {F: ['Follower', 'rb b-neu'], C: ['Candidate', 'rb b-bk'], L: ['Leader', 'rb b-cg']};
+  let cur = 0, timer = null, guessed = false;
+  function slotClass(term, committed, fresh) {
+    return (term === 1 ? 'lg1' : term === 2 ? 'lg2' : 'lg3') + (committed ? '' : ' lgu');
+  }
+  function draw() {
+    const st = stateAt(cur), s = RS_STEPS[cur];
+    clock.textContent = 't = ' + s.t;
+    RS_NODES.forEach(n => {
+      const nd = st.nodes[n], v = R[n];
+      v.box.setAttribute('class', ROLE[nd.role][1]);
+      v.name.textContent = n + ' · ' + ROLE[nd.role][0];
+      v.term.textContent = '任期 ' + nd.term + (nd.vote ? ' · 投给 ' + nd.vote : '');
+      v.com.textContent = 'commit = ' + nd.commit + (nd.log.length > nd.commit ? ' · ' + (nd.log.length - nd.commit) + ' 条未确认' : '');
+      v.slots.forEach((sl, i) => {
+        const idx = i + 1;
+        if (idx <= 5 && idx <= nd.log.length) {
+          const e = nd.log[idx - 1];
+          sl.sg.setAttribute('class', 'rs-slot' + (st.fresh.includes(n + ':' + idx) ? ' s-new' : ''));
+          sl.rect.setAttribute('class', slotClass(e.term, idx <= nd.commit));
+          sl.t1.textContent = e.cmd; sl.t2.textContent = '任期 ' + e.term + (idx <= nd.commit ? ' · 已提交' : '');
+        } else if (idx === 6 && nd.gone.length) {
+          const e = nd.gone[0];
+          sl.sg.setAttribute('class', 'rs-slot s-new');
+          sl.rect.setAttribute('class', 'lgx');
+          sl.t1.textContent = e.cmd; sl.t2.textContent = '任期 ' + e.term + ' · 从 index 4';
+        } else sl.sg.setAttribute('class', 'rs-slot s-none');
+      });
+      v.cut.setAttribute('class', 'rs-cut' + (st.cut === n ? '' : ' off'));
+    });
+    $('rs-cap').innerHTML = '<b class="h">' + (cur + 1) + ' / ' + RS_STEPS.length + ' · ' + s.h + '</b>' + s.p;
+    const m = $('rs-msgs'); m.innerHTML = '';
+    if (!st.msgs.length) { const em = document.createElement('em'); em.textContent = '这一步没有新消息'; m.appendChild(em); }
+    st.msgs.forEach(x => {
+      const sp = document.createElement('span');
+      sp.className = x.kind === 'lost' ? 'lost' : x.kind === 'vote' ? 'vote' : '';
+      sp.textContent = x.path + ' · ' + x.label + (x.kind === 'lost' ? '（丢了）' : '');
+      m.appendChild(sp);
+    });
+    $('rs-pos').textContent = (cur + 1) + ' / ' + RS_STEPS.length;
+    $('rs-prev').disabled = cur === 0; $('rs-next').disabled = cur === RS_STEPS.length - 1;
+    document.querySelectorAll('#rs-dots button').forEach((b, i) => { if (i === cur) b.setAttribute('aria-current', 'step'); else b.removeAttribute('aria-current'); });
+  }
+  function go(i) { cur = Math.max(0, Math.min(RS_STEPS.length - 1, i)); draw(); }
+  function stop() { if (timer) { clearInterval(timer); timer = null; $('rs-auto').textContent = '自动播放'; } }
+  RS_STEPS.forEach((_, i) => {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = i + 1;
+    b.setAttribute('aria-label', '第 ' + (i + 1) + ' 步');
+    b.addEventListener('click', () => { stop(); go(i); });
+    $('rs-dots').appendChild(b);
+  });
+  $('rs-prev').addEventListener('click', () => { stop(); go(cur - 1); });
+  $('rs-next').addEventListener('click', () => { stop(); go(cur + 1); });
+  $('rs-reset').addEventListener('click', () => { stop(); go(0); });
+  $('rs-auto').addEventListener('click', () => {
+    if (timer) { stop(); return; }
+    if (cur === RS_STEPS.length - 1) go(0);
+    $('rs-auto').textContent = '暂停';
+    timer = setInterval(() => { if (cur >= RS_STEPS.length - 1) stop(); else go(cur + 1); }, 2600);
+  });
+  $('rs-step').addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight') { stop(); go(cur + 1); e.preventDefault(); }
+    if (e.key === 'ArrowLeft') { stop(); go(cur - 1); e.preventDefault(); }
+  });
+  const ANSWER = 'b';
+  document.querySelectorAll('#rs-opts button').forEach(b => b.addEventListener('click', () => {
+    guessed = true;
+    document.querySelectorAll('#rs-opts button').forEach(x => { x.classList.remove('right', 'wrong'); x.setAttribute('aria-pressed', String(x === b)); });
+    const g = b.dataset.g, r = $('rs-res');
+    r.hidden = false;
+    const why = '答案是 B：它从没写进多数派，所以从没提交；网络恢复后，任期 2 的 leader 用一致性检查找到分歧点，把 tc-1 从 index 4 起的内容整段覆盖。下面先停在第 8 步它刚写下的时候，往下点到第 13 步看结局。';
+    if (g === 'skip') r.textContent = why;
+    else { const ok = g === ANSWER; b.classList.add(ok ? 'right' : 'wrong'); r.textContent = (ok ? '猜对了。' : '猜错了。') + why; }
+    stop(); go(7);
+  }));
+  draw();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
