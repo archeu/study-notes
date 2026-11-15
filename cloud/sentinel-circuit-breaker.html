@@ -1,0 +1,1255 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>Sentinel 限流熔断降级</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, same family as the other notes. Knowledge-point page (learn, design-thought type, second round after the three-highs map) for J10 panorama stations 3, 8-11: rate limiting, circuit breaking, degradation with Sentinel 1.8.9, compared with Resilience4j. Roles: bk = Sentinel / circuit breaker, pd = order-svc caller, rn = inventory instances, cg = degradation / fallback, of = measured numbers and timelines, g2 = rate limiting. bad/done/other keep their repo-wide meaning. Interaction: one breaker-tuning bench in step 6 (breaker style x read timeout x take-traffic-off -> 45 s state strip and totals; guess first). */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+#cb-tiles .tile b{white-space:normal;font-size:20px}
+.strip45{display:grid;grid-template-columns:repeat(45,minmax(0,1fr));gap:2px}
+.strip45 i{display:block;height:26px;border-radius:3px;background:var(--good-tint);border:1px solid var(--good)}
+.strip45 i.o{background:var(--bad-tint);border-color:var(--bad)}
+.strip45 i.h{background:var(--warn-tint);border-color:var(--warn)}
+.strip45 i.n{background:var(--neutral-tint);border-color:var(--neutral)}
+.strip-ax{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.lg-row{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lg-row i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1px solid}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>微服务</span><span aria-hidden="true">/</span><span class="tb-here">Sentinel 限流熔断降级</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker>
+    <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bad"/></marker>
+    <marker id="ah-rn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-rn"/></marker>
+    <marker id="ah-pd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pd"/></marker>
+    <marker id="ah-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g2"/></marker>
+    <marker id="ah-of" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-of"/></marker>
+    <marker id="ah-cg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-cg"/></marker>
+    <marker id="ah-bk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-bk"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">雪崩 · 超时 · 限流 · 熔断器状态机 · 慢调用比例 · 半开探测 · 降级 fallback · 资源级 vs 实例级 · Sentinel 1.8.9 · Resilience4j · Hystrix · JDK 17 实测</p>
+  <h1>inventory-2 慢了，下单怎么还能降级：限流、熔断、降级与 Sentinel</h1>
+  <p class="lead">三件事，各管一头：<b>限流</b>管“进来的太多”，超出容量的直接挡在门口；<b>熔断</b>管“依赖坏了”，统计到对面慢或错得太多，就先别调它，直接失败；<b>降级</b>管“失败时给什么”，一句人话或一个兜底值。熔断的本质是一笔交换：用“这段时间全部很快地失败”，换“线程不被坏掉的依赖占住、整个服务不被拖死”。实测：熔断打开后每次 0 ms 降级，可连健康的那台库存也一起挡了。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j10-order-through-microservices.html#s-10">拆成微服务后的一次下单 · 第 3、8、9、10、11 站</a></span><span>地图：<a href="../java/roadmap.html#j10">J10 · 限流、熔断、降级：Sentinel、Resilience4j</a></span></p>
+  <p class="scene"><b>这一页的位置</b><span>第二圈。第一圈在 <a href="../arch/three-highs-map.html#m-guard">三高知识地图</a>：超时、舱壁、降级为什么缺一不可，Little 定律怎么算线程。这一圈落到 Sentinel 1.8.9 上，在交易靶场里真跑一遍全景第 9～11 站：一台库存变慢，熔断器怎么开、怎么试探、为什么来回抖了三轮。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="pd">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：一台库存变慢，订单服务被拖死</h2>
+  </div>
+  <p class="lead">在全景第 9、10 站，这一步要解决：inventory-2 被慢 SQL 拖住，每次 3 秒；Nacos 还说它健康（<a href="nacos-registry-config.html#p-slow">上一页坑 1</a>），轮询照样分一半流量给它（<a href="feign-dubbo-loadbalancer.html#p-rr">坑 3</a>）。订单服务的线程一个个挂在 <code>reserve()</code> 上，连查订单这些不碰库存的接口也开始排队，网关那边成片超时：一台库存实例拖垮了整条链路，这叫<b>雪崩</b>。</p>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 230" role="img" aria-label="从右往左的雪崩：inventory-2 每次 3 秒；订单服务的 200 个线程里越来越多挂在 reserve 上，查订单接口也排队；网关 3 秒超时成片 504；App 用户转圈。下方三个工具：限流挡在网关入口，熔断挡在订单服务调库存的地方，降级决定挡下来以后返回什么。">
+  <rect x="760" y="30" width="180" height="80" rx="12" class="b-bad"/>
+  <text x="850" y="58" text-anchor="middle" class="t-bad">inventory-2</text>
+  <text x="850" y="80" text-anchor="middle" class="t-s">每次 3 s</text>
+  <text x="850" y="98" text-anchor="middle" class="t-xs">Nacos 里仍是健康</text>
+  <rect x="440" y="30" width="270" height="80" rx="12" class="b-pd"/>
+  <text x="456" y="54" class="t-pd">order-svc · Tomcat 200 线程</text>
+  <rect x="456" y="66" width="238" height="14" rx="3" class="b-card"/>
+  <rect x="456" y="66" width="190" height="14" rx="3" class="b-bad"/>
+  <text x="456" y="100" class="t-xs">线程挂在 reserve()，查订单也排队</text>
+  <rect x="200" y="30" width="190" height="80" rx="12" class="b-g2"/>
+  <text x="295" y="58" text-anchor="middle" class="t-b">gateway</text>
+  <text x="295" y="80" text-anchor="middle" class="t-s">3 s 超时 → 504</text>
+  <rect x="20" y="30" width="130" height="80" rx="12" class="b-neu"/>
+  <text x="85" y="62" text-anchor="middle" class="t-b">App</text>
+  <text x="85" y="84" text-anchor="middle" class="t-s">一直转圈</text>
+  <path d="M756 70 H 714" class="e-bad" marker-end="url(#ah-bad)"/>
+  <path d="M436 70 H 394" class="e-bad" marker-end="url(#ah-bad)"/>
+  <path d="M196 70 H 154" class="e-bad" marker-end="url(#ah-bad)"/>
+  <text x="480" y="134" text-anchor="middle" class="t-xs">慢，从右往左一层层传上去</text>
+  <rect x="200" y="152" width="190" height="60" rx="10" class="b-g2"/><text x="214" y="176" class="t-b">限流（第 3 站）</text><text x="214" y="196" class="t-xs">进来的超过容量，直接 429</text>
+  <rect x="440" y="152" width="270" height="60" rx="10" class="b-bk"/><text x="454" y="176" class="t-b">熔断（第 8、10 站）</text><text x="454" y="196" class="t-xs">对面坏了，先别调，直接失败</text>
+  <rect x="760" y="152" width="180" height="60" rx="10" class="b-cg"/><text x="774" y="176" class="t-b">降级（第 10 站）</text><text x="774" y="196" class="t-xs">失败时返回什么</text>
+</svg>
+  </div>
+  <figcaption>超时只能限制“一次”最多等多久；对面持续出问题时，每次还是要等满超时。熔断要做的，是根据最近的统计，<b>干脆不等</b>。</figcaption>
+  </figure>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>不用它会怎样：只有超时，实测吞吐掉到 6%</h2>
+  </div>
+  <p class="lead">⑤ 的对照组 B：只配 800 ms 读超时，不配熔断规则，20 个调用线程不停地下单。第 5 秒 inventory-2 变慢：</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>只有超时（实测 B）</th><th>变慢之前（第 1～4 秒）</th><th>变慢之后（第 6～18 秒）</th></tr></thead>
+      <tbody>
+        <tr><th>每秒完成的下单调用</th><td>579～715</td><td class="bad">40 左右</td></tr>
+        <tr><th>平均耗时</th><td>14～20 ms</td><td class="bad">约 400 ms</td></tr>
+        <tr><th>结果</th><td>两台各一半，全成功</td><td>每秒 20 个成功（落到 inventory-1），20 个等满 800 ms 失败</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul class="pains">
+    <li>每个落到 inventory-2 的请求都要陪 800 ms，线程被占住，健康的那一半也排不上队</li>
+    <li>加重试更糟：失败的再试一次，坏实例收到的请求不减反增</li>
+    <li>把超时调得更短？太短会误伤正常的慢请求；而且再短，每次也要等一会儿</li>
+    <li class="ok">超时仍然必须有：它是熔断器能“看到慢”的前提（坑 3）</li>
+  </ul>
+  <div class="know" data-role="bad"><b>不懂精华时的典型误用</b><span>以为熔断是“提高成功率”的。⑤ 实测正好相反：熔断打开的那些秒，<b>一单都没成</b>，连本来会落到健康 inventory-1 的也被挡了。它保护的是调用方自己，不是成功率。</span></div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种流派：挡在哪、按什么判断、谁来做</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>怎么隔离、怎么判断</th><th>规则怎么改</th><th>现在的位置</th></tr></thead>
+      <tbody>
+        <tr><th>Hystrix</th><td>每个依赖一个线程池（舱壁），错误比例熔断</td><td>代码 / Archaius</td><td>2018 年起停止开发，Spring Cloud 2020.0 已移除</td></tr>
+        <tr><th>Sentinel 1.8</th><td>不开线程池，在调用点统计（滑动窗口）：QPS / 线程数限流；慢调用比例、异常比例、异常数熔断；热点参数、系统自适应</td><td class="fix">控制台推送，规则可存 Nacos 动态下发</td><td>Spring Cloud Alibaba 的默认，国内最常见</td></tr>
+        <tr><th>Resilience4j 2.x</th><td>CircuitBreaker、RateLimiter、Bulkhead、Retry、TimeLimiter 五个小模块，按次数或时间的滑动窗口</td><td>配置文件，可接 Spring Cloud CircuitBreaker</td><td>Spring Cloud CircuitBreaker 的默认实现</td></tr>
+        <tr><th>服务网格（Istio 等）</th><td>Sidecar 代理里做：异常实例驱逐（实例级）、限流、超时、重试</td><td>K8s 资源</td><td>业务代码不碰，J14</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页学 Sentinel 1.8.9</b>：交易靶场是 Spring Cloud Alibaba，规则能放进 Nacos 由全景第 1、5 站那条路动态下发。Resilience4j 在 ④ 的状态机对照里出场：两者最大的差别正好出现在 ⑤ 的实测里。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>核心取舍：拿“全部快速失败”换“不被拖死”</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <span><b>资源</b>：Sentinel 统计和保护的单位，就是“调用方的一个调用点”。打开 <code>feign.sentinel.enabled</code> 后，每个 Feign 方法自动成为一个资源，名字是 <code>POST:http://inventory-svc/stock/reserve</code>。注意：它是<b>服务名</b>，不区分是哪台实例。</span>
+    <span><b>滑动窗口</b>：把最近一段时间（<code>statIntervalMs</code>，默认 1 s）切成几个小格，各格计数，过期的格子丢掉；这样任何时刻都能算出“最近 1 秒的请求数、慢调用数”。</span>
+  </div>
+
+  <h3 id="m-sm">机制 1：熔断器状态机（Sentinel 1.8.9 源码）</h3>
+  <figure>
+  <div class="fig-box wide">
+<svg class="sv" viewBox="0 0 960 260" role="img" aria-label="三个状态。CLOSED：请求都放行，每完成一个就记一笔，RT 超过 500 毫秒算慢；最近 1 秒里请求数至少 10 个、慢的占比大于 40% 时转到 OPEN。OPEN：所有请求直接抛 DegradeException 走降级，不调对面，持续 10 秒。10 秒后下一个请求到来时转到 HALF_OPEN，只放这一个过去当探测：它不慢就回到 CLOSED，慢就回到 OPEN 再等 10 秒。">
+  <rect x="30" y="70" width="230" height="130" rx="16" class="b-good"/>
+  <text x="145" y="98" text-anchor="middle" class="t-h">CLOSED</text>
+  <text x="46" y="124" class="t-s">请求都放行，完成时记一笔</text>
+  <text x="46" y="146" class="t-s">RT &gt; 500 ms 记为“慢”</text>
+  <text x="46" y="168" class="t-xs">最近 1 s：总数、慢的个数</text>
+  <rect x="380" y="70" width="230" height="130" rx="16" class="b-bad"/>
+  <text x="495" y="98" text-anchor="middle" class="t-h">OPEN</text>
+  <text x="396" y="124" class="t-s">不调对面，直接抛</text>
+  <text x="396" y="146" class="t-mono">DegradeException</text>
+  <text x="396" y="168" class="t-s">→ fallback，0 ms 返回</text>
+  <text x="396" y="188" class="t-xs">持续 timeWindow = 10 s</text>
+  <rect x="720" y="70" width="210" height="130" rx="16" class="b-warn"/>
+  <text x="825" y="98" text-anchor="middle" class="t-h">HALF_OPEN</text>
+  <text x="736" y="124" class="t-s">10 s 后来的下一个请求</text>
+  <text x="736" y="146" class="t-s">当探测放过去</text>
+  <text x="736" y="168" class="t-s">其余的照样降级</text>
+  <text x="736" y="188" class="t-xs">只看这一个的结果</text>
+  <path d="M260 110 H 376" class="e-bad" marker-end="url(#ah-bad)"/>
+  <text x="318" y="44" text-anchor="middle" class="t-s">请求数 ≥ 10 且</text>
+  <text x="318" y="62" text-anchor="middle" class="t-s">慢的占比 &gt; 40%</text>
+  <path d="M610 110 H 716" class="e-ink" marker-end="url(#ah-ink)"/>
+  <text x="663" y="100" text-anchor="middle" class="t-xs">10 s 到</text>
+  <path d="M760 200 C 700 250, 560 250, 520 204" class="e-bad" marker-end="url(#ah-bad)"/>
+  <text x="640" y="250" text-anchor="middle" class="t-s">探测慢了 → 再 OPEN</text>
+  <path d="M740 70 C 600 10, 300 10, 170 66" class="e-good" marker-end="url(#ah-good)"/>
+  <text x="455" y="22" text-anchor="middle" class="t-s">探测没慢 → CLOSED，统计清零重来</text>
+</svg>
+  </div>
+  <figcaption>两处细节来自源码（<code>ResponseTimeCircuitBreaker</code>）：占比要<b>严格大于</b>阈值才打开（阈值设 100% 时等于也算）；半开时<b>只看一个</b>探测请求。第二条正是 ⑤ 里来回抖三轮的原因。</figcaption>
+  </figure>
+
+  <h3 id="m-res">机制 2：熔断按“资源”挡，不按实例</h3>
+  <p>资源名里只有服务名。inventory-2 慢，统计的却是“调 inventory-svc 的所有请求”：轮询让一半是慢的，占比约 50% &gt; 40%，熔断器打开后，<b>落到 inventory-1 的那一半也被挡了</b>（⑤：熔断那些秒成功数是 0）。半开时那一个探测按轮询落到哪台全看运气：落到 inventory-1 就关上，紧接着一半请求又慢，1～2 秒后再次打开。要只摘坏的那一台，得靠实例级的机制：负载均衡跳过它、注册中心下线它（全景第 11 站）、或者网格里的异常实例驱逐。</p>
+
+  <h3 id="m-flow">机制 3：限流和降级各自在算什么</h3>
+  <div class="two">
+    <div class="card" data-role="g2"><h3>限流（第 3 站）</h3><p>Sentinel 用同一套滑动窗口数 QPS（或在途线程数），超过阈值时按 <code>controlBehavior</code> 处理：直接拒绝（默认）、预热（冷启动时阈值从低慢慢升到满）、排队匀速通过（漏桶）。阈值来自压测，不是拍出来的；它是<b>每个实例</b>的阈值，两台网关各 2000 就是放进 4000，要么除以实例数，要么用集群限流。</p></div>
+    <div class="card" data-role="cg"><h3>降级（第 10 站）</h3><p>fallback 返回什么是业务决定：快速失败加一句人话（下单）；给个兜底值（推荐位给热门商品）；先跳过、事后补（送积分）。两条底线：降级逻辑要比原调用<b>便宜得多</b>（不再调别的远程服务），并且<b>不能谎报成功</b>（库存没冻结就不能返回“已下单”）。</p></div>
+  </div>
+
+  <h3 id="m-why">为什么这样设计：Sentinel 和 Resilience4j 在哪几处做了不同的选择</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>Sentinel 1.8.9（本页规则）</th><th>Resilience4j CircuitBreaker（文档默认值）</th></tr></thead>
+      <tbody>
+        <tr><th>统计窗口</th><td>按时间，默认 1 s</td><td>按次数，默认最近 100 次（也可按时间）</td></tr>
+        <tr><th>最少请求数</th><td>默认 5（本页设 10）</td><td>默认 100</td></tr>
+        <tr><th>慢调用线</th><td>规则里必填（本页 500 ms）</td><td>默认 60 s，基本等于不看慢</td></tr>
+        <tr><th>打开多久</th><td>timeWindow（本页 10 s）</td><td>默认 60 s</td></tr>
+        <tr><th>半开放几个</th><td class="bad">1 个，一次定生死</td><td class="fix">默认 10 个，按它们的失败率、慢调用率判断</td></tr>
+        <tr><th>隔离</th><td>不开线程池，靠统计和在途线程数</td><td>Bulkhead 模块：信号量或线程池</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="design">
+    <div class="card" data-role="other"><h3>半开只放 1 个（Sentinel）</h3><p>试探成本最低，对面真恢复了能最快关上。代价：样本太小，像 ⑤ 这种“一半实例坏着”的情况，探测结果全凭运气，状态来回抖。</p></div>
+    <div class="card" data-role="bk"><h3>半开放 N 个（Resilience4j）</h3><p>样本大，判断稳；一半实例坏着时，10 个里大约 5 个慢，占比超过阈值，就不会误关。代价：每次试探多放几个请求去碰运气，恢复时也要等它们都回来。</p></div>
+  </div>
+  <p class="verdict">决定胜负的约束：<b>熔断器只看得到它统计的东西</b>。统计按资源、半开看几个样本、慢调用线设多少，决定了它在“部分实例坏掉”这种最常见的故障里是稳、是抖、还是根本不动。</p>
+
+  <h3>最少的写法</h3>
+  <div class="codebox" data-role="bk"><div class="code-bar"><b>熔断规则 + Feign 接入</b><code>规则放 Nacos 动态下发见第二圈</code></div>
+<pre><code>// 全景第 10 站的规则
+DegradeRule r = new DegradeRule("POST:http://inventory-svc/stock/reserve")
+    .setGrade(RuleConstant.DEGRADE_GRADE_RT)   // 慢调用比例
+    .setCount(500)                             // RT &gt; 500 ms 算慢
+    .setSlowRatioThreshold(0.4)
+    .setMinRequestAmount(10)
+    .setStatIntervalMs(1000)
+    .setTimeWindow(10);                        // 打开 10 s
+DegradeRuleManager.loadRules(List.of(r));
+
+@FeignClient(name = "inventory-svc", fallback = InventoryClient.Fallback.class)
+// application.yml：feign.sentinel.enabled: true；读超时 800 ms 照样要配</code></pre></div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="of">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>套进场景：在交易靶场里演一遍第 9～11 站</h2>
+  </div>
+  <p class="lead">两台库存替身 + 订单服务（OpenFeign + Sentinel 1.8.9），20 个线程不停地调 <code>reserve</code>，按秒统计；注册一个状态变化监听，打印熔断器每次换状态的时刻。A 组按全景第 10 站的规则；第 5 秒 inventory-2 变慢 3 s，第 30 秒运维把它 DOWN（LoadBalancer 缓存设成 2 s）。B 组没有熔断规则，只有 800 ms 读超时。JDK 17，Nacos 3.3.0。<a href="https://github.com/archeu/study-labs/tree/main/java/cloud/sentinel-circuit-breaker">完整代码 →</a></p>
+<pre class="console"><b>$ ./run.sh demo</b>     <span class="c">（节选；完整 45 行见 README）</span>
+== A 有熔断
+秒   完成数  平均耗时  结果（端口=成功，FALLBACK=降级）
+04     478      28 ms  {18081=233, 18082=245}
+05     118     149 ms  {18081=54, 18082=30, FALLBACK=34}
+<span class="r">06    1676       2 ms  {FALLBACK=1676}</span>
+<span class="r">07～14  每秒约 1975   0 ms  全部 FALLBACK</span>
+15    1872       0 ms  {18081=14, FALLBACK=1858}
+16      46     357 ms  {18081=26, FALLBACK=20}
+17     727      22 ms  {18081=1, FALLBACK=726}
+18～26  全部 FALLBACK
+27    1172       0 ms  {18081=20, FALLBACK=1152}
+28～37  全部 FALLBACK
+38    1240       5 ms  {18081=441, FALLBACK=799}
+<span class="w">39～44  每秒 747～1036    8～14 ms  全部 18081</span>
+事件：
+    5.2 s ── inventory-2 每次 3 s
+<span class="r">    5.9 s 熔断器 CLOSED → OPEN（慢调用占比 100%）</span>
+   15.9 s 熔断器 OPEN → HALF_OPEN
+   15.9 s 熔断器 HALF_OPEN → CLOSED
+<span class="r">   17.6 s 熔断器 CLOSED → OPEN（慢调用占比 43%）</span>
+   27.6 s 熔断器 OPEN → HALF_OPEN
+   27.6 s 熔断器 HALF_OPEN → CLOSED
+<span class="r">   28.4 s 熔断器 CLOSED → OPEN（慢调用占比 100%）</span>
+   30.3 s ── 运维把 inventory-2 DOWN
+<span class="w">   38.4 s 熔断器 OPEN → HALF_OPEN → CLOSED   ← 之后稳定</span>
+== B 没熔断：只有 800 ms 读超时
+01～04  每秒 579～715   14～20 ms  两台各一半
+<span class="r">06～18  每秒约 40     约 400 ms  {18081=20, FALLBACK=20}</span></pre>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>第 6～37 秒（inventory-2 坏着）</th><th>A 有熔断</th><th>B 只有超时</th></tr></thead>
+      <tbody>
+        <tr><th>成功的下单</th><td class="bad">几乎为 0（只在关上的那一两秒里有几十个）</td><td>每秒约 20 个</td></tr>
+        <tr><th>失败要等多久</th><td class="fix">0 ms</td><td class="bad">800 ms</td></tr>
+        <tr><th>调用线程</th><td class="fix">一直空闲，能干别的</td><td class="bad">全部陪着等</td></tr>
+        <tr><th>什么时候恢复</th><td colspan="2">都要等到 inventory-2 被摘掉（A 在第 38.4 秒半开探测成功后稳定）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note-p">B 组里也有 FALLBACK：打开 <code>feign.sentinel.enabled</code> 后，调用抛异常（这里是读超时）也会走 fallback，和有没有熔断规则无关（坑 6）。这一页只跑了一次完整的 A、B（约 3 分钟）；页面下面的调参台用模拟复现了这条时间线（模拟里第 6.5 s 打开、16.5 s 关上、17.9 s 再打开、38.7 s 稳定，时间和实测差不到 1 秒；第 27 秒那一轮的探测落到哪台，模拟和实测不同，这本来就看轮询转到哪）。</p>
+  <p class="note-p">到这里已经能交差了：一台下游变慢，订单服务不会被拖死，用户很快拿到“稍后再试”。已知还没处理的：熔断挡住了健康实例（<a href="#p-all">坑 1</a>），半开来回抖（<a href="#p-flap">坑 2</a>），规则重启就丢（<a href="#c2">第二圈</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>反例和误用：配上了规则，没满足它的前提</h2>
+  </div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-all"><b><em>1</em>一台坏了，熔断把健康的那台也挡了<a class="rootmark" href="#m-res">← ④ 机制 2 按资源挡</a></b>
+      <dl><dt>现象</dt><dd>⑤ A：第 6～14 秒每秒近 2000 次全部降级，inventory-1 一个请求都没收到。</dd><dt>根源</dt><dd>资源名是服务名，统计的是这个服务的全部调用；熔断器不知道慢的只是其中一台。</dd><dt>做法</dt><dd class="fix">熔断管“止血”，摘坏实例交给实例级机制：调用方的负载均衡跳过连续失败的实例、发版和故障时先 DOWN（全景第 11 站）、网格的异常实例驱逐。告警要能从熔断事件直接跳到“是哪台慢”。</dd></dl>
+    </div>
+    <div class="pit" id="p-flap"><b><em>2</em>半开一次就关，关上又开，来回抖<a class="rootmark" href="#m-sm">← ④ 机制 1 只看一个探测</a></b>
+      <dl><dt>现象</dt><dd>⑤ A：15.9 s 探测落到 inventory-1，关上；1.7 秒后又被慢调用拖回 OPEN；27.6 s 同样。每次关上的那一两秒里，一半请求又要陪 800 ms。</dd><dt>根源</dt><dd>Sentinel 1.8 的半开只放一个请求，样本只有 1；坏实例还在列表里，探测结果全凭轮询转到哪。</dd><dt>做法</dt><dd class="fix">尽快把坏实例摘掉（⑤：DOWN 后第一次半开就稳定了）；或者换成半开放多个请求的实现（Resilience4j 默认 10 个）；timeWindow 不要太短。</dd></dl>
+    </div>
+    <div class="pit" id="p-notimeout"><b><em>3</em>只配了异常比例，没配读超时，熔断永远不开<a class="rootmark" href="#m-sm">← ④ 机制 1 只统计看得到的</a></b>
+      <dl><dt>现象</dt><dd>（按机制推演，没单独跑）读超时是默认的 60 s，inventory-2 每次 3 秒后<b>成功</b>返回：异常比例是 0，熔断器纹丝不动，线程照样被占满。</dd><dt>根源</dt><dd>熔断器只能根据它统计到的东西判断；“慢但没错”只有慢调用比例看得到，而且前提是请求能结束。</dd><dt>做法</dt><dd class="fix">先配读超时，再配慢调用比例；慢调用线要比读超时短（500 ms &lt; 800 ms），这样“还没超时、只是慢”也会被算进去。</dd></dl>
+    </div>
+    <div class="pit" id="p-lie"><b><em>4</em>fallback 谎报成功，或者在里面调远程服务<a class="rootmark" href="#m-flow">← ④ 机制 3 降级的两条底线</a></b>
+      <dl><dt>现象</dt><dd>库存降级返回“冻结成功”，订单照常创建，付完款发现没货；或者 fallback 里改调“备用库存服务”，它也慢，降级本身成了新的雪崩点。</dd><dt>根源</dt><dd>降级是在“对面不可用”时执行的，它必须比原调用便宜，而且不能假装事情做成了。</dd><dt>做法</dt><dd class="fix">写接口的降级 = 明确失败（订单不创建、给一句人话）；读接口的降级 = 本地缓存或兜底值，并在响应里标明“这是降级数据”。</dd></dl>
+    </div>
+    <div class="pit" id="p-cluster"><b><em>5</em>两台网关各配 2000，实际放进 4000<a class="rootmark" href="#m-flow">← ④ 机制 3 单机阈值</a></b>
+      <dl><dt>现象</dt><dd>按下单容量 2000 QPS 配了限流，扩到 2 台网关后订单服务被打满。</dd><dt>根源</dt><dd>限流规则在每个实例的内存里各自计数。</dd><dt>做法</dt><dd class="fix">单机阈值 = 总容量 ÷ 实例数，扩缩容时跟着改；要精确就用 Sentinel 集群流控（有一个 token server）或网关的 Redis 令牌桶。</dd></dl>
+    </div>
+    <div class="pit" id="p-fallbackall"><b><em>6</em>所有异常都走了 fallback，真错误被吞掉<a class="rootmark" href="#s5">← ⑤ B 组也有 FALLBACK</a></b>
+      <dl><dt>现象</dt><dd>⑤ B 没有任何熔断规则，超时的请求照样返回 FALLBACK；同理，库存服务返回 400“参数错”也会变成“稍后再试”，排查时看不到原因。</dd><dt>根源</dt><dd><code>feign.sentinel.enabled</code> 让 Feign 调用的任何异常都进入 fallback。</dd><dt>做法</dt><dd class="fix">用 <code>fallbackFactory</code> 拿到异常，区分业务错误（直接抛出）和故障（降级）；fallback 里打日志、打指标。</dd></dl>
+    </div>
+  </div>
+
+  <h3 id="lab">调参台：同样 45 秒，换一种熔断写法</h3>
+  <div class="lab" id="cb" data-role="bk">
+    <div class="guess" id="cb-guess">
+      <p>先猜：inventory-2 坏着的这 45 秒里，<b>有熔断</b>（A）和<b>只有超时</b>（B），谁成功的下单更多？</p>
+      <div class="opts" role="group" aria-label="猜一个答案">
+        <button type="button" data-g="a">有熔断的多</button><button type="button" data-g="b">只有超时的多</button><button type="button" data-g="eq">差不多</button><button type="button" class="skip" data-g="skip">不猜，直接看</button>
+      </div>
+      <p class="res" id="cb-res" hidden></p>
+    </div>
+    <div class="ctl-grid">
+      <div><p class="lbl">熔断</p><div class="pick2" id="cb-mode" role="group" aria-label="熔断">
+        <button type="button" data-v="s1" aria-pressed="true">Sentinel：半开放 1 个</button><button type="button" data-v="r10" aria-pressed="false">半开放 10 个（R4j 默认）</button><button type="button" data-v="none" aria-pressed="false">不熔断</button></div></div>
+      <div><p class="lbl">读超时</p><div class="pick2" id="cb-to" role="group" aria-label="读超时">
+        <button type="button" data-v="0.8" aria-pressed="true">800 ms</button><button type="button" data-v="60" aria-pressed="false">不配（60 s）</button></div></div>
+      <div><p class="lbl">第 30 秒摘掉 inventory-2</p><div class="pick2" id="cb-down" role="group" aria-label="摘流量">
+        <button type="button" data-v="30" aria-pressed="true">摘</button><button type="button" data-v="-1" aria-pressed="false">不摘</button></div></div>
+    </div>
+    <div class="strip45" id="cb-strip" aria-label="45 秒里每一秒的熔断器状态"></div>
+    <div class="strip-ax"><span>0 s</span><span>第 5 秒变慢</span><span>15</span><span>30 摘</span><span>45 s</span></div>
+    <p class="lg-row"><span><i style="background:var(--good-tint);border-color:var(--good)"></i>关闭</span><span><i style="background:var(--bad-tint);border-color:var(--bad)"></i>打开（全部降级）</span><span><i style="background:var(--warn-tint);border-color:var(--warn)"></i>这一秒里有过半开</span><span><i style="background:var(--neutral-tint);border-color:var(--neutral)"></i>没有熔断器</span></p>
+    <div class="tiles4" id="cb-tiles"></div>
+    <p class="verdict" id="cb-verdict"></p>
+    <p class="note-p">模拟：每秒 200 单匀速到达，轮询两台；inventory-2 从第 5 秒起每次 3 s，超时就算失败；规则同全景第 10 站（RT &gt; 500 ms、1 s 窗口至少 10 个、占比 &gt; 40%、打开 10 s）；摘流量后 2 s 调用方才不挑它。“占着的线程”是同一时刻在等结果的请求数（Little 定律）。</p>
+  </div>
+
+  <h3 id="c2">第二圈 · 使用规范</h3>
+  <ul class="pains">
+    <li class="ok">规则放 Nacos，用 Sentinel 的 Nacos 数据源加载；控制台改规则要回写 Nacos（默认的推送模式只在内存里）。<span class="note-p">防：重启后规则全丢；多实例规则不一致。</span></li>
+    <li class="ok">每个下游依赖一组规则：读超时、慢调用线（比读超时短）、熔断阈值、timeWindow，一起写进依赖清单。<span class="note-p">防：坑 3。</span></li>
+    <li class="ok">限流阈值来自压测，按实例数折算，扩缩容时一起改。<span class="note-p">防：坑 5。</span></li>
+    <li class="ok">fallback 用 <code>fallbackFactory</code>，按异常类型分流，并打日志和指标。<span class="note-p">防：坑 4、坑 6。</span></li>
+    <li class="ok">熔断状态变化接告警，告警里带资源名和最近一分钟各实例的 RT。<span class="note-p">防：只看到“熔断了”，不知道是哪台（坑 1）。</span></li>
+    <li class="ok">定期演练：在预发环境让一个依赖变慢，看规则是不是按预期开、关。<span class="note-p">防：规则配了但从没被验证过。</span></li>
+  </ul>
+
+  <h3 id="c3">第三圈 · Sentinel 里面，和版本</h3>
+  <p class="note-p"><b>责任链</b>：每次进入资源，Sentinel 按顺序走一串 slot：建调用树节点、统计（<code>StatisticSlot</code>，写滑动窗口）、系统保护、授权、流控（<code>FlowSlot</code>）、熔断（<code>DegradeSlot</code>）。熔断器的状态判断在 <code>DegradeSlot</code> 里，完成时的计数在请求结束（<code>exit</code>）时做，所以一个请求“慢不慢”要等它结束才算数，这也是坑 3 的另一面。<b>滑动窗口</b>的实现叫 <code>LeapArray</code>：固定数量的桶循环复用，时间到了就把最老的桶清零重用，统计开销和 QPS 无关。</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th></th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><th>Sentinel 1.8.x</th><td>当前稳定线（Maven Central 最新 1.8.10；Spring Cloud Alibaba 2025.0.0.0 的 BOM 里是 1.8.9）。1.8.0 起熔断改成本页这套状态机（慢调用比例、半开探测）</td></tr>
+        <tr><th>Sentinel 2.0</th><td>Maven Central 上只有 2.0.0-alpha，没进 Spring Cloud Alibaba 的 BOM</td></tr>
+        <tr><th>Hystrix</th><td>2018 年停止开发，Spring Cloud 2020.0 移除；老项目迁移首选 Resilience4j 或 Sentinel</td></tr>
+        <tr><th>Resilience4j 2.x</th><td>需要 JDK 17；Spring Cloud CircuitBreaker 的默认实现，配置在 <code>resilience4j.circuitbreaker.instances.*</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>实例级熔断：自定义 LoadBalancer，连续失败的实例暂时跳过；和资源级熔断叠加。</li>
+    <li>热点参数限流：同一个 sku 88 被一万人抢，按参数值限流（J12 抢券）。</li>
+    <li>系统自适应保护：按 CPU、平均 RT、在途线程数自动限流，和压测阈值怎么配合。</li>
+    <li>重试预算：重试也要限流，避免故障时重试把下游打得更死。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改规则</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>异常比例</b>：把规则换成 <code>DEGRADE_GRADE_EXCEPTION_RATIO</code> 0.4，再跑 A；然后把读超时删掉（默认 60 s）再跑。熔断器还开不开？（坑 3）</li>
+    <li><b>半开放 10 个</b>：换成 Spring Cloud CircuitBreaker + Resilience4j（<code>permittedNumberOfCallsInHalfOpenState=10</code>），A 里那两次“关上又打开”还在不在？（坑 2）</li>
+    <li><b>fallbackFactory</b>：让库存替身对 qty &gt; 10 返回 400，看 fallback 能不能区分它和超时。（坑 6）</li>
+    <li><b>流控</b>：给 reserve 加 QPS 500 的流控规则，B 的前 5 秒会发生什么？被流控挡下的请求和被熔断挡下的，在 fallback 里怎么区分？（机制 3）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>限流挡住超出容量的流量，熔断在依赖坏掉时直接快速失败，降级决定失败时返回什么；熔断用“这段时间全部很快失败”换“调用方的线程不被拖死”，它按资源统计、只看得到它统计的东西。</p></details>
+    <details><summary>2. 只靠超时疼在哪？</summary><p>超时只限制一次等多久，对面持续坏着时每次都要等满；线程被占住，健康的请求也排不上队（⑤ B：吞吐 700 → 40，平均 400 ms）。</p></details>
+    <details><summary>3. 坑 1（健康实例也被挡）的根源是 ④ 的哪条？</summary><p>机制 2：熔断按资源统计，资源名是服务名，不区分实例；一半实例坏就让整个资源的慢调用占比超过阈值。</p></details>
+    <details><summary>4. 预测：inventory-2 不是变慢，而是直接被 kill -9 了，A 组的时间线会怎样？</summary><p>落到它的请求会立刻连接被拒（异常，不慢），慢调用比例为 0，这条慢调用规则不会打开；如果有异常比例规则，约 50% 的异常会让它打开。同时 Nacos 0.6 秒就推出下线，LoadBalancer 缓存（这里 2 s）过期后就不再挑它，所以几秒内自己就好了，熔断几乎派不上用场。</p></details>
+    <details><summary>5. 预测：把 timeWindow 从 10 s 改成 2 s，⑤ A 的成功下单数和抖动次数会怎样？</summary><p>抖动更频繁：每 2 秒就半开一次，一半概率关上、接着又被拖回去；每次关上的那一两秒，一半请求又要陪 800 ms。成功数可能略多（关上的时间段里 inventory-1 的那一半能成），但代价是更多请求在等超时、线程更忙。timeWindow 是“试探频率”和“试探代价”的取舍。</p></details>
+    <details><summary>6. 放回全景：第 10 站前后各发生了什么？熔断器坏了（规则没加载上），整条链路会怎样？</summary><p>之前：第 9 站 inventory-2 变慢、Nacos 仍说健康；之后：第 11 站运维摘流量、半开探测成功后恢复。规则没加载：就是 ⑤ 的 B 组，一半请求陪 800 ms，订单服务线程被占；如果读超时也没配，每台订单服务约 300 个线程才够陪，Tomcat 200 线程被占满，查订单也排队，网关 3 秒超时成片 504，这就是雪崩。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM 虚拟机，JDK 17，Spring Boot 3.5.16 + Spring Cloud 2025.0.3 + Spring Cloud Alibaba 2025.0.0.0，Sentinel 1.8.9，Nacos 3.3.0 容器）：⑤ 的 A、B 各跑了 1 次。调参台是模拟（node 里跑过），时间线和实测对过。坑 3 是按机制推演的，没有单独跑。</p>
+  <p>按源码：Sentinel 1.8.9 <code>ResponseTimeCircuitBreaker</code>（占比严格大于阈值才打开、半开按一个请求的 RT 决定）、<code>AbstractCircuitBreaker</code>（OPEN 到期后下一个请求转半开）、<code>DegradeRule</code> 默认 <code>minRequestAmount = 5</code>、<code>statIntervalMs = 1000</code>；Spring Cloud Alibaba <code>SentinelInvocationHandler</code>（资源名 = 方法 + URL + 路径）、<code>feign.sentinel.enabled</code>。</p>
+  <p>按文档：Resilience4j CircuitBreaker 默认值（失败率 50%、慢调用线 60 s、按次数窗口 100、最少 100 次、打开 60 s、半开放 10 个）。</p>
+  <p>相关：<a href="../java/pano-j10-order-through-microservices.html">全景：拆成微服务后的一次下单</a> · <a href="../arch/three-highs-map.html">三高知识地图（第一圈）</a> · <a href="feign-dubbo-loadbalancer.html">OpenFeign 与负载均衡</a> · <a href="nacos-registry-config.html">Nacos</a> · <a href="../arch/clock-timeout-retry.html">时钟、超时与重试</a> · 回到地图：<a href="../java/roadmap.html#j10">Java 地图 J10</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 熔断规则调参台：开环流量 rate 次/秒，轮询两台；inventory-2 从 slowAt 秒起每次 3 s，读超时 800 ms。
+// 熔断：慢调用（RT > 500 ms）在 1 s 窗口里占比 > ratio 且请求数 >= 10 → OPEN；OPEN 持续 win 秒；
+// 慢请求在 min(读超时, 3 s) 后结束（超时算失败）。
+// 半开放行 probes 个请求，它们都完成后：慢的占比 > ratio → 再 OPEN，否则 CLOSED。downAt 秒把 inventory-2 DOWN（再过 lbTtl 秒调用方才不挑它）。
+function cbSim(o) {
+  const p = Object.assign({ rate: 200, seconds: 45, slowAt: 5, ratio: 0.4, win: 10, probes: 1, breaker: true, downAt: 30, lbTtl: 2, timeout: 0.8, fast: 0.01 }, o);
+  const dt = 0.01, steps = Math.round(p.seconds / dt);
+  const sec = Array.from({ length: p.seconds }, () => ({ ok: 0, fb: 0, fail: 0, state: "CLOSED", busy: 0 }));
+  let state = "CLOSED", openUntil = 0, rr = 0, acc = 0;
+  let pending = [];            // 在途：{done, slow, probe}
+  let win = [];                // 最近 1 s 完成的请求：{t, slow}
+  let probeLeft = 0, probeRes = [];
+  const transitions = [];
+  let busySec = 0;
+  for (let k = 0; k < steps; k++) {
+    const t = k * dt;
+    // 完成的请求
+    const still = [];
+    for (const r of pending) {
+      if (r.done <= t + 1e-9) {
+        const s = Math.min(p.seconds - 1, Math.floor(r.done));
+        if (r.slow) sec[s].fail++; else sec[s].ok++;   // fail = 慢：等满读超时失败，或读超时 > 3 s 时等 3 s 才成功
+        if (p.breaker) {
+          if (r.probe) { probeRes.push(r.slow); if (probeRes.length === p.probes) {
+              const bad = probeRes.filter(x => x).length / p.probes;
+              if (bad > p.ratio) { state = "OPEN"; openUntil = t + p.win; transitions.push([t, "HALF_OPEN→OPEN"]); }
+              else { state = "CLOSED"; win = []; transitions.push([t, "HALF_OPEN→CLOSED"]); }
+              probeRes = []; } }
+          else if (state === "CLOSED") {
+            win.push({ t, slow: r.slow });
+            win = win.filter(w => w.t > t - 1);
+            const n = win.length, sl = win.filter(w => w.slow).length;
+            if (n >= 10 && sl / n > p.ratio) { state = "OPEN"; openUntil = t + p.win; transitions.push([t, "CLOSED→OPEN"]); }
+          }
+        }
+      } else still.push(r);
+    }
+    pending = still;
+    if (p.breaker && state === "OPEN" && t >= openUntil) { state = "HALF_OPEN"; probeLeft = p.probes; probeRes = []; transitions.push([t, "OPEN→HALF_OPEN"]); }
+    // 新到的请求
+    acc += p.rate * dt;
+    while (acc >= 1) {
+      acc--;
+      const s = Math.floor(t);
+      let pass = !p.breaker || state === "CLOSED", probe = false;
+      if (p.breaker && state === "HALF_OPEN" && probeLeft > 0) { pass = true; probe = true; probeLeft--; }
+      if (!pass) { sec[s].fb++; continue; }
+      const inv2Listed = !(p.downAt >= 0 && t >= p.downAt + p.lbTtl);
+      const target = inv2Listed ? (rr++ % 2) : 0;
+      const slow = target === 1 && t >= p.slowAt;
+      pending.push({ done: t + (slow ? Math.min(p.timeout, 3) : p.fast), slow, probe });
+    }
+    const s = Math.floor(t);
+    sec[s].state = state === "CLOSED" ? sec[s].state : state;
+    sec[s].busy = Math.max(sec[s].busy, pending.length);
+    busySec += pending.length * dt;
+  }
+  const tot = sec.reduce((a, x) => ({ ok: a.ok + x.ok, fb: a.fb + x.fb, fail: a.fail + x.fail }), { ok: 0, fb: 0, fail: 0 });
+  return { sec, tot, transitions, peakBusy: Math.max(...sec.map(x => x.busy)), busySec };
+}
+/*SIM-END*/
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  let mode = "s1", to = 0.8, down = 30;
+  function opts() { return { breaker: mode !== "none", probes: mode === "r10" ? 10 : 1, timeout: to, downAt: down }; }
+  function render() {
+    const r = cbSim(opts());
+    $("#cb-strip").innerHTML = r.sec.map((x, i) => {
+      const c = mode === "none" ? "n" : x.state === "OPEN" ? "o" : x.state === "HALF_OPEN" ? "h" : "";
+      return `<i class="${c}" title="第 ${i} 秒：成功 ${x.ok}，慢 ${x.fail}，降级 ${x.fb}"></i>`;
+    }).join("");
+    const slowLabel = to > 3 ? "等 3 s 才成功" : "等满 800 ms 失败";
+    const tiles = [
+      { k: "快速成功", v: r.tot.ok.toLocaleString("en-US"), sub: "45 秒里", bad: false },
+      { k: "慢的", v: r.tot.fail.toLocaleString("en-US"), sub: slowLabel, bad: r.tot.fail > 500 },
+      { k: "快速降级", v: r.tot.fb.toLocaleString("en-US"), sub: "0 ms 回“稍后再试”", bad: r.tot.fb > 3000 },
+      { k: "最多同时占着的线程", v: String(r.peakBusy), sub: "Tomcat 一共 200", bad: r.peakBusy > 150 }
+    ];
+    $("#cb-tiles").innerHTML = tiles.map(t => `<div class="tile" data-role="${t.bad ? "bad" : "done"}"><small>${t.k}</small><b>${t.v}</b><span>${t.sub}</span></div>`).join("");
+    const opens = r.transitions.filter(t => t[1].endsWith("→OPEN")).length;
+    let v;
+    if (mode === "none") v = to > 3 ? "不熔断、不配超时：每秒 100 个请求陪 inventory-2 等 3 秒，同时占着约 300 个线程，超过 Tomcat 的 200，查订单也开始排队，这就是雪崩。" : "不熔断：成功的反而最多（inventory-1 那一半一直能成），代价是每秒 100 个请求陪 800 ms，约 80 个线程一直被占着。";
+    else if (to > 3) v = "熔断开了，但开得晚：慢请求要 3 秒才结束，统计要等它们结束才算数；这期间线程峰值仍然冲到约 300。读超时是熔断的前提。";
+    else v = "熔断器打开过 " + opens + " 次。" + (mode === "s1" ? "半开只看一个探测，落到 inventory-1 就关上，接着又被拖回去。" : "半开放 10 个，一半是慢的，占比 50% > 40%，不会误关，抖动更少。") + (down < 0 ? "不摘掉 inventory-2，就永远在开和关之间转。" : "第 30 秒摘掉以后，下一次半开就稳定了。");
+    $("#cb-verdict").textContent = v;
+    $$("#cb-mode button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === mode)));
+    $$("#cb-to button").forEach(b => b.setAttribute("aria-pressed", String(+b.dataset.v === to)));
+    $$("#cb-down button").forEach(b => b.setAttribute("aria-pressed", String(+b.dataset.v === down)));
+  }
+  $$("#cb-mode button").forEach(b => b.addEventListener("click", () => { mode = b.dataset.v; render(); }));
+  $$("#cb-to button").forEach(b => b.addEventListener("click", () => { to = +b.dataset.v; render(); }));
+  $$("#cb-down button").forEach(b => b.addEventListener("click", () => { down = +b.dataset.v; render(); }));
+  $$("#cb-guess .opts button").forEach(b => b.addEventListener("click", () => {
+    const g = b.dataset.g;
+    $$("#cb-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", "false"); });
+    b.setAttribute("aria-pressed", "true");
+    if (g !== "skip") b.classList.add(g === "b" ? "right" : "wrong");
+    const a = cbSim({}), n = cbSim({ breaker: false });
+    const res = $("#cb-res"); res.hidden = false;
+    res.textContent = (g === "skip" ? "" : (g === "b" ? "猜对了。" : "不对。")) + "模拟里只有超时的成功 " + n.tot.ok + " 单，有熔断的只有 " + a.tot.ok + " 单（⑤ 实测也是这样：熔断那些秒一单都没成）。熔断保护的是线程，不是成功率：只有超时时，同时约 80 个线程在陪 inventory-2 等；有熔断时，打开的那些秒里线程是空的。";
+    mode = "none"; render();
+  }));
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
