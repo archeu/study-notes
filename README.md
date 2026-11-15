@@ -246,3 +246,9 @@
 |---|------|------|
 | 01 | [商家 301 搜“键盘”：Elasticsearch 的倒排索引、分片、写入和查询](https://archeu.github.io/study-notes/search/es-inverted-index-shards.html) | J11 知识点 4：商家查询订单库为什么不擅长、LIKE / FULLTEXT / 异构索引表、ES vs OpenSearch vs OLAP、倒排索引与分词器（standard 把“键盘”拆成两个字，实测多命中 1.6 万单）、text vs keyword（动态映射 term 查不到）、分片路由、缓冲 + translog + 每秒 refresh 的近实时（实测 0.5～0.9 s 可见）、query then fetch 与 1 万条上限，倒排索引演示台 |
 | 02 | [下单 1 秒后商家才搜得到：MySQL 到 ES 的同步（binlog、Canal、一致性）](https://archeu.github.io/study-notes/search/mysql-to-es-sync-canal.html) | J11 知识点 5：代码里写 ES / 扫表为什么不行、Canal / Debezium / Flink CDC、ROW 事件与前后镜像、Canal 装成从库（1.1.8 才认 MySQL 8.4 的 SHOW BINARY LOG STATUS）、写成功才 ack 的至少一次与幂等、按订单号分区和外部版本号（实测乱序 148 → 0）、提交到可搜约 0.8 s 的拆解、binlog 被清理后 1236 停摆与全量重灌，乱序演示台 |
+
+## 可观测与排查
+
+| # | 页面 | 内容 |
+|---|------|------|
+| 01 | [一个请求，三样数据：日志、指标、链路三件套](https://archeu.github.io/study-notes/observability/logs-metrics-traces.html) | 三种数据形状（聚合的数、一次事件、一棵 span 树）和成本特征，ThreadLocal 与 traceparent 传上下文，trace_id 进 MDC 和 exemplar，Observation 一次埋点出指标和 span，换线程丢 traceId、高基数标签、默认采样 10%、_created 后缀被吞，Spring Boot 3.5 实测，一个请求的分步动画 |
