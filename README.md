@@ -183,6 +183,7 @@
 | 06 | [tc-1 断网了，谁来接着拍板：Raft 选主与日志复制](https://archeu.github.io/study-notes/arch/raft-consensus.html) | 多数派重叠、任期与随机选举超时、RequestVote 与 AppendEntries、过半提交与 no-op、投票限制、PreVote 与 leader 租约、ReadIndex，tc-1 断网 13 步分步演示，MiniRaft 与 SOFAJRaft 1.3.14 实测换主 |
 | 07 | [两个实例只许一个发：Redis、ZooKeeper、数据库三种分布式锁怎么选](https://archeu.github.io/study-notes/arch/distributed-lock-choice.html) | 锁记在哪、持锁者死了怎么放、换主丢不丢三个问题，ZooKeeper 临时顺序节点与会话、数据库行锁与租约行、SKIP LOCKED，kill -9 / 冻住 / 发得慢三种事故与 ZooKeeper 换 leader 实测，事故实验台 |
 | 08 | [订单号 9527 从哪来：分布式 ID——号段与雪花算法](https://archeu.github.io/study-notes/arch/distributed-id.html) | id_alloc 一行加行锁、双 buffer 预取、雪花 64 位三种布局、机器号撞车、时钟回拨与重启回拨、Seata 改良雪花、ID 形状对 InnoDB 页分裂的实测，发号事故实验台 |
+| 09 | [10 万个请求，只放进 2 万：限流算法](https://archeu.github.io/study-notes/arch/rate-limit-algorithms.html) | J12 第 3 个知识点：固定窗口交界处放进 2 倍、滑动窗口分桶、令牌桶的突发等于容量和懒计算、漏桶排队匀速，Gateway 按整秒补且 Redis 出错放行，单机 / Redis / 集群令牌三种放法，JDK 17 实测五种限流器和 Guava 先用后付，限流实验台 |
 
 ## JDK
 
