@@ -187,6 +187,7 @@
 | 09 | [10 万个请求，只放进 2 万：限流算法](https://archeu.github.io/study-notes/arch/rate-limit-algorithms.html) | J12 第 3 个知识点：固定窗口交界处放进 2 倍、滑动窗口分桶、令牌桶的突发等于容量和懒计算、漏桶排队匀速，Gateway 按整秒补且 Redis 出错放行，单机 / Redis / 集群令牌三种放法，JDK 17 实测五种限流器和 Guava 先用后付，限流实验台 |
 | 10 | [1000 张券、10 万人：秒杀与抢券](https://archeu.github.io/study-notes/arch/seckill-coupon.html) | J12 第 4 个知识点：直接扣 MySQL 卡在热点行，四种流派，削峰漏斗每层挡什么、挡错的代价，“决定”在 Redis、“记账”在 MySQL，切主回涨和重复消息靠条件更新和唯一键兜底，Redis 8.10 实测 GET 再 DECR 超发一倍、Lua 正好、售罄标记让 2 万请求只打 137 次 Redis，超发分步演示 |
 | 11 | [机房断电以后：多活与容灾，RTO 和 RPO](https://archeu.github.io/study-notes/arch/multi-active-dr.html) | J12 第 6 个知识点：RTO 和 RPO 时间线，冷备、主备、同城双活、两地三中心、异地多活，光速决定同城同步、异地异步，等确认还是先回复，单元化和切不开的全局库存，脑裂和第三地仲裁，半同步悄悄退化，Redis 8.10 实测异步复制切主丢 11555 次已确认写入、WAIT 不丢但停写，各流派 RTO 时间线 |
+| 12 | [预案写在纸上不算：故障演练与预案](https://archeu.github.io/study-notes/arch/chaos-drill-runbook.html) | J12 第 7 个知识点：预案五部分（触发、自动、人工、验证、回退），演练五步和爆炸半径、停止条件，ChaosBlade / Chaos Mesh / Toxiproxy，Redis 8.10 一主两从三哨兵实测杀主 RTO 42.1 秒（判定 30 秒）对 7.2 秒（5 秒）、RPO 0、旧主回来 10 秒的脑裂窗口，预案速查（先猜用户看到什么） |
 
 ## JDK
 
