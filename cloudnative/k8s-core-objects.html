@@ -1,0 +1,1388 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>只说想要什么：Kubernetes 核心对象与控制循环</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step design-idea page (J14 knowledge point 2, Kubernetes core objects and control loops). Roles: cg = Kubernetes objects (Deployment, ReplicaSet, Pod; main), pd = API Server and controllers, of = nodes and kubelet, bk = Service, EndpointSlice and traffic, other = old ways, bad = pitfalls, done = measured. Figures: control plane watch diagram, object chain with labels. One interaction: rolling-update calculator (replicas, maxSurge, maxUnavailable) with guess-first. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+#cb-tiles .tile b{white-space:normal;font-size:20px}
+.strip45{display:grid;grid-template-columns:repeat(45,minmax(0,1fr));gap:2px}
+.strip45 i{display:block;height:26px;border-radius:3px;background:var(--good-tint);border:1px solid var(--good)}
+.strip45 i.o{background:var(--bad-tint);border-color:var(--bad)}
+.strip45 i.h{background:var(--warn-tint);border-color:var(--warn)}
+.strip45 i.n{background:var(--neutral-tint);border-color:var(--neutral)}
+.strip-ax{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.lg-row{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lg-row i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1px solid}
+
+/* sharding-key bench */
+.sk-wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.sk-bars{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;align-items:end;height:160px;padding:4px 6px 0;border-bottom:1.5px solid var(--line-strong)}
+.sk-bars .bar{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;min-width:0;gap:2px}
+.sk-bars .bar i{display:block;width:100%;background:var(--pd);border-radius:6px 6px 0 0;min-height:2px;transition:height .3s}
+.sk-bars .bar.hot i{background:var(--bad)}
+.sk-bars .bar.zero i{background:var(--line-strong)}
+.sk-bars .bar small{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);white-space:nowrap}
+.sk-names{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:2px 6px 0}
+.sk-names span{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);text-align:center}
+.sk-q td.n{font-family:var(--font-mono);white-space:nowrap}
+.sk-q td.one{color:var(--good);font-weight:700}
+.sk-q td.all{color:var(--bad);font-weight:700}
+@media (max-width:700px){.sk-wrap{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.sk-bars .bar i{transition:none}}
+
+/* paging calculator */
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+
+.rl-ax{stroke:var(--line);stroke-width:1}
+.rl-win{stroke:var(--line-strong);stroke-width:1;stroke-dasharray:4 4}
+.rl-tick{stroke-width:1.2}
+.rl-lane{font-size:12.5px;fill:var(--ink)}
+.rl-cnt{font-size:12.5px;font-weight:700;fill:var(--ink);font-family:var(--font-mono)}
+.rl-cnt.bad{fill:var(--bad)}
+.rl-bar{fill:var(--rc)}
+.rl-lab-out{display:flex;flex-direction:column;gap:6px}
+.rl-row{display:grid;grid-template-columns:9.5em minmax(0,1fr) 7.5em;gap:8px;align-items:center;font-size:13.5px}
+.rl-row > span{min-width:0}
+.rl-row svg{width:100%;height:44px;display:block}
+.rl-row .sum{font-family:var(--font-mono);font-size:12.5px;color:var(--muted)}
+.rl-row .sum b{color:var(--ink)}
+.algo-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.algo{border:1.5px solid var(--rc);background:var(--card);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.algo h4{margin:0;color:var(--rc);font-size:16px}
+.algo svg{width:100%;height:auto;display:block}
+.algo p{font-size:14.5px;margin:0}
+.algo .gives{font-size:13.5px;color:var(--muted)}
+@media (max-width:760px){.algo-cards{grid-template-columns:1fr}.rl-row{grid-template-columns:7em minmax(0,1fr);}.rl-row .sum{grid-column:1 / -1}}
+
+.race{display:flex;flex-direction:column;gap:12px}
+.race-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.lane-box{border:1.5px solid var(--line);border-radius:14px;padding:10px 12px;background:var(--card);min-width:0;display:flex;flex-direction:column;gap:6px}
+.lane-box h4{margin:0;font-size:15px}
+.lane-box ol{margin:0;padding-left:1.3em;font-family:var(--font-mono);font-size:12.5px;display:flex;flex-direction:column;gap:3px}
+.lane-box li{opacity:.35;transition:opacity .2s}
+.lane-box li.done{opacity:1}
+.lane-box li.now{opacity:1;font-weight:700;color:var(--rc)}
+.redis-state{font-family:var(--font-mono);font-size:13px;display:flex;flex-direction:column;gap:4px}
+.redis-state .v{font-size:26px;font-family:var(--font-display);color:var(--ink)}
+.redis-state .v.bad{color:var(--bad)}
+.layer-t td:nth-child(2),.layer-t td:nth-child(3){font-variant-numeric:tabular-nums;white-space:nowrap}
+@media (max-width:760px){.race-grid{grid-template-columns:1fr}}
+
+.rb-card{display:grid;grid-template-columns:7em minmax(0,1fr);gap:6px 12px;font-size:14.5px;background:var(--card);border:1.5px solid var(--rc);border-radius:14px;padding:12px 14px}
+.rb-card dt{color:var(--muted);font-size:13px}
+.rb-card dd{margin:0;min-width:0}
+@media (max-width:760px){.rb-card{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.x-box{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.x-zone{fill:none;stroke:var(--line-strong);stroke-width:1.3;stroke-dasharray:6 5}
+.x-zl{font-size:12px;fill:var(--muted)}
+.x-r{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.x-rs{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.x-fill{fill:var(--rc)}
+.x-t{font-size:13px;fill:var(--ink)}
+.x-tb{font-size:13.5px;font-weight:700;fill:var(--ink)}
+.x-ts{font-size:11.5px;fill:var(--muted)}
+.x-tc{font-size:12px;font-weight:700;fill:var(--rc)}
+.x-mono{font-family:var(--font-mono);font-size:11px;fill:var(--ink)}
+.x-mono.dim{fill:var(--muted)}
+.x-mono.bad{fill:var(--bad);font-weight:600}
+.x-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.x-ed{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.x-ed.dash{stroke-dasharray:5 4}
+.x-ed.bad{stroke:var(--bad)}
+.x-ed.c{stroke:var(--rc);stroke-width:2}
+.x-mk{fill:var(--line-strong)}
+.x-mkb{fill:var(--bad)}
+.sv .fade{opacity:.25;transition:opacity .25s}
+.sv .lit{opacity:1;transition:opacity .25s}
+.sv .lit .x-rs,.sv .lit .x-r{stroke-width:3}
+.fig-box{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card);padding:10px}
+.fig-box > svg{min-width:760px;width:100%;display:block}
+.swipe{display:none;font-size:13px;color:var(--muted);margin:0 0 4px}
+@media (max-width:800px){.swipe{display:block}}
+.sinks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.sink{border-radius:12px;border:1.5px solid var(--rc);background:var(--card);padding:8px 10px;min-width:0;display:flex;flex-direction:column;gap:4px}
+.sink > b{font-size:13px;color:var(--rc)}
+.sink pre{padding:6px 8px;font-size:11.5px;line-height:1.5;background:var(--code-bg);border-radius:8px;min-height:6.2em;white-space:pre;overflow-x:auto}
+.sink pre .new{color:var(--of);font-weight:600}
+@media (max-width:800px){.sinks{grid-template-columns:1fr}}
+.cmp-t td,.cmp-t th{vertical-align:top}
+.ids{font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ids .a{color:var(--cg);font-weight:600}
+.ids .b{color:var(--of);font-weight:600}
+
+.calc{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.6fr);gap:16px;align-items:start}
+.calc .knobs{display:flex;flex-direction:column;gap:10px}
+.calc label{display:grid;grid-template-columns:8.5em minmax(0,1fr) 4.2em;gap:8px;align-items:center;font-size:14px}
+.calc label output{font-family:var(--font-mono);font-size:13px;text-align:right}
+.calc input[type=range]{width:100%;accent-color:var(--pd)}
+.calc-sum{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--pd-tint);border-left:5px solid var(--pd)}
+@media (max-width:800px){.calc{grid-template-columns:1fr}}
+
+.stackbox{display:flex;flex-direction:column;gap:5px}
+.ru-tbl td,.ru-tbl th{font-variant-numeric:tabular-nums;text-align:center}
+.ru-tbl td.pods{text-align:left;white-space:nowrap}
+.pd-dot{display:inline-block;width:14px;height:14px;border-radius:4px;margin-right:3px;vertical-align:-2px;border:1.5px solid var(--neutral);background:var(--neutral-tint)}
+.pd-dot.nr{border-color:var(--cg);background:var(--cg)}
+.pd-dot.ns{border-color:var(--cg);background:var(--cg-tint);border-style:dashed}
+.ru-tbl tr.low td{background:var(--bad-tint)}
+.knob-row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end}
+.knob-row label{display:flex;flex-direction:column;gap:4px;font-size:13.5px;color:var(--muted)}
+.knob-row select{font:inherit;font-size:14px;padding:4px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+.stk-row{display:grid;grid-template-columns:minmax(0,1fr) auto 11em;gap:10px;align-items:center;padding:6px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--card);font-size:14px}
+.stk-row .stk-s{font-family:var(--font-mono);font-size:13px;font-variant-numeric:tabular-nums;text-align:right}
+.stk-row .stk-t{font-size:12.5px;color:var(--muted)}
+.stk-row.reuse{color:var(--muted)}
+.stk-row.rerun{background:var(--pd-tint);border-color:var(--pd)}
+.stk-row.push{background:var(--bk-tint);border-color:var(--bk);font-weight:600}
+.stk-row.push .stk-t{color:var(--bk);font-weight:700}
+@media (max-width:640px){.stk-row{grid-template-columns:minmax(0,1fr) auto}.stk-row .stk-t{grid-column:1 / -1}.ctl-grid{grid-template-columns:1fr!important}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>云原生与交付</span><span aria-hidden="true">/</span><span class="tb-here">Kubernetes 核心对象与控制循环</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="xa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="x-mk"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">Kubernetes 1.37 · kind 0.33 · 声明式 API · 控制循环 · Deployment · ReplicaSet · Pod · Service · EndpointSlice · Ingress / Gateway API · 本机实测</p>
+  <h1>只说想要什么：Kubernetes 核心对象与控制循环</h1>
+  <p class="lead">Kubernetes 的核心不是“帮你启动容器”，而是<b>声明式 + 控制循环</b>：你只把“想要 4 个 1.8.4”写进 API Server，一群各管一件事的控制器不停地对比“想要的”和“现在的”，差多少补多少。对象之间也不互相点名，而是用<b>标签</b>去选：ReplicaSet 按标签数 Pod，Service 按标签找 Pod。Pod、ReplicaSet、Deployment、Service、Ingress 这几个对象，就是这套思路在“跑副本、发新版、接流量”三件事上的样子。本机 kind 集群实测：删掉一个 Pod，0.3 秒后新的就被建出来；改掉一个 Pod 的标签，它立刻不接流量、也不归 Deployment 管了；4 个副本滚动发布 26 秒，回滚 24 秒。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j14-one-release.html#s-5">一次发布，从合并到回滚 · 第 5、9 站</a></span><span>地图：<a href="../java/roadmap.html#j14">J14 · Kubernetes 核心：Pod、Deployment、Service、Ingress</a></span><span>和 <a href="../agent/roadmap.html#st10">AI 地图站 10</a> 共用</span></p>
+  <p class="scene"><b>这一页的位置</b><span>J14 第 2 个知识点。上一页 <a href="docker-image-layers.html">Docker 镜像</a>做出了 <code>order-svc:1.8.3</code> 和 <code>1.8.4</code> 两个镜像，这一页把它们跑在本机的 kind 集群里。requests、limits 和探针留给下一页，这一页只看对象和控制循环。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>要解决的问题：在全景第 5、9 站，4 个副本要一直是 4 个，换版本时流量不能断</h2>
+  </div>
+  <p class="lead">全景里 order-svc 有 4 个副本，分在几台节点上。平时节点会宕、Pod 会被杀、进程会崩；14:06 要把 4 个 1.8.3 一个个换成 1.8.4；17:47 又要换回来。这些事要在凌晨三点没人盯着的时候也成立。</p>
+  <div class="tiles4" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px">
+    <div class="tile" data-role="cg"><small>一直</small><b>保持 4 个</b><span>少了自动补，多了自动删，不用人值守</span></div>
+    <div class="tile" data-role="pd"><small>发布、回滚</small><b>一个个换</b><span>新旧版本按比例替换，随时能回去</span></div>
+    <div class="tile" data-role="bk"><small>流量</small><b>只给健康的</b><span>Pod 换来换去，调用方只认一个名字</span></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>不用它会怎样：一份发布脚本加一个手改的 Nginx</h2>
+  </div>
+  <div class="two">
+    <div class="codebox" data-role="other"><div class="code-bar"><b>deploy.sh：命令式，说“怎么做”</b></div><pre><code>for host in app1 app2 app3 app4; do
+  ssh $host "docker stop order-svc; docker rm order-svc"
+  ssh $host "docker run -d --name order-svc order-svc:1.8.4"
+  until curl -sf http://$host:8080/actuator/health; do sleep 2; done
+done
+<span class="cm"># 再去改 Nginx 的 upstream，reload</span></code></pre></div>
+    <div class="codebox" data-role="cg"><div class="code-bar"><b>Kubernetes：声明式，说“要什么”</b></div><pre><code>spec:
+  replicas: 4
+  template:
+    spec:
+      containers:
+        - image: order-svc:1.8.4
+<span class="cm"># kubectl apply 一下，剩下的交给控制器</span></code></pre></div>
+  </div>
+  <ul class="pains" style="margin-top:12px">
+    <li><b>脚本只在跑的那一刻是对的。</b>半夜 app3 宕机，没人把它上面的 order-svc 挪到别处；脚本早就跑完了。</li>
+    <li><b>中途失败就是半成品。</b>换到第 3 台时 ssh 超时，现在是两台 1.8.4、两台 1.8.3，脚本不知道该从哪继续，也不知道该怎么回去。</li>
+    <li><b>状态散在各处。</b>哪台机器跑哪个版本、Nginx 里写了哪些地址，只能一台台去问；先停再起，那几秒这台的流量就断了。</li>
+  </ul>
+  <div class="verdict" data-role="bad"><b>不懂这一点时的典型误用</b>：上了 Kubernetes，却把 <code>kubectl</code> 当 ssh 用：线上 <code>kubectl edit</code>、<code>kubectl scale</code>、<code>kubectl set image</code> 一通改，YAML 和 Git 里还是老样子。下一次 <code>apply</code> 或者 Argo CD 同步，改动被悄悄“纠正”回去（全景第 11 站的坑，⑤ 第 6 步实测）。</div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>几种流派</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>流派</th><th>怎么做</th><th>赢在</th><th>输在</th></tr></thead>
+      <tbody>
+        <tr><th>命令式编排（脚本、Ansible 推送）</th><td>按步骤去每台机器执行</td><td>直观，现有机器就能用</td><td class="bad">执行完就不管了，出了偏差没人纠正</td></tr>
+        <tr class="pick"><th><b>声明式 + 控制循环（Kubernetes）</b></th><td>存一份期望状态，控制器持续对齐</td><td class="good">自愈、滚动、回滚、扩缩容都是同一个机制；状态集中在一个 API 里</td><td>概念多，YAML 多；简单应用显得重</td></tr>
+        <tr><th>PaaS（交一个 jar 就行）</th><td>平台替你决定怎么跑</td><td>上手最快</td><td>能调的东西少，被平台绑住</td></tr>
+        <tr><th>Serverless（按请求起实例）</th><td>没请求时缩到 0</td><td>不用管实例</td><td>Java 冷启动慢，长连接、本地缓存都不合适</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">选择规则：服务一多、要自愈和滚动发布，就用声明式；很多公司的 PaaS 和 Serverless 平台底下其实也是 Kubernetes。本页学 Kubernetes 的那几个核心对象，以及它们背后同一个设计：期望状态 + 控制循环 + 标签选择。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>核心取舍：存期望，各自对齐，用标签挑人</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>API Server 和 etcd</b>：集群里所有对象（Deployment、Pod、Service……）都存在 etcd 这个键值库里，谁要读写都只能通过 API Server。每个对象都分成两半：<code>spec</code> 是“想要的”，<code>status</code> 是“现在的”。</li>
+      <li><b>watch</b>：组件可以对 API Server 说“某类对象有变化就告诉我”，不用一遍遍轮询。下面所有的箭头都是 watch 加写回。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-loop">谁在干活：都只和 API Server 说话</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv" viewBox="0 0 960 330" role="img" aria-label="控制面示意。左边 kubectl apply 或 Argo CD 把期望状态写进 API Server，API Server 存在 etcd 里。中间一列是四个控制器：Deployment 控制器按模板管理 ReplicaSet；ReplicaSet 控制器按标签数 Pod，少了就建、多了就删；调度器给没有节点的 Pod 写上节点名；EndpointSlice 控制器把 Ready 的 Pod 地址写进 Service 的地址表。右边是节点：kubelet 把分到本节点的 Pod 交给容器运行时启动，跑探针，回写状态；kube-proxy 或网关按地址表转发流量。所有组件都只和 API Server 打交道：watch 变化，写回结果，彼此从不直接调用。">
+  <g data-role="other"><rect class="x-rs" x="16" y="40" width="160" height="64" rx="10"/><text class="x-tb" x="28" y="64">kubectl apply</text><text class="x-ts" x="28" y="84">或 Argo CD 同步</text></g>
+  <path class="x-ed" d="M178,72 H222" marker-end="url(#xa)"/><text class="x-ts" x="180" y="64">spec</text>
+  <g data-role="pd">
+    <rect class="x-r" x="226" y="30" width="190" height="96" rx="12"/>
+    <text class="x-tb" x="240" y="56">API Server</text>
+    <text class="x-ts" x="240" y="76">唯一的入口：校验、存储</text>
+    <text class="x-ts" x="240" y="94">把变化推给 watch 它的人</text>
+    <rect class="x-rs" x="226" y="150" width="190" height="56" rx="12"/>
+    <text class="x-tb" x="240" y="174">etcd</text>
+    <text class="x-ts" x="240" y="194">每个对象的 spec 和 status</text>
+  </g>
+  <path class="x-ed" d="M321,128 V146" marker-end="url(#xa)"/>
+  <g data-role="cg">
+    <rect class="x-rs" x="470" y="18" width="250" height="58" rx="10"/><text class="x-tb" x="482" y="40">Deployment 控制器</text><text class="x-ts" x="482" y="60">模板变了 → 新 ReplicaSet，调两边副本数</text>
+    <rect class="x-rs" x="470" y="86" width="250" height="58" rx="10"/><text class="x-tb" x="482" y="108">ReplicaSet 控制器</text><text class="x-ts" x="482" y="128">按标签数 Pod：少了建，多了删</text>
+  </g>
+  <g data-role="g2"><rect class="x-rs" x="470" y="154" width="250" height="58" rx="10"/><text class="x-tb" x="482" y="176">调度器</text><text class="x-ts" x="482" y="196">没节点的 Pod → 写上 nodeName</text></g>
+  <g data-role="bk"><rect class="x-rs" x="470" y="222" width="250" height="58" rx="10"/><text class="x-tb" x="482" y="244">EndpointSlice 控制器</text><text class="x-ts" x="482" y="264">Ready 的 Pod 地址 → Service 地址表</text></g>
+  <g data-role="of"><rect class="x-rs" x="770" y="18" width="174" height="126" rx="10"/><text class="x-tb" x="782" y="40">每个节点的 kubelet</text><text class="x-ts" x="782" y="62">分到本节点的 Pod</text><text class="x-ts" x="782" y="80">→ containerd 起容器</text><text class="x-ts" x="782" y="98">→ 跑探针</text><text class="x-ts" x="782" y="116">→ 回写 Pod 的 status</text></g>
+  <g data-role="bk"><rect class="x-rs" x="770" y="154" width="174" height="126" rx="10"/><text class="x-tb" x="782" y="176">kube-proxy / 网关</text><text class="x-ts" x="782" y="198">按 Service 地址表</text><text class="x-ts" x="782" y="216">转发连接或请求</text></g>
+  <path class="x-ed dash" d="M468,47 L418,70" marker-end="url(#xa)" marker-start="url(#xa)"/>
+  <path class="x-ed dash" d="M468,115 L418,92" marker-end="url(#xa)" marker-start="url(#xa)"/>
+  <path class="x-ed dash" d="M468,183 L418,110" marker-end="url(#xa)" marker-start="url(#xa)"/>
+  <path class="x-ed dash" d="M468,251 L418,118" marker-end="url(#xa)" marker-start="url(#xa)"/>
+  <text class="x-ts" x="770" y="304">节点上的组件也一样：</text>
+  <text class="x-ts" x="770" y="322">只 watch API Server</text>
+  <text class="x-ts" x="16" y="250">虚线全是 watch + 写回。</text>
+  <text class="x-ts" x="16" y="270">Deployment 控制器不知道调度器存在，</text>
+  <text class="x-ts" x="16" y="290">kubelet 不知道 Deployment 存在：</text>
+  <text class="x-ts" x="16" y="310">谁挂了、重启了，接着对齐就是。</text>
+</svg>
+    </div>
+  </figure>
+  <p>每个控制器都在跑同一个循环：<b>读期望 → 读现状 → 算差距 → 做一小步 → 再来一遍</b>。ReplicaSet 控制器看到“期望 4、现在 3”，就建一个 Pod；它不管那个 Pod 是被删的、被驱逐的，还是节点宕机没的。这叫<b>水平触发</b>：按“现在差多少”行动，而不是按“刚才发生了什么事件”行动。事件丢了、控制器自己重启了都没关系，下一轮一比就知道还差什么。</p>
+
+  <h3 id="m-objects">这一站的五个对象</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>对象</th><th>它保证什么</th><th>全景里是</th></tr></thead>
+      <tbody>
+        <tr><th>Pod</th><td>一个或几个容器共享网络和存储，一起调度到一个节点上。<b>短命</b>：挂了不会原地复活，只会被换成一个新的（新名字、新 IP）</td><td><code>order-svc-9f74c49d-xs76w</code></td></tr>
+        <tr><th>ReplicaSet</th><td>带某组标签的、照同一个模板做出来的 Pod，始终是 N 个</td><td>1.8.3 一个、1.8.4 一个</td></tr>
+        <tr><th>Deployment</th><td>管理 ReplicaSet 的版本：模板一变，新建一个 ReplicaSet，按策略把副本从老的挪到新的；留着老的，回滚就是把它扩回来</td><td>第 5 站、第 11 站</td></tr>
+        <tr><th>Service</th><td>一个稳定的名字和虚拟 IP。背后的 EndpointSlice 跟着标签和 Ready 状态自动更新</td><td>第 9 站：<code>http://order-svc</code></td></tr>
+        <tr><th>Ingress / Gateway API</th><td>集群外的 HTTP 入口：按域名、路径把请求路由到 Service</td><td>第 9 站：网关到 order-svc</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">Ingress 这个 API 还在，但已经冻结不再加功能；社区最常用的实现 ingress-nginx 在 2026 年 3 月停止维护，仓库已归档（最后一版 controller-v1.15.1）。新集群的入口一般用 Gateway API（2026-10 发布 v1.7.0），由 Envoy Gateway、Istio、Cilium 等实现。本页的实验用集群内的客户端直接调 Service，不装入口。</p>
+
+  <h3 id="m-labels">对象之间不点名，用标签挑</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv" viewBox="0 0 960 250" role="img" aria-label="对象链。Deployment order-svc 拥有 ReplicaSet order-svc-9f74c49d，ReplicaSet 的选择器是 app=order-svc 加 pod-template-hash=9f74c49d，它拥有四个带这两个标签的 Pod。Service order-svc 的选择器只有 app=order-svc，EndpointSlice 里是这些 Pod 中 Ready 的地址。右边一个 Pod 的标签被改成 app=debug：它还在运行，但 ReplicaSet 和 Service 都不再选中它，ReplicaSet 又补了一个新 Pod。">
+  <g data-role="cg">
+    <rect class="x-r" x="16" y="20" width="200" height="56" rx="10"/><text class="x-tb" x="28" y="44">Deployment order-svc</text><text class="x-ts" x="28" y="64">replicas: 4 · 模板 · 策略</text>
+    <rect class="x-r" x="16" y="108" width="200" height="70" rx="10"/><text class="x-tb" x="28" y="132">ReplicaSet …-9f74c49d</text><text class="x-mono" x="28" y="152">app=order-svc</text><text class="x-mono" x="28" y="168">pod-template-hash=9f74c49d</text>
+  </g>
+  <path class="x-ed" d="M116,78 V104" marker-end="url(#xa)"/><text class="x-ts" x="124" y="96">拥有</text>
+  <path class="x-ed" d="M218,143 H262" marker-end="url(#xa)"/><text class="x-ts" x="222" y="135">数标签</text>
+  <g data-role="cg">
+    <rect class="x-rs" x="266" y="100" width="120" height="44" rx="8"/><text class="x-mono" x="276" y="120">Pod …xs76w</text><text class="x-mono dim" x="276" y="136">app=order-svc</text>
+    <rect class="x-rs" x="396" y="100" width="120" height="44" rx="8"/><text class="x-mono" x="406" y="120">Pod …lrr6k</text><text class="x-mono dim" x="406" y="136">app=order-svc</text>
+    <rect class="x-rs" x="526" y="100" width="120" height="44" rx="8"/><text class="x-mono" x="536" y="120">Pod …tsxr4</text><text class="x-mono dim" x="536" y="136">app=order-svc</text>
+    <rect class="x-rs" x="656" y="100" width="120" height="44" rx="8" style="stroke-dasharray:5 4"/><text class="x-mono" x="666" y="120">Pod 新补的</text><text class="x-mono dim" x="666" y="136">app=order-svc</text>
+  </g>
+  <g data-role="other"><rect class="x-rs" x="808" y="100" width="136" height="44" rx="8"/><text class="x-mono" x="818" y="120">Pod …bg7hz</text><text class="x-mono bad" x="818" y="136">app=debug</text></g>
+  <text class="x-ts" x="808" y="164">还在跑，但没人选它了：</text>
+  <text class="x-ts" x="808" y="180">不归 ReplicaSet 管，</text>
+  <text class="x-ts" x="808" y="196">也不接 Service 流量</text>
+  <g data-role="bk">
+    <rect class="x-r" x="266" y="186" width="250" height="52" rx="10"/><text class="x-tb" x="278" y="208">Service order-svc</text><text class="x-mono" x="278" y="226">selector: app=order-svc</text>
+    <rect class="x-rs" x="540" y="186" width="236" height="52" rx="10"/><text class="x-tb" x="552" y="208">EndpointSlice</text><text class="x-ts" x="552" y="226">Ready 的 Pod IP:8080</text>
+  </g>
+  <path class="x-ed c" data-role="bk" d="M518,212 H536" marker-end="url(#xa)"/>
+  <path class="x-ed dash" d="M326,184 V148"/><path class="x-ed dash" d="M456,184 V148"/><path class="x-ed dash" d="M586,184 V148"/><path class="x-ed dash" d="M716,184 V148"/>
+  <text class="x-ts" x="266" y="36">每个 Pod 带着 ownerReferences 指回 ReplicaSet；</text>
+  <text class="x-ts" x="266" y="54">ReplicaSet 也带着它指回 Deployment。</text>
+  <text class="x-ts" x="266" y="80"><tspan class="x-tc" data-role="done">实测</tspan>：把一个 Pod 的标签改成 app=debug，3 秒后 Service 只剩 3 个地址，ReplicaSet 补了一个新的。</text>
+</svg>
+    </div>
+  </figure>
+  <p>标签是贴在对象上的键值对，选择器是一句查询：“所有 <code>app=order-svc</code> 的 Pod”。ReplicaSet 和 Service 用的都是查询，而不是一张写死的 Pod 名单，因为 Pod 本来就是来来去去的。一个 Pod 也可以同时被好几个 Service 选中：给金丝雀版本贴上同样的 <code>app</code> 标签，它就自动分到一部分流量。Deployment 给自己的 Pod 额外贴一个 <code>pod-template-hash</code>，这样新老两个 ReplicaSet 的 Pod 不会互相数错。</p>
+
+  <h3 id="m-why">为什么这样设计</h3>
+  <div class="two">
+    <div class="card" data-role="cg">
+      <h4>选中的：声明式 + 水平触发 + 标签选择</h4>
+      <p>只存“要什么”，每个控制器只管一件事、只和 API Server 说话。任何组件挂了、重启了、漏了几个事件，回来再比一遍就能接着干；新加一种对象（比如数据库的 Operator），只要写一个新的控制器，不用改别人。</p>
+    </div>
+    <div class="card" data-role="other">
+      <h4>被放弃的：命令式调用 + 事件驱动</h4>
+      <p>“Pod 挂了这个事件来了，就去起一个新的”：事件丢一个，这个副本就永远少一个；处理到一半进程重启，不知道做到哪一步了。组件之间直接互相调用，一个变了接口，一串都要改。</p>
+    </div>
+  </div>
+  <p class="tip">决定胜负的约束：<b>几千个 Pod、几百台机器，随时有东西在坏，任何一步都可能失败，网络还会分区</b>。在这种环境里，“记住刚才发生了什么”不可靠，“看看现在差多少”永远可靠。代价是一切都是最终一致的：改了 spec，不会立刻生效，要等几个控制器各自转一圈（⑥ 坑 5 就是这么来的）。</p>
+
+  <h3 id="m-roll">Deployment 怎么一个个换：maxSurge 和 maxUnavailable</h3>
+  <p>滚动发布时，Deployment 控制器同时盯着两个约束：Pod 总数不超过 <code>replicas + maxSurge</code>，能接流量的不少于 <code>replicas − maxUnavailable</code>。在这两条之间，它尽量快地扩新的、缩老的。百分比换成个数时，maxSurge 向上取整，maxUnavailable 向下取整；两个都算出 0 的话，maxUnavailable 按 1 算，不然就动不了。</p>
+  <div class="lab" data-role="cg" id="lab">
+    <h3 style="margin:0">实验台：滚动发布每一轮的样子</h3>
+    <div class="guess" id="lab-guess">
+      <p>先猜：4 个副本，不写策略（默认 maxSurge 25%、maxUnavailable 25%），滚动过程中能接流量的 Pod 最少剩几个？</p>
+      <div class="opts">
+        <button type="button" data-g="4">4 个，一个都不少</button>
+        <button type="button" data-g="3">3 个</button>
+        <button type="button" data-g="2">2 个</button>
+      </div>
+      <p class="res" id="lab-guess-res" hidden></p>
+    </div>
+    <div class="knob-row">
+      <label for="ru-r">副本数<select id="ru-r"><option>1</option><option>2</option><option selected>4</option><option>6</option><option>10</option></select></label>
+      <label for="ru-s">maxSurge<select id="ru-s"><option value="0">0</option><option value="1" selected>1</option><option value="2">2</option><option value="25%">25%（默认）</option><option value="50%">50%</option><option value="100%">100%</option></select></label>
+      <label for="ru-u">maxUnavailable<select id="ru-u"><option value="0" selected>0</option><option value="1">1</option><option value="2">2</option><option value="25%">25%（默认）</option><option value="50%">50%</option></select></label>
+      <button type="button" class="btn" id="ru-default">换成默认 25% / 25%</button>
+      <button type="button" class="btn" id="ru-pano">换回全景的 1 / 0</button>
+    </div>
+    <div class="tbl-wrap"><table class="t ru-tbl" id="ru-tbl"></table></div>
+    <p class="lab-res" data-role="cg" id="ru-sum"></p>
+    <p class="tip">每一轮 = 新 Pod 从创建到 Ready 的那段时间。<span class="tag-real">实测</span> ⑤ 里 1 / 0 的设置，4 个副本走了 4 轮，每轮约 6.5 秒，共 26.4 秒。终止中的老 Pod 不算进总数，所以节点上实际同时存在的 Pod 会比表里多一个（⑤ 里 EndpointSlice 有一刻是 5 个地址）。</p>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="cg">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>套进场景：在本机 kind 集群里，把全景第 5、9、11 站做一遍</h2>
+  </div>
+  <p>kind 用 Docker 容器当节点，在本机起了一个三节点的集群（1 个控制面、2 个工作节点，Kubernetes 1.37.0）。把上一页的两个镜像装进去，部署 4 个 order-svc，再放一个 busybox 当“用户”，每 50 毫秒经 Service 调一次接口、记下成败。然后依次：删一个 Pod、改一个 Pod 的标签、滚动发布到 1.8.4、回滚、有人手动改副本数。</p>
+  <div class="two">
+    <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>k8s/order-svc.yaml</b><a href="https://github.com/archeu/study-labs/tree/main/java/cloudnative/k8s-core-objects">完整代码 →</a></div><pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata: { name: order-svc }
+spec:
+  replicas: 4
+  selector:
+    matchLabels: { app: order-svc }   <span class="cm"># 管哪些 Pod</span>
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:                            <span class="cm"># 改它 = 新版本</span>
+    metadata:
+      labels: { app: order-svc }
+    spec:
+      containers:
+        - name: app
+          image: lab/order-svc-layered:1.8.3
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8080 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: order-svc }
+spec:
+  selector: { app: order-svc }         <span class="cm"># 流量给哪些 Pod</span>
+  ports: [{ port: 80, targetPort: 8080 }]</code></pre></div>
+    <div class="codebox"><div class="code-bar"><b>怎么跑</b></div><pre><code><span class="cm"># 要 kind v0.33.0、kubectl v1.37；先在上一页的目录跑过 ./run.sh 构建镜像</span>
+cd study-labs/java/cloudnative/k8s-core-objects
+./cluster.sh up      <span class="cm"># 三节点集群，约 2 分钟；J14 后面几页共用</span>
+./run.sh             <span class="cm"># 约 3 分钟</span>
+./run.sh clean       <span class="cm"># 删本页的对象，集群留着</span>
+./cluster.sh down    <span class="cm"># J14 学完再删集群</span>
+
+<span class="cm"># 自己动手看</span>
+export KUBECONFIG=$PWD/.kube/config
+kubectl get deploy,rs,pod,svc -l app=order-svc
+kubectl get endpointslices -l kubernetes.io/service-name=order-svc
+kubectl set image deploy/order-svc app=lab/order-svc-layered:1.8.4
+kubectl rollout status deploy/order-svc
+kubectl rollout undo deploy/order-svc</code></pre></div>
+  </div>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>out/results.txt（节选）</b><span>2026-11-16 · 2 核 ARM · kind 0.33.0 · Kubernetes 1.37.0 · JRE 21.0.13</span></div><pre class="console"><span class="w">== 1. kubectl apply：只交一份“想要 4 个 1.8.3”</span>
+从 apply 到 4/4 Ready：<b>19.6 s</b>（4 个 JVM 同时在 2 核上启动）
+  order-svc-9f74c49d-lrr6k   trade-worker
+  order-svc-9f74c49d-tsxr4   trade-worker2   <span class="c">← 调度器把 4 个分到两个节点上</span>
+  对象链：order-svc → ReplicaSet order-svc-9f74c49d → 4 个 Pod；EndpointSlice 里 4 个就绪地址
+
+<span class="w">== 2. 删掉一个 Pod</span>
+删除 …-d6dgk → <b>0.3 s</b> 后新 Pod …-bg7hz 被创建 → <b>7.1 s</b> 后它 Ready
+  事件：SuccessfulCreate   Created pod: order-svc-9f74c49d-bg7hz
+  这段时间 client：120 次成功，<span class="hi">0 次失败</span>
+
+<span class="w">== 3. 把一个 Pod 的标签改成 app=debug</span>
+它的状态：Running；Service 就绪地址：<b>3 个</b>；app=order-svc 的 Pod：4 个（ReplicaSet 又补了一个）
+  它的 ownerReferences：空（已经被 ReplicaSet 放弃）
+
+<span class="w">== 4. 改镜像 1.8.3 → 1.8.4</span>
+滚动用了 <b>26.4 s</b>；这段时间 client：317 次成功，<span class="r">4 次失败</span>；现在的版本：order-svc 1.8.4
+07:16:56  1.8.3=4/4                 endpoints=4
+07:17:00  1.8.4=0/1  1.8.3=4/4      endpoints=4   <span class="c">← 先多起一个（maxSurge 1）</span>
+07:17:04  1.8.4=1/2  1.8.3=3/3      endpoints=4   <span class="c">← 新的 Ready 了才缩老的（maxUnavailable 0）</span>
+07:17:11  1.8.4=2/3  1.8.3=2/2      endpoints=4
+07:17:19  1.8.4=3/4  1.8.3=1/1      endpoints=4
+07:17:22  1.8.4=3/4  1.8.3=1/1      endpoints=5   <span class="c">← 新老重叠的一瞬间</span>
+  ReplicaSet：order-svc-6699d76897=4  order-svc-9f74c49d=0（老的缩到 0，没删）
+
+<span class="w">== 5. kubectl rollout undo</span>
+  kubectl 提示：Warning: resource deployments/order-svc was previously managed with 'kubectl apply'.
+  Rolling back will not update the kubectl.kubernetes.io/last-applied-configuration annotation …
+回滚用了 <b>23.8 s</b>；client：277 次成功，<span class="r">3 次失败</span>；现在的版本：order-svc 1.8.3
+  REVISION  2, 3        <span class="c">← 回滚不是“回到 1 号”，而是把 1 号的模板再发一次，编号变成 3</span>
+
+<span class="w">== 6. 有人手动 scale 到 2，再 apply 一次 YAML</span>
+scale 之后 spec.replicas=2
+apply 之后 spec.replicas=4，镜像=lab/order-svc-layered:1.8.3（YAML 里写的是 1.8.3）</pre></div>
+  <div class="lab-res" data-role="cg">
+    <b>看懂这次运行</b>
+    <ul>
+      <li>第 2 步：删除命令一发出，ReplicaSet 控制器 0.3 秒内就建了替补；剩下 6.8 秒是调度、起容器、JVM 启动、readiness 通过。客户端一次都没失败，因为被删的 Pod 先从 EndpointSlice 里摘掉，另外 3 个在接流量。</li>
+      <li>第 3 步最能说明“用标签挑人”：Pod 本身一点没变，还在运行，只是标签变了，ReplicaSet 和 Service 的查询结果里就没有它了。线上排查时常这样把一个 Pod “摘出来”保留现场。</li>
+      <li>第 4、5 步：时间表和 ④ 实验台里 1 / 0 那一行一模一样，4 轮，每轮一个新 Pod。但客户端有 4 次和 3 次失败：老 Pod 被缩掉时，“从地址表摘掉”和“给进程发 SIGTERM”是同时开始的，kube-proxy 还没更新完的那一小会儿，请求被发到了正在关的进程上。下一页的 <code>preStop</code> 就是治这个的。</li>
+      <li>第 5、6 步：kubectl 1.37 在 <code>rollout undo</code> 时主动提醒：这样回滚会让集群和你手里的 YAML 不一致。第 6 步就是后果：任何人再 apply 一次，以 YAML 为准。所以全景里回滚走的是 git revert。</li>
+    </ul>
+  </div>
+  <p><b>到这里已经能交差了</b>：一份 Deployment + Service，能自愈、能滚动、能回滚。<b>已知还没处理的细节</b>：滚动时零星失败（<a href="#p-race">坑 5</a>），回滚和 YAML 不同步（<a href="#p-drift">坑 3</a>），长连接不均衡（<a href="#p-l4">坑 4</a>）；资源和探针在下一页。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>反例和误用</h2>
+  </div>
+  <h3>第一圈 · 不知道就会出事的</h3>
+  <div class="pits">
+    <div class="pit" id="p-bare"><b><em>1</em>直接建一个裸 Pod，没有控制器<a class="rootmark" href="#m-loop">← ④ 控制循环才会补</a></b>
+      <dl><dt>现象</dt><dd>节点一重启，这个服务就没了，也没人报警；手动 <code>kubectl run</code> 起的“临时”服务，一跑就是半年。</dd><dt>根源</dt><dd>Pod 本身不会复活。补副本的是 ReplicaSet 控制器，没有它，就没有人在乎这个 Pod 还在不在。</dd><dt>做法</dt><dd class="fix">长期运行的服务一律用 Deployment（有状态的用 StatefulSet，每个节点一个的用 DaemonSet，跑完就退的用 Job）。</dd></dl>
+    </div>
+    <div class="pit" id="p-sel"><b><em>2</em>标签和选择器写得太宽<a class="rootmark" href="#m-labels">← ④ 用标签挑人</a></b>
+      <dl><dt>现象</dt><dd>两个 Deployment 都选 <code>app: order</code>，Service 把下单请求发给了订单报表服务的 Pod；或者一个 Pod 被两个 ReplicaSet 来回争。</dd><dt>根源</dt><dd>选择器就是查询，查询写宽了，就会选中不该选的。Deployment 的 selector 创建后还不能改。</dd><dt>做法</dt><dd class="fix">至少用 <code>app.kubernetes.io/name</code> + <code>app.kubernetes.io/instance</code> 两个标签；一个命名空间里不复用同样的标签组合。</dd></dl>
+    </div>
+    <div class="pit" id="p-drift"><b><em>3</em>线上用 kubectl 改，YAML 没跟着改<span class="seen">实测</span><a class="rootmark" href="#m-why">← ④ 声明式：最后写进去的期望就是真相</a></b>
+      <dl><dt>现象</dt><dd>⑤ 第 6 步：有人 <code>scale</code> 到 2，下一次 <code>apply</code> 又变回 4；<code>rollout undo</code> 回到了 1.8.3，下一次 apply 又回到 YAML 里写的版本。kubectl 1.37 回滚时会直接提醒这件事。</dd><dt>根源</dt><dd>控制器只认 spec，谁最后写，谁说了算。命令式改动不留在 Git 里，下一次声明式同步就把它覆盖。</dd><dt>做法</dt><dd class="fix">生产只通过 Git 改（全景第 4、11 站）；紧急时可以先用命令止血，但要马上把同样的改动提交回去。</dd></dl>
+    </div>
+    <div class="pit" id="p-l4"><b><em>4</em>以为 Service 会按请求均衡<a class="rootmark" href="#m-objects">← ④ Service 是连接级转发</a></b>
+      <dl><dt>现象</dt><dd>扩容到 6 个副本，新的 2 个几乎没流量；gRPC 或 HTTP keep-alive 的调用方，所有请求都压在最早那几个 Pod 上。</dd><dt>根源</dt><dd>Service 的虚拟 IP 由各节点上的 kube-proxy 做四层转发，在<b>建连接</b>时挑一个 Pod；连接一直不断，就一直是它。</dd><dt>做法</dt><dd class="fix">长连接的客户端定期重建连接，或者用客户端负载均衡（J10 的 LoadBalancer）、服务网格、Gateway 在七层按请求分。</dd></dl>
+    </div>
+    <div class="pit" id="p-race"><b><em>5</em>只配了 readiness，滚动时还是零星失败<span class="seen">实测</span><a class="rootmark" href="#m-why">← ④ 最终一致，各自异步</a></b>
+      <dl><dt>现象</dt><dd>⑤ 里滚动 317 次请求失败 4 次、回滚 280 次失败 3 次。readiness 管的是“新的什么时候接流量”，管不了“老的什么时候停”。</dd><dt>根源</dt><dd>缩掉一个老 Pod 时，EndpointSlice 控制器摘地址、各节点 kube-proxy 更新转发规则、kubelet 发 SIGTERM，这几件事同时开始、各走各的。规则还没更新的节点，会把请求发给已经在关的进程。</dd><dt>做法</dt><dd class="fix">给容器加 <code>preStop</code>（比如 sleep 5～10 秒），让摘流量先跑完；应用开优雅停机。下一页实测加上之后还有没有失败。</dd></dl>
+    </div>
+    <div class="pit" id="p-ingress"><b><em>6</em>新集群还在装 ingress-nginx<a class="rootmark" href="#m-objects">← ④ Ingress 和 Gateway API</a></b>
+      <dl><dt>现象</dt><dd>网上教程大多是 ingress-nginx，装上能用，但 2026 年 3 月以后它不再发布新版本，也不再修安全漏洞。</dd><dt>根源</dt><dd>历史原因：Ingress API 只定义了很少的东西，大量功能靠各家注解实现，难以继续演进；社区把精力转到 Gateway API。</dd><dt>做法</dt><dd class="fix">新集群选一个 Gateway API 的实现；老集群的 ingress-nginx 列进迁移计划。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 团队里该怎么写</h3>
+  <ul class="rules-list">
+    <li><b>所有对象的 YAML 都在 Git 里</b>：防“集群里有、仓库里没有”的东西，谁也说不清它从哪来。</li>
+    <li><b>一个服务一个 Deployment、一个 Service，用推荐标签</b>（<code>app.kubernetes.io/name</code>、<code>/version</code>、<code>/part-of</code>）：防选择器误伤，也让监控按标签聚合。</li>
+    <li><b>滚动策略显式写出来</b>：副本少的服务用 <code>maxSurge: 1, maxUnavailable: 0</code>；防默认的 25% 在小副本数时意外少掉一个。</li>
+    <li><b>不同环境用不同命名空间</b>，生产的写权限只给流水线：防在测试环境的终端里误操作生产。</li>
+    <li><b>改 Pod 模板时带上 change-cause</b>（或者靠 Git 提交记录）：防 <code>rollout history</code> 里一列 <code>&lt;none&gt;</code>，回滚时不知道该回到哪一版。</li>
+  </ul>
+
+  <h3>第三圈 · 深一层</h3>
+  <div class="two">
+    <div class="card" data-role="pd">
+      <h4>控制器怎么“看”：List + Watch + 本地缓存</h4>
+      <p>控制器启动时先 List 一遍拿全量，记下版本号（resourceVersion），之后从这个版本开始 Watch 增量，存在本地缓存（informer）里。真正干活时读的是本地缓存，不打扰 API Server；处理逻辑只拿到对象的 key，再从缓存里读最新的状态去比较。所以它天然是“水平触发”的：同一个对象连变五次，可能只处理一次最新的。</p>
+    </div>
+    <div class="card" data-role="cg">
+      <h4>回滚的真相：再发一次老模板</h4>
+      <p>Deployment 用 Pod 模板的哈希给 ReplicaSet 起名（<code>order-svc-9f74c49d</code>）。<code>rollout undo</code> 把上一版 ReplicaSet 的模板拷回 Deployment 的 spec，于是哈希又对上了那个老 ReplicaSet，它被扩回 4 个；版本号不倒退，而是 +1（⑤ 里 1 号变成了 3 号）。历史版本留几个由 <code>revisionHistoryLimit</code> 决定，默认 10。</p>
+    </div>
+    <div class="card" data-role="bk">
+      <h4>终止中的 Pod 不算数</h4>
+      <p>计算 maxSurge 时，正在终止的老 Pod 不算在总数里，所以节点上实际同时存在的 Pod 会比 <code>replicas + maxSurge</code> 多：⑤ 里 EndpointSlice 有一刻是 5 个地址。老 Pod 的优雅停机越长，重叠越多，节点就要多留资源。</p>
+    </div>
+    <div class="card" data-role="other">
+      <h4>API Server 挂了会怎样</h4>
+      <p>已经在跑的 Pod 照跑，kube-proxy 的转发规则也还在，用户基本无感；但不会自愈、不能发布、不能扩容，直到它回来。控制面和数据面是分开的，这也是“各自对齐”这个设计带来的好处。</p>
+    </div>
+  </div>
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>Operator 和 CRD：自己写一个控制循环，比如“声明一个 MySQL 集群”，接 J06。</li>
+    <li>StatefulSet、DaemonSet、Job、CronJob：其他几种控制器各保证什么。</li>
+    <li>Gateway API 实操：HTTPRoute 按权重分流，做金丝雀（接 J14 发布策略那一页）。</li>
+    <li>命名空间、RBAC、NetworkPolicy：谁能改什么，谁能访问谁。</li>
+    <li>client-go 的 informer 和 workqueue 源码：控制循环到底怎么写。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>加 preStop</b>：给容器加 <code>lifecycle.preStop.exec.command: ["sleep","5"]</code>，重跑第 4 步，失败次数还有吗？（坑 5）</li>
+    <li><b>换成默认策略</b>：删掉 <code>strategy</code>，再发一次，看采样里 <code>endpoints</code> 最少到几，和实验台对一对。</li>
+    <li><b>金丝雀的雏形</b>：再建一个 1 副本的 Deployment <code>order-svc-canary</code>，镜像 1.8.4，Pod 标签 <code>app: order-svc</code> 加 <code>track: canary</code>（它自己的 selector 要包含 <code>track</code>）。client 拿到 1.8.4 的比例大约是多少？为什么？</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>只把期望状态存进 API Server，让一群只管一件事的控制器按“现在差多少”反复对齐，对象之间用标签查询而不是互相点名；自愈、滚动、回滚都是这个循环的不同用法。</p></details>
+    <details><summary>2. 发布脚本加手改 Nginx，疼在哪？</summary><p>脚本只在跑的那一刻是对的，之后机器坏了没人纠正；中途失败留下半成品，不知道怎么继续或回去；状态散在各台机器和 Nginx 配置里。</p></details>
+    <details><summary>3. 坑 5（只配 readiness 还零星失败）的根源是 ④ 的哪一条？</summary><p>最终一致、各自异步：摘地址、更新各节点转发规则、给进程发 SIGTERM 是几个组件同时各自做的，没有谁等谁。</p></details>
+    <details><summary>4. 预测：API Server 停了 5 分钟，这期间 order-svc 的一个 Pod 所在节点宕机了。用户会看到什么？API Server 回来以后呢？</summary><p>宕机节点上那个 Pod 的连接会失败；各节点的转发规则还指着它（没人更新 EndpointSlice），所以落到它上面的请求持续失败，大约四分之一。API Server 回来后，节点被判定为不可用，Pod 被标记删除，EndpointSlice 摘掉它，ReplicaSet 在别的节点补一个。从 ④ 推出：数据面能独立运行，但纠错要靠控制面。</p></details>
+    <details><summary>5. 预测：4 个副本，<code>maxSurge: 0</code>、<code>maxUnavailable: 1</code>，滚动时最少几个能接流量？节点要不要多留资源？</summary><p>最少 3 个；不用为新 Pod 多留资源，因为总数不超过 4（但终止中的老 Pod 还占着资源，见第三圈）。先停一个老的、再起一个新的，轮流进行。可以在实验台里验证。</p></details>
+    <details><summary>6. 放回全景：第 5 站前后各是什么？如果第 4 站同步进来的 YAML 把 selector 写成了 <code>app: order</code>，而集群里还有一个 order-report 服务也用这个标签，会怎样？</summary><p>前面是第 4 站 Argo CD 把部署清单同步进来，后面是第 6 站调度器给新 Pod 挑节点。selector 一旦改了，Deployment 会被 API Server 拒绝（Deployment 的 selector 不能修改）；如果是新建的 Service 用了 <code>app: order</code>，它会把 order-report 的 Pod 也选进来，第 9 站切流量时，一部分下单请求被发到报表服务上，返回 404 或 500。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM 虚拟机，kind v0.33.0，节点镜像 kindest/node:v1.37.0，kubectl v1.37.0，镜像来自上一页）：<code>./run.sh</code> 完整两次（第一次 version 检查偶尔超时，加了重试后重跑），⑤ 的输出来自第二次；两次的数字接近（删 Pod 后 0.3 s 建替补、7.1～7.7 s Ready；滚动 26.3～26.4 s，失败 4～5 次；回滚 22.7～23.8 s，失败 3～6 次）。实验台的滚动模拟在 node 里跑过，1 / 0 那一行和实测的 4 轮一致。</p>
+  <p>按文档：<code>kubectl explain</code>（1.37）里 maxSurge 默认 25%、按百分比算时向上取整，maxUnavailable 默认 25%、向下取整，两者不能同时为 0；<code>revisionHistoryLimit</code> 默认 10；Deployment 的 selector 创建后不可修改。ingress-nginx 的 README 写明 2026 年 3 月后不再维护，GitHub 仓库已归档；Gateway API 最新版本 v1.7.0（2026-10-29）。</p>
+  <p>相关：<a href="../java/pano-j14-one-release.html">全景：一次发布，从合并到回滚</a> · <a href="docker-image-layers.html">上一页：Docker 镜像分层与多阶段构建</a> · <a href="../cloud/gray-release.html">J10 灰度发布</a> · <a href="../cloud/feign-dubbo-loadbalancer.html">J10 客户端负载均衡</a> · <a href="../java/roadmap.html#j14">Java 地图 J14</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 百分比换成个数：maxSurge 向上取整，maxUnavailable 向下取整；两者都为 0 时 maxUnavailable 按 1 算（显式写两个 0 会被 API 拒绝）
+function resolve(replicas, surge, unav) {
+  const conv = (v, up) => String(v).endsWith("%") ? (up ? Math.ceil : Math.floor)(replicas * parseInt(v, 10) / 100) : parseInt(v, 10);
+  let s = conv(surge, true), u = conv(unav, false);
+  const explicitZero = !String(surge).endsWith("%") && !String(unav).endsWith("%") && s === 0 && u === 0;
+  if (s === 0 && u === 0) u = 1;
+  return { surge: s, unav: u, invalid: explicitZero };
+}
+// 一轮 = 新 Pod 从创建到 Ready。每轮：扩新的 → 缩老的 → 再扩新的（Deployment 控制器在 ReplicaSet 变化后立刻再同步一次）
+function rollout(replicas, surge, unav) {
+  const r = resolve(replicas, surge, unav);
+  if (r.invalid) return { ...r, rows: [] };
+  let old = replicas, ready = 0, starting = 0;
+  const rows = [{ old, ready, starting, avail: old, total: old }];
+  const up = () => { const total = old + ready + starting; const n = Math.max(0, Math.min(replicas + r.surge - total, replicas - ready - starting)); starting += n; };
+  for (let guard = 0; guard < 60 && !(old === 0 && ready === replicas); guard++) {
+    up();
+    const down = Math.max(0, Math.min(old, old + ready - (replicas - r.unav)));
+    old -= down;
+    up();
+    rows.push({ old, ready, starting, avail: old + ready, total: old + ready + starting });
+    ready += starting; starting = 0;
+  }
+  if (rows[rows.length - 1].starting > 0) rows.push({ old, ready, starting: 0, avail: old + ready, total: old + ready });
+  const minAvail = Math.min(...rows.map(x => x.avail));
+  const maxTotal = Math.max(...rows.map(x => x.total));
+  return { ...r, rows, rounds: rows.filter(x => x.starting > 0).length, minAvail, maxTotal };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const dots = (n, cls) => Array.from({ length: n }, () => `<span class="pd-dot ${cls}"></span>`).join("");
+  function render() {
+    const R = +$("#ru-r").value, S = $("#ru-s").value, U = $("#ru-u").value;
+    const p = rollout(R, S, U);
+    if (p.invalid) {
+      $("#ru-tbl").innerHTML = "";
+      $("#ru-sum").innerHTML = "maxSurge 和 maxUnavailable 不能同时写成 0：API Server 会直接拒绝这个 Deployment，因为既不许多起、也不许少一个，就永远换不动。";
+      return;
+    }
+    let h = "<thead><tr><th>轮</th><th>老版本</th><th>新版本 Ready</th><th>新版本启动中</th><th>能接流量</th><th>Pod 总数</th><th class=\"pods\">样子</th></tr></thead><tbody>";
+    p.rows.forEach((x, i) => {
+      const label = i === 0 ? "开始" : (x.old === 0 && x.starting === 0 ? "完成" : String(i));
+      h += `<tr class="${x.avail < R ? "low" : ""}"><td>${label}</td><td>${x.old}</td><td>${x.ready}</td><td>${x.starting}</td><td>${x.avail}</td><td>${x.total}</td><td class="pods">${dots(x.old, "")}${dots(x.ready, "nr")}${dots(x.starting, "ns")}</td></tr>`;
+    });
+    $("#ru-tbl").innerHTML = h + "</tbody>";
+    const drop = R - p.minAvail;
+    $("#ru-sum").innerHTML = `${R} 个副本，maxSurge ${S} → <b>${p.surge}</b> 个，maxUnavailable ${U} → <b>${p.unav}</b> 个：一共 <b>${p.rounds}</b> 轮换完；能接流量的最少 <b>${p.minAvail}</b> 个` +
+      (drop > 0 ? `，<span class="bad">比平时少 ${drop} 个</span>（红色的行），这几轮每个 Pod 要多扛 ${Math.round(drop / p.minAvail * 100)}% 的流量` : "，容量一直不降") +
+      `；Pod 总数最多 <b>${p.maxTotal}</b> 个（还不算终止中的）。`;
+  }
+  ["#ru-r", "#ru-s", "#ru-u"].forEach(id => $(id).addEventListener("change", render));
+  $("#ru-default").addEventListener("click", () => { $("#ru-s").value = "25%"; $("#ru-u").value = "25%"; render(); });
+  $("#ru-pano").addEventListener("click", () => { $("#ru-s").value = "1"; $("#ru-u").value = "0"; render(); });
+  $$("#lab-guess .opts button").forEach(b => b.addEventListener("click", () => {
+    $$("#lab-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", "false"); });
+    b.setAttribute("aria-pressed", "true");
+    const ok = b.dataset.g === "3";
+    b.classList.add(ok ? "right" : "wrong");
+    if (!ok) $('#lab-guess [data-g="3"]').classList.add("right");
+    $("#ru-r").value = "4"; $("#ru-s").value = "25%"; $("#ru-u").value = "25%"; render();
+    const r = $("#lab-guess-res"); r.hidden = false;
+    r.innerHTML = (ok ? "猜对了。" : "是 3 个。") + "4 × 25% = 1：maxUnavailable 向下取整是 1，允许先少一个；maxSurge 向上取整也是 1。第一轮控制器同时起 2 个新的、停 1 个老的，新的还没 Ready，能接流量的就只剩 3 个，每个多扛三分之一。这就是全景第 5 站为什么要显式写 1 / 0。";
+  }));
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

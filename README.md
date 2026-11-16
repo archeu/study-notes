@@ -264,3 +264,4 @@
 | # | 页面 | 内容 |
 |---|------|------|
 | 01 | [改一行代码，只推一层：Docker 镜像分层与多阶段构建](https://archeu.github.io/study-notes/cloudnative/docker-image-layers.html) | J14 第 1 个知识点：镜像是按内容寻址的一叠只读层、manifest 和摘要、overlay2 可写层与 copy-up、whiteout，BuildKit 缓存键和“一层失效上面全失效”，多阶段构建，Spring Boot 四层 jar；本机实测单阶段 650 MB 对多阶段 336 MB，改一行代码推 68.2 MB / 21.3 MB / 3.9 KB，删文件不变小、构建参数留在历史里、shell 形式 ENTRYPOINT 停机 10 秒，改哪层推多少实验台 |
+| 02 | [只说想要什么：Kubernetes 核心对象与控制循环](https://archeu.github.io/study-notes/cloudnative/k8s-core-objects.html) | J14 第 2 个知识点：声明式 API 和水平触发的控制循环、控制器只和 API Server 说话、标签选择器代替点名，Pod、ReplicaSet、Deployment、Service、EndpointSlice、Ingress 和 Gateway API（ingress-nginx 已归档）；本机 kind 1.37 实测删 Pod 0.3 秒建替补、改标签被放弃、滚动 26 秒、回滚 24 秒和 kubectl 回滚提醒，maxSurge / maxUnavailable 滚动实验台 |
