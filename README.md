@@ -270,3 +270,9 @@
 | 03 | [装得下、活着、能干活：requests、limits、探针和 HPA](https://archeu.github.io/study-notes/cloudnative/k8s-resources-probes.html) | J14 第 3 个知识点：requests 是预订、limits 是上限，CPU 可压缩被限速、内存不可压缩被杀，QoS 三个等级，Pod 被 OOMKilled 和 Java 抛 OOM 的区别（地图过关标准），startup / readiness / liveness 三种探针，HPA 公式、容差和稳定窗口；本机 kind 实测 -Xmx=limit 被杀 137 日志无 OOM、75% 抛 Java OOM 进程还活着、只配 liveness 100 秒重启 5 次、startupProbe 48 秒 Ready、HPA 1→5→1，容器内存账本实验台 |
 | 04 | [换版本不断流、出事能秒回：CI/CD 与滚动、蓝绿、金丝雀](https://archeu.github.io/study-notes/cloudnative/cicd-release-strategy.html) | J14 第 5 个知识点：构建一次的不可变镜像、拉式 GitOps 部署（Argo CD selfHeal、git revert 回滚），重建 / 滚动 / 蓝绿 / 金丝雀 / 特性开关的取舍，新旧并存要前后兼容；本机 kind 实测滚动没有 preStop 失败 5 次、加 preStop 0 次、滚动回滚 27 秒，蓝绿 8 个 Pod、切换和回切 1 秒内 0 失败，按副本数金丝雀 19.7%，同一个 bug 三种策略各让多少订单失败的实验台 |
 | 05 | [137、143 和那份没加密的密码：Linux 信号、启动脚本、配置和密钥](https://archeu.github.io/study-notes/cloudnative/linux-config-secrets.html) | J14 第 6 个知识点（动手技能）：PID 命名空间里 1 号进程只收装了处理函数的信号、exec 和 trap、退出码 128+N，ConfigMap 走环境变量 / 目录挂载 / subPath 的三种更新方式，Secret 在 Git、API、etcd、文件、环境变量里的样子，kubectl debug 临时容器；本机 kind 实测没写 exec 删 Pod 30.6 秒、写了 0.6 秒，目录挂载 60～67 秒才变、env 和 subPath 不变，etcd 里搜到明文密码，五个刻意练习和退出码解码器 |
+
+## 架构设计与团队
+
+| # | 页面 | 内容 |
+|---|------|------|
+| 01 | [一句话里藏着 4 块钱：需求分析与业务建模](https://archeu.github.io/study-notes/design/requirements-modeling.html) | 业务方的一句话是压缩过的解法：丢了目标、默认规则和没想过的情况；目标追问、算例映射、逆向清单、事件序列和名词表，把“满 300 减 40 要能和券叠加”还原成 6 条规则和 7 个能跑的算例（本机实测“加个 if”只过 3 个），六个坑和团队规范，“同一句话几种读法”实验台 |
