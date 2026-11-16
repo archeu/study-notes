@@ -41,6 +41,7 @@
 | 12 | [全景：10 万人抢 1000 张券的那一秒](https://archeu.github.io/study-notes/java/pano-j12-coupon-rush.html) | J12 场景全景：算账和全链路压测定出 8 台、限流 1 万/秒，30 万次点击经 App 置灰、CDN 静态化、网关令牌桶、售罄标记、Redis Lua 预扣、RocketMQ 异步落库削到 1000 行，条件更新兜底防超发，Redis 切主库存回涨、机房断电同城双活切流，对数漏斗图，分步演示 |
 | 13 | [全景：凌晨三点，告警响了](https://archeu.github.io/study-notes/java/pano-j13-late-night-alert.html) | J13 场景全景：对账任务在事务里等支付渠道 30 秒，占满 order-3 连接池，下单 1/3 失败；Micrometer 指标、JSON 日志、OTel 链路三路埋点，Prometheus 规则 for 5m 加 Alertmanager 打电话，接警定级、大盘按实例和连接池缩范围、慢 trace 没有子 span、按 trace_id 查日志、问变更、Arthas 看线程和耗时、Nacos 开关止血、复盘五问和改进项，30 分钟时间尺，分步演示 |
 | 14 | [全景：一次发布，从合并到回滚](https://archeu.github.io/study-notes/java/pano-j14-one-release.html) | J14 场景全景：order-svc 1.8.3 → 1.8.4，合并请求顺手带进 -Xmx1g；GitHub Actions 跑 mvn verify，多阶段构建按层拆 jar，Harbor 只推变了的那层，Argo CD 同步部署仓库，Deployment 新 ReplicaSet maxSurge 1 / maxUnavailable 0，调度按 requests，JVM 按 cgroup 定堆，startup 和 readiness 探针，EndpointSlice 切流量、preStop 加 SIGTERM 优雅退出，晚高峰 HPA 4 → 6 后 OOMKilled 137，git revert 回滚，7 分钟时间尺和滚动阶梯，分步演示 |
+| 15 | [全景：一个需求从一句话到方案评审](https://archeu.github.io/study-notes/java/pano-j15-requirement-to-review.html) | J15 场景全景：运营一句“满 300 减 40 要能和券叠加”，先满减还是先打折差 4 块钱；追问出 6 个答案，落成规则表、算例和事件，看清 420 行的 calcPrice，按“优惠”一词的两种意思划出订单域和营销域，算价放进券服务的独立模块而不新建服务，3 条 ADR 各带被放弃的方案，策略加责任链加防腐层，8 页方案过 45 分钟评审，再先搬后改分小 PR 落地；十站分步演示和五个工作日的时间尺 |
 
 ## Spring
 
