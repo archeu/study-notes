@@ -1,0 +1,1386 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>改一行代码，只推一层：Docker 镜像分层与多阶段构建</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* Layout: one 1040px column, six-step mechanism page (J14 knowledge point 1, Docker image layers and multi-stage builds). Roles: bk = image layers and registry (main), pd = build stage and build cache, of = container runtime (overlay2, merged view), other = old ways and base image, bad = pitfalls, done = measured. Figures: layer stack + container overlay, multi-stage diagram. One interaction: layer rebuild/push lab with guess-first. */
+:root{
+  --paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+section[id], .sub[id], .pit[id], figure[id]{scroll-margin-top:64px}
+
+/* top bar */
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* role colors */
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+
+/* ---------- hero + route ---------- */
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+
+/* ---------- figures ---------- */
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-cg{font-size:12px;font-weight:700;fill:var(--cg)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)} .f-of{fill:var(--of)} .f-cg{fill:var(--cg)} .f-g2{fill:var(--g2)} .f-mut{fill:var(--line-strong)} .f-bad{fill:var(--bad)} .f-pd{fill:var(--pd)} .f-neu{fill:var(--neutral)} .f-bk{fill:var(--bk)} .f-warn{fill:var(--warn)} .f-good{fill:var(--good)} .f-rn{fill:var(--rn)}
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-oft{fill:var(--of-tint)} .f-pdt{fill:var(--pd-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-g2t{fill:var(--g2-tint)} .f-rnt{fill:var(--rn-tint)} .f-neut{fill:var(--neutral-tint)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-axis{stroke:var(--line-strong);stroke-width:1.2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-g2{stroke:var(--g2);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.e-badd{stroke:var(--bad);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.e-ofd{stroke:var(--of);stroke-width:2;fill:none;stroke-dasharray:5 3}
+
+/* ---------- cards ---------- */
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.essence .big{font-family:var(--font-display);font-size:30px;line-height:1.1;color:var(--of);grid-row:span 2}
+.mj dd.ev b{color:var(--bad)}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+
+/* ---------- code ---------- */
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+.hl{background:var(--of-tint)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.done-box{padding:14px 16px;border-radius:14px;background:var(--good-tint);border:2px solid var(--good);font-size:15px}
+.todo{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.todo ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.callouts li{display:grid;grid-template-columns:2em minmax(0,1fr);gap:8px;font-size:14.5px;align-items:start}
+.callouts li > b{font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--of);text-align:center}
+.callouts code{overflow-wrap:anywhere}
+
+/* ---------- tables ---------- */
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t td.num, .t th.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.t tr.hl td, .t tr.hl th{background:var(--of-tint)}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+
+/* ---------- ④ ---------- */
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.fact{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact h4{color:var(--rc);font-size:18px}
+.fact p{font-size:14px}
+.fact code{overflow-wrap:anywhere}
+.formula{display:flex;flex-direction:column;gap:6px;padding:14px 18px;border-radius:14px;background:var(--card);border:2px solid var(--ink);font-size:15px}
+.formula .f{font-family:var(--font-mono);font-size:15px;font-weight:600}
+.formula .f em{font-style:normal;color:var(--of)}
+.formula p{font-size:14px;color:var(--muted)}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.way{border:2px solid var(--rc);border-radius:18px;background:var(--card);padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.way h4{color:var(--rc);font-size:20px}
+.way h4 small{font-family:var(--font-body);font-size:13px;color:var(--muted);margin-left:8px}
+.way svg{display:block;width:100%;height:auto}
+.way pre{padding:10px 12px;background:var(--code-bg);border-radius:10px;font-size:12px}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mismatch{font-size:14px;color:var(--muted);padding:10px 14px;border-radius:12px;border:1.5px dashed var(--line-strong)}
+.mech-h .sn{font-size:20px}
+/* ---------- lab ---------- */
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.run-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.run-row .tip{flex:1 1 260px}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lg i.t{background:var(--rt)}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+/* ---------- ⑥ ---------- */
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.rl{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.rl b{font-size:15.5px}
+.rl p{font-size:14px;color:var(--muted)}
+.rl p.guard{color:var(--ink);font-size:13.5px}
+.rl p.guard::before{content:"防：";color:var(--good);font-weight:700}
+.rl code{color:var(--ink);overflow-wrap:anywhere}
+.deep{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dp{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dp h4{color:var(--rc)}
+.dp p, .dp li{font-size:14.5px}
+.dp ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.dp code{overflow-wrap:anywhere}
+.dp svg{display:block;width:100%;height:auto}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p, details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+.ex{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.exc{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.exc h4{color:var(--rc)}
+.exc p{font-size:14px}
+.exc code{overflow-wrap:anywhere}
+.exc .uses{font-size:12.5px;color:var(--muted);margin-top:auto}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+/* ---------- responsive ---------- */
+@media (max-width:980px){
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex,.design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .duo,.two,.trio,.misj,.design,.pits,.rules-list,.deep,.next{grid-template-columns:1fr}
+  .essence .big{grid-row:auto}
+}
+@media (max-width:520px){
+  .facts,.presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+/* ---------- shared page bits (from earlier pages) ---------- */
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.cmp3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.cmp3 .codebox{border-color:var(--rc)}
+.cmp3 .code-bar{background:var(--rt)}
+.cmp3 .code-bar b{color:var(--rc)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+/* ---------- this page ---------- */
+.goals3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g3{border:1.5px solid var(--rc);background:var(--rt);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.g3 h4{margin:0;font-size:17px;color:var(--rc)}
+.g3 p{font-size:14px}
+.flows{display:flex;flex-direction:column;gap:6px}
+table.t td.bad, table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.race{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px;outline:none}
+.race .presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.race-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.race-ctl .tip{margin-left:auto}
+.evt{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;min-width:620px}
+.evt th,.evt td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.evt thead th{font-size:13px;color:var(--muted);font-weight:500;white-space:nowrap}
+.evt td.n{font-family:var(--font-mono);color:var(--muted);width:2.2em}
+.evt td.who span{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--rt);color:var(--rc);border:1.5px solid var(--rc)}
+.evt td.st{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.evt td.st.chg{font-weight:700}
+.evt td.st.old{color:var(--bad)}
+.evt td.st.new{color:var(--good)}
+.evt tr.fut{opacity:.18}
+.evt tr.cur td{background:var(--of-tint)}
+.evt-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:14px}
+.race-out{font-size:15px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.chain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:14px}
+.chain span{padding:2px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);white-space:nowrap}
+.chain i{font-style:normal;color:var(--muted)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.res-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.goals3,.res-grid{grid-template-columns:1fr}.race .presets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.race .presets{grid-template-columns:1fr}}
+.evt.l2{min-width:780px}
+.evt td.st.off{text-decoration:line-through dotted;opacity:.7}
+.lyr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:720px){.lyr{grid-template-columns:1fr}}
+/* ---------- this page (five holes) ---------- */
+.kw{color:var(--pd);font-weight:600}
+.s{color:var(--of)}
+.lab #tiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){.lab #tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.dp .tbl-wrap{border-radius:12px}
+h3#design,h3#lab-h{margin-top:8px}
+
+/* this page */
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-rn{font-size:12px;font-weight:700;fill:var(--rn)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none} .e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.mx td.c{text-align:center;font-weight:700;white-space:nowrap}
+.mx td.c.good{color:var(--good)} .mx td.c.bad{color:var(--bad)}
+.mx td.c small{display:block;font-weight:400;font-size:12px;color:var(--muted)}
+#tl-box svg{display:block;width:100%;min-width:640px;height:auto}
+
+/* page-specific */
+.f-badt{fill:var(--bad-tint);opacity:.55}
+.t-num{font-size:11px;font-weight:700;fill:var(--paper);font-family:var(--font-mono)!important}
+.tbl-wrap table.cmp{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+table.cmp th,table.cmp td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+table.cmp th{font-size:13px;color:var(--muted);font-weight:500;background:var(--code-bg)}
+table.cmp tbody tr:last-child td{border-bottom:0}
+table.cmp tr[data-role] td{background:var(--rt)}
+table.cmp tr[data-role] td:first-child{box-shadow:inset 4px 0 0 var(--rc)}
+ol.jr{margin:0;padding:0;list-style:none;counter-reset:jr;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+ol.jr li{position:relative;padding-left:2.1em;font-size:14.5px;counter-increment:jr}
+ol.jr li::before{content:counter(jr);position:absolute;left:0;top:1px;width:1.45em;height:1.45em;border-radius:50%;background:var(--ink);color:var(--paper);font:700 12px/1.45em var(--font-mono);text-align:center}
+ol.jr li span{display:block;font-size:12.5px;color:var(--muted)}
+ol.jr code{overflow-wrap:anywhere}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+#scs{grid-template-columns:repeat(3,minmax(0,1fr))}
+#scs .tmo{grid-column:1 / -1;display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer}
+#scs .tmo input{width:18px;height:18px;accent-color:var(--bad)}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+@media (max-width:860px){ol.jr{grid-template-columns:1fr}#scs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){#scs{grid-template-columns:1fr}}
+/* 本页：内存块条 */
+.mem{display:flex;gap:3px;align-items:stretch;min-height:58px;overflow-x:auto;padding-bottom:4px}
+.blk{flex:var(--w,1) 0 64px;min-width:64px;border-radius:9px;padding:6px 8px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;justify-content:center;gap:1px}
+.blk b{font-family:var(--font-mono);font-size:15px;font-variant-numeric:tabular-nums}
+.blk span{font-size:11.5px;color:var(--muted);line-height:1.3}
+.blk.hid{border-style:dashed;opacity:.75}
+.calc-out{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.seg{display:inline-flex;border:1.5px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.seg button{border:0;background:var(--card);padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--of-tint);box-shadow:inset 0 0 0 1.5px var(--of)}
+@media (max-width:620px){.calc-out{grid-template-columns:1fr}}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.result{border-top:1.5px dashed var(--line);padding-top:8px}
+.cap{font-size:13.5px;color:var(--muted)}
+.cmdchips{display:flex;flex-wrap:wrap;gap:6px}
+.cmdchips code{padding:2px 8px;border-radius:8px;border:1.5px solid var(--rc);background:var(--rt);font-size:13px}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){.steps-out li{grid-template-columns:minmax(0,1fr)}}
+.t-big{font-family:var(--font-display);font-size:40px;fill:var(--bad)}
+/* page: kafka-leader-election-elr */
+.t-warn{font-size:12px;font-weight:700;fill:var(--warn)}
+.f-cgt{fill:var(--cg-tint)} .f-pdt{fill:var(--pd-tint)}
+.ladder td:first-child{white-space:nowrap;font-weight:700}
+table.cmp td.mono, table.cmp th.mono{font-family:var(--font-mono);font-size:12.5px;white-space:nowrap}
+.sets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.sets .fact b.v{font-family:var(--font-mono);font-size:20px;color:var(--rc)}
+
+/* ---------- this page ---------- */
+.goals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.goal{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:12px 14px;font-size:14.5px;min-width:0}
+.goal b{display:block;color:var(--rc);font-size:15.5px;margin-bottom:4px}
+.tries{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try .pain{color:var(--bad)}
+.try code{overflow-wrap:anywhere}
+.rule-box{padding:12px 16px;border-radius:14px;background:var(--pd-tint);border:2px solid var(--pd);font-size:15px;max-width:54em}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.slot text{transition:opacity .25s}
+.slot.s-none{opacity:0}
+.slot.s-live rect{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.slot.s-active rect{fill:var(--pd);stroke:var(--pd);stroke-width:2}
+.slot.s-active text{fill:var(--on-accent)}
+.slot.s-roll rect{fill:var(--pd-tint);stroke:var(--of);stroke-width:3}
+.slot.s-gone rect{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.slot.s-gone text{opacity:.45}
+.slot.s-copied rect{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.slot.s-new rect{fill:var(--bk-tint);stroke:var(--of);stroke-width:3}
+.slot.s-reading rect{fill:var(--of-tint);stroke:var(--of);stroke-width:3}
+.fx{transition:opacity .25s}
+.fx.off{opacity:0}
+.ptr{transition:transform .35s}
+@media (prefers-reduced-motion: reduce){.ptr,.slot rect,.fx{transition:none}}
+.vtab td:first-child{font-family:var(--font-mono);white-space:nowrap}
+@media (max-width:760px){.goals,.tries{grid-template-columns:1fr}}
+.f-pd{fill:var(--pd)} .f-bk{fill:var(--bk)}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+
+.t td.mid{color:var(--warn);font-weight:600}
+.duo{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.duo > *{min-width:0}
+.rule-box ol{margin:6px 0 0;padding-left:1.4em;display:flex;flex-direction:column;gap:4px}
+/* replay bench */
+.rb-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.rb-ctl .lbl{font-size:13px;color:var(--muted);margin-right:4px}
+.seg{display:inline-flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:5px 11px;font-size:14px;cursor:pointer}
+.seg button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.arr{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--font-mono);font-size:13px}
+.arr span{padding:2px 9px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint)}
+.arr span.cur{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.arr span.done{opacity:.5}
+table.steps-t td.act-bad{color:var(--bad);font-weight:600}
+table.steps-t td.act-park{color:var(--cg);font-weight:600}
+table.steps-t td.act-ok{color:var(--good);font-weight:600}
+table.steps-t tr.now td, table.steps-t tr.now th{background:var(--of-tint)}
+/* selection bench */
+.sel-reqs{display:flex;flex-wrap:wrap;gap:8px}
+.sel-reqs label{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);border-radius:999px;padding:5px 12px;font-size:14px;cursor:pointer;background:var(--card)}
+.sel-reqs input{accent-color:var(--of);margin:0}
+.sel-reqs label:has(input:checked){border-color:var(--of);background:var(--of-tint)}
+.sel-reqs label:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.sel-wrap{overflow-x:auto}
+table.sel{width:100%;border-collapse:separate;border-spacing:4px;font-size:13.5px;min-width:640px}
+table.sel th{font-size:13px;font-weight:700;text-align:left;padding:6px 8px;color:var(--muted)}
+table.sel thead th[data-role]{color:var(--rc);border-bottom:3px solid var(--rc)}
+table.sel thead th.out{opacity:.45;text-decoration:line-through}
+table.sel td{padding:7px 9px;border-radius:9px;vertical-align:top;line-height:1.45}
+table.sel td.v2{background:var(--good-tint);border:1.5px solid var(--good)}
+table.sel td.v1{background:var(--warn-tint);border:1.5px solid var(--warn)}
+table.sel td.v0{background:var(--bad-tint);border:1.5px solid var(--bad)}
+table.sel td b{display:block;font-size:12px;margin-bottom:2px}
+table.sel td.v2 b{color:var(--good)}table.sel td.v1 b{color:var(--warn)}table.sel td.v0 b{color:var(--bad)}
+.sel-empty{font-size:14px;color:var(--muted);padding:8px 2px}
+.lanes-note{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.duo{grid-template-columns:1fr}}
+.cfg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.cfg{grid-template-columns:1fr}}
+.ladder-wrap{overflow-x:auto}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.q3 .fact h4 small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);font-weight:400}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.q3{grid-template-columns:1fr}.tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* fills after edges: e-* rules set fill:none, so tinted fills are restated last */
+.f-card{fill:var(--card)} .f-code{fill:var(--code-bg)} .f-neut{fill:var(--neutral-tint)} .f-pdt{fill:var(--pd-tint)} .f-oft{fill:var(--of-tint)} .f-bkt{fill:var(--bk-tint)} .f-cgt{fill:var(--cg-tint)} .f-rnt{fill:var(--rn-tint)} .f-g2t{fill:var(--g2-tint)} .f-goodt{fill:var(--good-tint)} .f-badtt{fill:var(--bad-tint)}
+/* page: retry-storm chart */
+.storm-ctl{display:flex;flex-direction:column;gap:10px}
+.storm-chart .lbl-axis{font-size:10.5px;fill:var(--muted)}
+.clock-tags{display:flex;flex-wrap:wrap;gap:8px}
+.clock-tags span{padding:3px 10px;border-radius:999px;border:1.5px solid var(--rc);background:var(--rt);font-size:13.5px}
+
+/* ---------- this page: raft ---------- */
+.f-cg{fill:var(--cg)} .f-ink{fill:var(--ink)} .f-good{fill:var(--good)} .f-bad{fill:var(--bad)} .f-of{fill:var(--of)}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none} .e-bk{stroke:var(--bk);stroke-width:2.5;fill:none} .e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cgd{stroke:var(--cg);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)} .t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.t-on{font-size:12px;font-weight:700;fill:var(--on-accent)}
+.t-mut{font-size:12px;fill:var(--muted)}
+.qz{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2;fill-opacity:.55}
+.qz2{fill:var(--of-tint);stroke:var(--of);stroke-width:2;fill-opacity:.55}
+.lg1{fill:var(--pd-tint);stroke:var(--pd);stroke-width:1.8}
+.lg2{fill:var(--bk-tint);stroke:var(--bk);stroke-width:1.8}
+.lg3{fill:var(--of-tint);stroke:var(--of);stroke-width:1.8}
+.lgu{stroke-dasharray:5 3}
+.lgx{fill:var(--bad-tint);stroke:var(--bad);stroke-width:1.8;stroke-dasharray:4 3}
+.goals .goal p{margin:0}
+.qtab{border-collapse:collapse;font-size:14px;width:100%}
+.qtab th,.qtab td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:center;font-variant-numeric:tabular-nums}
+.qtab th{font-size:12.5px;color:var(--muted);font-weight:500}
+.qtab tr.bad td{color:var(--bad)}
+.qtab tr.ok td{color:var(--cg);font-weight:700}
+.rs-node .rb{transition:fill .25s,stroke .25s}
+.rs-slot rect{transition:fill .25s,stroke .25s,opacity .25s}
+.rs-slot.s-none{opacity:0}
+.rs-slot text{transition:opacity .25s}
+.rs-slot.s-new rect{stroke-width:3.2}
+.rs-cut{transition:opacity .25s}
+.rs-cut.off{opacity:0}
+@media (prefers-reduced-motion: reduce){.rs-slot rect,.rs-node .rb,.rs-cut{transition:none}}
+.msgs{display:flex;flex-wrap:wrap;gap:6px;min-height:30px;align-items:center;font-size:13px}
+.msgs span{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;border:1.5px solid var(--pd);background:var(--pd-tint);overflow-wrap:anywhere}
+.msgs span.lost{border-color:var(--bad);background:var(--bad-tint);text-decoration:line-through}
+.msgs span.vote{border-color:var(--bk);background:var(--bk-tint)}
+.msgs em{font-style:normal;color:var(--muted)}
+.dots{display:flex;flex-wrap:wrap;gap:4px}
+.dots button{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--card);font-size:11.5px;font-family:var(--font-mono);cursor:pointer;padding:0}
+.dots button[aria-current="step"]{background:var(--cg);border-color:var(--cg);color:var(--on-accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:16px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1.8px solid}
+.legend i.l1{background:var(--pd-tint);border-color:var(--pd)} .legend i.l2{background:var(--bk-tint);border-color:var(--bk)}
+.legend i.lu{background:var(--card);border-color:var(--line-strong);border-style:dashed}
+.legend i.lx{background:var(--bad-tint);border-color:var(--bad);border-style:dashed}
+.rpc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.rpc .card code{overflow-wrap:anywhere}
+.rpc dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font-size:14px}
+.rpc dt{font-family:var(--font-mono);font-size:12.5px;color:var(--rc)}
+.rpc dd{margin:0;min-width:0}
+@media (max-width:760px){.rpc{grid-template-columns:1fr}}
+.lg1.ovr,.lg2.ovr,.lg3.ovr{stroke:var(--bad);stroke-width:2.8}
+.rs-slot .t-mono{font-size:10.5px}
+
+/* ---------- this page ---------- */
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.t-g2{font-size:12px;font-weight:700;fill:var(--g2)}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pdd{stroke:var(--pd);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.e-bkd{stroke:var(--bk);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.b-frz{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5;stroke-dasharray:4 3}
+.q3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.q3 > div{background:var(--card);border:1.5px solid var(--line);border-top:4px solid var(--rc);border-radius:14px;padding:10px 14px;min-width:0;font-size:14.5px}
+.q3 > div b{display:block;font-family:var(--font-display);font-weight:400;font-size:18px;color:var(--rc);margin-bottom:4px}
+@media (max-width:760px){.q3{grid-template-columns:1fr}}
+table.cmp td.y{color:var(--good);font-weight:600}
+table.cmp td.n{color:var(--bad);font-weight:600}
+table.cmp td.m{color:var(--warn);font-weight:600}
+table.cmp tr[data-role] td:first-child{border-left:4px solid var(--rc)}
+table.cmp td.real{font-family:var(--font-mono);font-size:13px}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.tag-real.est{background:var(--neutral-tint);color:var(--muted);border-color:var(--line-strong)}
+.bench .pick2{display:flex;flex-wrap:wrap;gap:8px}
+.bench .pick2 button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;color:var(--ink)}
+.bench .pick2 button[aria-pressed="true"]{border-color:var(--rc);background:var(--rt);box-shadow:inset 0 0 0 1px var(--rc)}
+.bench .pick2 button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.bench .grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bench .grp > span{font-size:13px;color:var(--muted)}
+.bench input[type=range]{width:100%;accent-color:var(--bk)}
+.bench .why{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.bench .why.bad{border-left-color:var(--bad);background:var(--bad-tint)}
+.bench .why.ok{border-left-color:var(--good);background:var(--good-tint)}
+#tl-svg{min-width:620px}
+
+/* ---------- this page ---------- */
+.t-id{font-family:var(--font-display);font-size:26px;fill:var(--g2)}
+.essence .big{font-size:22px;line-height:1.4;color:var(--g2)}
+.cmp3.two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:860px){.cmp3.two-col{grid-template-columns:1fr}}
+.pit dd code{overflow-wrap:anywhere}
+#bench-out{display:flex;flex-direction:column;gap:12px}
+#bench-out[hidden]{display:none}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+#cb-tiles .tile b{white-space:normal;font-size:20px}
+.strip45{display:grid;grid-template-columns:repeat(45,minmax(0,1fr));gap:2px}
+.strip45 i{display:block;height:26px;border-radius:3px;background:var(--good-tint);border:1px solid var(--good)}
+.strip45 i.o{background:var(--bad-tint);border-color:var(--bad)}
+.strip45 i.h{background:var(--warn-tint);border-color:var(--warn)}
+.strip45 i.n{background:var(--neutral-tint);border-color:var(--neutral)}
+.strip-ax{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.lg-row{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.lg-row i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1px solid}
+
+/* sharding-key bench */
+.sk-wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.sk-bars{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;align-items:end;height:160px;padding:4px 6px 0;border-bottom:1.5px solid var(--line-strong)}
+.sk-bars .bar{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;min-width:0;gap:2px}
+.sk-bars .bar i{display:block;width:100%;background:var(--pd);border-radius:6px 6px 0 0;min-height:2px;transition:height .3s}
+.sk-bars .bar.hot i{background:var(--bad)}
+.sk-bars .bar.zero i{background:var(--line-strong)}
+.sk-bars .bar small{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);white-space:nowrap}
+.sk-names{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:2px 6px 0}
+.sk-names span{font-size:10.5px;font-family:var(--font-mono);color:var(--muted);text-align:center}
+.sk-q td.n{font-family:var(--font-mono);white-space:nowrap}
+.sk-q td.one{color:var(--good);font-weight:700}
+.sk-q td.all{color:var(--bad);font-weight:700}
+@media (max-width:700px){.sk-wrap{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.sk-bars .bar i{transition:none}}
+
+/* paging calculator */
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+
+.rl-ax{stroke:var(--line);stroke-width:1}
+.rl-win{stroke:var(--line-strong);stroke-width:1;stroke-dasharray:4 4}
+.rl-tick{stroke-width:1.2}
+.rl-lane{font-size:12.5px;fill:var(--ink)}
+.rl-cnt{font-size:12.5px;font-weight:700;fill:var(--ink);font-family:var(--font-mono)}
+.rl-cnt.bad{fill:var(--bad)}
+.rl-bar{fill:var(--rc)}
+.rl-lab-out{display:flex;flex-direction:column;gap:6px}
+.rl-row{display:grid;grid-template-columns:9.5em minmax(0,1fr) 7.5em;gap:8px;align-items:center;font-size:13.5px}
+.rl-row > span{min-width:0}
+.rl-row svg{width:100%;height:44px;display:block}
+.rl-row .sum{font-family:var(--font-mono);font-size:12.5px;color:var(--muted)}
+.rl-row .sum b{color:var(--ink)}
+.algo-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.algo{border:1.5px solid var(--rc);background:var(--card);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.algo h4{margin:0;color:var(--rc);font-size:16px}
+.algo svg{width:100%;height:auto;display:block}
+.algo p{font-size:14.5px;margin:0}
+.algo .gives{font-size:13.5px;color:var(--muted)}
+@media (max-width:760px){.algo-cards{grid-template-columns:1fr}.rl-row{grid-template-columns:7em minmax(0,1fr);}.rl-row .sum{grid-column:1 / -1}}
+
+.race{display:flex;flex-direction:column;gap:12px}
+.race-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.lane-box{border:1.5px solid var(--line);border-radius:14px;padding:10px 12px;background:var(--card);min-width:0;display:flex;flex-direction:column;gap:6px}
+.lane-box h4{margin:0;font-size:15px}
+.lane-box ol{margin:0;padding-left:1.3em;font-family:var(--font-mono);font-size:12.5px;display:flex;flex-direction:column;gap:3px}
+.lane-box li{opacity:.35;transition:opacity .2s}
+.lane-box li.done{opacity:1}
+.lane-box li.now{opacity:1;font-weight:700;color:var(--rc)}
+.redis-state{font-family:var(--font-mono);font-size:13px;display:flex;flex-direction:column;gap:4px}
+.redis-state .v{font-size:26px;font-family:var(--font-display);color:var(--ink)}
+.redis-state .v.bad{color:var(--bad)}
+.layer-t td:nth-child(2),.layer-t td:nth-child(3){font-variant-numeric:tabular-nums;white-space:nowrap}
+@media (max-width:760px){.race-grid{grid-template-columns:1fr}}
+
+.rb-card{display:grid;grid-template-columns:7em minmax(0,1fr);gap:6px 12px;font-size:14.5px;background:var(--card);border:1.5px solid var(--rc);border-radius:14px;padding:12px 14px}
+.rb-card dt{color:var(--muted);font-size:13px}
+.rb-card dd{margin:0;min-width:0}
+@media (max-width:760px){.rb-card{grid-template-columns:1fr}}
+
+/* ---------- this page ---------- */
+.x-box{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.x-zone{fill:none;stroke:var(--line-strong);stroke-width:1.3;stroke-dasharray:6 5}
+.x-zl{font-size:12px;fill:var(--muted)}
+.x-r{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.x-rs{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.x-fill{fill:var(--rc)}
+.x-t{font-size:13px;fill:var(--ink)}
+.x-tb{font-size:13.5px;font-weight:700;fill:var(--ink)}
+.x-ts{font-size:11.5px;fill:var(--muted)}
+.x-tc{font-size:12px;font-weight:700;fill:var(--rc)}
+.x-mono{font-family:var(--font-mono);font-size:11px;fill:var(--ink)}
+.x-mono.dim{fill:var(--muted)}
+.x-mono.bad{fill:var(--bad);font-weight:600}
+.x-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.x-ed{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.x-ed.dash{stroke-dasharray:5 4}
+.x-ed.bad{stroke:var(--bad)}
+.x-ed.c{stroke:var(--rc);stroke-width:2}
+.x-mk{fill:var(--line-strong)}
+.x-mkb{fill:var(--bad)}
+.sv .fade{opacity:.25;transition:opacity .25s}
+.sv .lit{opacity:1;transition:opacity .25s}
+.sv .lit .x-rs,.sv .lit .x-r{stroke-width:3}
+.fig-box{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card);padding:10px}
+.fig-box > svg{min-width:760px;width:100%;display:block}
+.swipe{display:none;font-size:13px;color:var(--muted);margin:0 0 4px}
+@media (max-width:800px){.swipe{display:block}}
+.sinks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.sink{border-radius:12px;border:1.5px solid var(--rc);background:var(--card);padding:8px 10px;min-width:0;display:flex;flex-direction:column;gap:4px}
+.sink > b{font-size:13px;color:var(--rc)}
+.sink pre{padding:6px 8px;font-size:11.5px;line-height:1.5;background:var(--code-bg);border-radius:8px;min-height:6.2em;white-space:pre;overflow-x:auto}
+.sink pre .new{color:var(--of);font-weight:600}
+@media (max-width:800px){.sinks{grid-template-columns:1fr}}
+.cmp-t td,.cmp-t th{vertical-align:top}
+.ids{font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ids .a{color:var(--cg);font-weight:600}
+.ids .b{color:var(--of);font-weight:600}
+
+.calc{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.6fr);gap:16px;align-items:start}
+.calc .knobs{display:flex;flex-direction:column;gap:10px}
+.calc label{display:grid;grid-template-columns:8.5em minmax(0,1fr) 4.2em;gap:8px;align-items:center;font-size:14px}
+.calc label output{font-family:var(--font-mono);font-size:13px;text-align:right}
+.calc input[type=range]{width:100%;accent-color:var(--pd)}
+.calc-sum{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--pd-tint);border-left:5px solid var(--pd)}
+@media (max-width:800px){.calc{grid-template-columns:1fr}}
+
+.stackbox{display:flex;flex-direction:column;gap:5px}
+.stk-row{display:grid;grid-template-columns:minmax(0,1fr) auto 11em;gap:10px;align-items:center;padding:6px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--card);font-size:14px}
+.stk-row .stk-s{font-family:var(--font-mono);font-size:13px;font-variant-numeric:tabular-nums;text-align:right}
+.stk-row .stk-t{font-size:12.5px;color:var(--muted)}
+.stk-row.reuse{color:var(--muted)}
+.stk-row.rerun{background:var(--pd-tint);border-color:var(--pd)}
+.stk-row.push{background:var(--bk-tint);border-color:var(--bk);font-weight:600}
+.stk-row.push .stk-t{color:var(--bk);font-weight:700}
+@media (max-width:640px){.stk-row{grid-template-columns:minmax(0,1fr) auto}.stk-row .stk-t{grid-column:1 / -1}.ctl-grid{grid-template-columns:1fr!important}}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>云原生与交付</span><span aria-hidden="true">/</span><span class="tb-here">Docker 镜像分层与多阶段构建</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="xa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="x-mk"/></marker>
+  </defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">Docker 27 · BuildKit · OCI 镜像 · 内容寻址 · 构建缓存 · 多阶段构建 · Spring Boot 分层 jar · overlay2 · 本机实测</p>
+  <h1>改一行代码，只推一层：Docker 镜像分层与多阶段构建</h1>
+  <p class="lead">镜像是一叠<b>按内容寻址</b>的只读层，Dockerfile 里每一条改文件的指令就是一层。哪一层的内容变了，只有它和它上面的层要重建；推送和拉取时，仓库和节点上已经有的层一个字节都不用再传。所以<b>Dockerfile 怎么写，决定了每次发布要搬多少东西</b>。本机实测：同一个 order-svc，改一行代码，整个 fat jar 一层 COPY 要重新推 21.3 MB，按 Spring Boot 的四层拆开只推 3.9 KB；多阶段构建把 Maven 和源码留在构建阶段，镜像从 650 MB 降到 336 MB。</p>
+  <nav class="route" aria-label="六步学习路线">
+    <a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+    <a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+    <a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+    <a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+    <a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+    <a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+    <a href="#loop"><b>↺</b>回到⑤</a>
+  </nav>
+  <p class="where"><span>全景：<a href="../java/pano-j14-one-release.html#s-2">一次发布，从合并到回滚 · 第 2、3、7 站</a></span><span>地图：<a href="../java/roadmap.html#j14">J14 · Docker：镜像分层、多阶段构建</a></span><span>和 <a href="../agent/roadmap.html#st10">AI 地图站 10</a> 共用</span></p>
+  <p class="scene"><b>这一页的位置</b><span>J14 第 1 个知识点。容器的另一半，cgroup 怎么限制 CPU 和内存、JVM 怎么认它，在 <a href="../jvm/jvm-container.html">Java 在容器里</a> 讲过；这一页只讲镜像：它是什么、怎么构建、怎么搬。</span></p>
+</header>
+
+<!-- ① -->
+<section id="s1" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">①</span>为什么需要：在全景第 2、3 站，要把代码变成一个“搬到哪都一样”的包</h2>
+  </div>
+  <p class="lead">全景第 2 站，14:05，测试刚过。接下来这个包要走很远：推到 Harbor，再被第 7 站几个节点各拉一份，晚高峰 HPA 扩容时还要再拉。它要同时做到三件事：</p>
+  <div class="tiles4" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px">
+    <div class="tile" data-role="bk"><small>到哪都一样</small><b>一字节不差</b><span>测试环境验过的，就是生产跑的：JRE、系统库、时区、字体一起带上</span></div>
+    <div class="tile" data-role="pd"><small>每次发布</small><b>只搬变了的</b><span>依赖一个月才变一次，业务代码一天变几次</span></div>
+    <div class="tile" data-role="of"><small>第 7 站</small><b>拉得快、起得快</b><span>扩容时新节点要在几秒内拿到镜像</span></div>
+  </div>
+</section>
+
+<!-- ② -->
+<section id="s2" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">②</span>没有它会怎样：老办法，和“用了 Docker 但写错了”</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>能做到</th><th>放到第 2、3 站</th></tr></thead>
+      <tbody>
+        <tr><th><code>scp</code> 一个 jar，机器上装好 JDK，<code>start.sh</code> 启动</th><td>包小，二十几 MB</td><td class="bad">JDK 小版本、时区、系统字体、启动脚本各台机器不一样，“测试环境好好的”；加一台机器要先装一遍环境</td></tr>
+        <tr><th>虚拟机镜像</th><td>整台机器一起带上，一致性有了</td><td class="bad">几个 GB，改一行代码也要整盘重做、整盘分发，扩容要几分钟</td></tr>
+        <tr><th>Docker，单阶段：<code>FROM maven</code>，<code>COPY . .</code>，<code>RUN mvn package</code></th><td>一致性有了，也能分发</td><td class="bad"><span class="tag-real">实测</span> 镜像 650 MB，里面躺着 Maven、源码和整个本地依赖仓库；改一行代码，<code>COPY . .</code> 那层变了，下面的 <code>mvn package</code> 跟着重跑，依赖重新下载，要重新推 68 MB</td></tr>
+        <tr><th>Docker，多阶段，但整个 fat jar 一层 <code>COPY</code></th><td>镜像降到 336 MB</td><td class="bad"><span class="tag-real">实测</span> 改一行代码，21.3 MB 的 jar 整层重推、整层重拉，其中 99.9% 是没变过的依赖</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>缺的那一块：<b>把“变得慢的”和“变得快的”分到不同的层里，让每次只有变了的那一层被重建、被搬运</b>；同时让构建用的工具不进最终镜像。这就是分层加多阶段的全部用意。</p>
+  <div class="verdict" data-role="bad"><b>不懂这一点时的典型误用</b>：把 Dockerfile 当成一个 shell 脚本来写，<code>COPY . .</code> 放第一行，后面一个 <code>RUN</code> 里装工具、编译、清理全做完。能跑，可每次构建都从头来，每次发布都搬几十上百 MB。</div>
+</section>
+
+<!-- ③ -->
+<section id="s3" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">③</span>相邻方案：谁来把 jar 变成镜像</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>方案</th><th>怎么做</th><th>适合</th></tr></thead>
+      <tbody>
+        <tr class="pick"><th><b>Dockerfile 多阶段 + 分层 jar</b></th><td>自己写 Dockerfile；第一阶段编译，第二阶段按 Spring Boot 的四层 COPY</td><td class="good">要完全控制基础镜像、用户、启动参数；团队里已经有 Dockerfile 的习惯</td></tr>
+        <tr><th>Jib（Maven / Gradle 插件）</th><td>不写 Dockerfile，也不需要 Docker 守护进程，直接把依赖、资源、class 分层推到仓库</td><td>纯 Java 项目，CI 里没有 Docker；分层规则它已经替你定好</td></tr>
+        <tr><th>Cloud Native Buildpacks（<code>mvn spring-boot:build-image</code>）</th><td>按约定自动探测、自动选 JRE、自动分层</td><td>平台统一构建、统一打补丁，不想让每个团队维护 Dockerfile</td></tr>
+        <tr><th>虚拟机镜像、裸机 jar</th><td>见②</td><td>还没上容器的老系统</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">选择规则：后两种自动做的，其实就是“按变化频率分层”这件事。先把 Dockerfile 这条路弄懂，换成 Jib 或 Buildpacks 时就知道它们替你做了什么、出问题去哪看。本页学 Dockerfile 多阶段构建，配 Spring Boot 3.5 的分层 jar。</p>
+</section>
+
+<!-- ④ -->
+<section id="s4" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">④</span>原理：按内容寻址的一叠层，加一条“一层失效，上面全失效”的缓存链</h2>
+  </div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>容器就是一个普通的 Linux 进程</b>，只是内核给它套了两样东西：namespace 让它只看见自己的文件系统、进程号和网卡；cgroup 限制它能用多少 CPU 和内存。cgroup 那一半在 <a href="../jvm/jvm-container.html">Java 在容器里</a>；这一页讲它看见的那个文件系统从哪来，也就是镜像。</li>
+      <li><b>sha256 摘要（digest）</b>：对一段内容算出的 64 位十六进制串，内容差一个字节，摘要就完全不同。下面说的“按内容寻址”，就是用摘要当名字。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-layers">镜像是什么，容器又多了什么</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv" viewBox="0 0 960 400" role="img" aria-label="左边是镜像 order-svc:1.8.4，自下而上 8 组只读层：Ubuntu 24.04 基础层 101 MB，apt 装的系统包 46 MB，JRE 21 165 MB，入口脚本等两层，WORKDIR 和 useradd 两层，dependencies 23.6 MB，spring-boot-loader 和 snapshot-dependencies 两层是空的，最上面 application 只有 5.6 KB，每次发布只有它变。manifest 记着 config 和每一层的摘要。右边是容器：只读的镜像层叠在下面，上面加一层这个容器自己的可写层；进程看到的根目录是两者合并的结果。新建的文件写进可写层，改动的文件先整个复制上来再改，删除的文件留一个 whiteout 标记。">
+  <rect class="x-zone" x="16" y="16" width="488" height="372" rx="14"/>
+  <text class="x-zl" x="30" y="36">镜像 order-svc:1.8.4：只读，自下而上（大小：解压后 · 压缩后）</text>
+  <text class="x-ts" x="30" y="60">manifest：config 的摘要 + 11 层各自的摘要和大小。拉镜像就是先拿它，再拉本地没有的层。</text>
+  <g data-role="other">
+    <rect class="x-rs" x="30" y="344" width="300" height="28" rx="6"/><text class="x-t" x="40" y="363">Ubuntu 24.04 基础层</text><text class="x-mono dim" x="322" y="363" text-anchor="end">101 MB · 30.1 MB</text>
+    <rect class="x-rs" x="30" y="310" width="300" height="28" rx="6"/><text class="x-t" x="40" y="329">apt：系统包、证书、字体</text><text class="x-mono dim" x="322" y="329" text-anchor="end">46 MB · 17.0 MB</text>
+    <rect class="x-rs" x="30" y="276" width="300" height="28" rx="6"/><text class="x-t" x="40" y="295">JRE 21.0.13</text><text class="x-mono dim" x="322" y="295" text-anchor="end">165 MB · 52.4 MB</text>
+    <rect class="x-rs" x="30" y="242" width="300" height="28" rx="6"/><text class="x-t" x="40" y="261">入口脚本等 2 层</text><text class="x-mono dim" x="322" y="261" text-anchor="end">6 KB</text>
+  </g>
+  <g data-role="bk">
+    <rect class="x-rs" x="30" y="208" width="300" height="28" rx="6"/><text class="x-t" x="40" y="227">WORKDIR、useradd 2 层</text><text class="x-mono dim" x="322" y="227" text-anchor="end">5 KB</text>
+    <rect class="x-r" x="30" y="174" width="300" height="28" rx="6"/><text class="x-t" x="40" y="193">dependencies/：lib/*.jar</text><text class="x-mono" x="322" y="193" text-anchor="end">23.6 MB · 21.1 MB</text>
+    <rect class="x-rs" x="30" y="140" width="300" height="28" rx="6"/><text class="x-t" x="40" y="159">loader、snapshot 2 层</text><text class="x-mono dim" x="322" y="159" text-anchor="end">空</text>
+    <rect class="x-r" x="30" y="106" width="300" height="28" rx="6" style="stroke-width:3"/><text class="x-tb" x="40" y="125">application/：order-svc.jar</text><text class="x-mono" x="322" y="125" text-anchor="end">5.6 KB · 3.9 KB</text>
+  </g>
+  <text class="x-ts" x="342" y="290">基础镜像 eclipse-temurin</text>
+  <text class="x-ts" x="342" y="306">几十个服务共用</text>
+  <text class="x-ts" x="342" y="322">节点上通常已经有了</text>
+  <text class="x-tc" data-role="bk" x="342" y="193">一个月变一次</text>
+  <text class="x-tc" data-role="bk" x="342" y="125">每次发布都变</text>
+  <text class="x-ts" x="342" y="141">只有它要推、要拉</text>
+
+  <rect class="x-zone" x="520" y="16" width="424" height="372" rx="14"/>
+  <text class="x-zl" x="534" y="36">容器：镜像层 + 一层自己的可写层（overlay2）</text>
+  <g data-role="of">
+    <rect class="x-r" x="536" y="250" width="392" height="56" rx="10"/>
+    <text class="x-tb" x="550" y="273">merged：进程看到的 /</text>
+    <text class="x-ts" x="550" y="292">从上往下找，上面有就用上面的，像一摞透明胶片</text>
+  </g>
+  <g data-role="pd">
+    <rect class="x-rs" x="536" y="56" width="392" height="104" rx="10"/>
+    <text class="x-tb" x="550" y="79">UpperDir：这个容器自己的可写层</text>
+    <text class="x-mono" x="550" y="101">A /etc/hostname.bak   新建：直接写在这里</text>
+    <text class="x-mono" x="550" y="121">C /etc/bash.bashrc    改：先整个复制上来</text>
+    <text class="x-mono" x="550" y="141">D /etc/legal          删：留一个 whiteout 标记</text>
+  </g>
+  <g data-role="other">
+    <rect class="x-rs" x="536" y="172" width="392" height="62" rx="10"/>
+    <text class="x-tb" x="550" y="195">LowerDir：镜像的 11 层 + 1 个 init 层</text>
+    <text class="x-ts" x="550" y="215">只读；同一个镜像起的容器共用这一份</text>
+  </g>
+  <path class="x-ed" d="M506,190 H532" marker-end="url(#xa)"/>
+  <text class="x-ts" x="536" y="332">容器删了，UpperDir 跟着删，镜像层一点没变。</text>
+  <text class="x-ts" x="536" y="352">节点上 6 个 order-svc Pod 共用一份镜像层，各有各的可写层。</text>
+  <text class="x-ts" x="536" y="372"><tspan class="x-tc" data-role="done">实测</tspan>：右上三行就是 ⑤ 里 docker diff 的输出。</text>
+</svg>
+    </div>
+    <figcaption class="cap">左边的大小是 ⑤ 里 <code>docker history</code> 和本地仓库 manifest 读出来的实测值。一层就是一个 tar 包：这一层相对下面那层新增、修改、删除了哪些文件。</figcaption>
+  </figure>
+  <p><b>按内容寻址</b>是整个设计的地基：每一层用它内容的 sha256 当名字，镜像的 manifest 只是一张“我由哪几个摘要组成”的清单。推送时，仓库说“这个摘要我有了”，这一层就跳过；拉取时，节点上已经有的摘要也跳过。⑤ 里两个空层的摘要完全一样，仓库里也只存了一份。<b>tag 只是指向某个 manifest 的指针</b>，可以挪；摘要不能，<code>order-svc@sha256:…</code> 永远是同一份东西。</p>
+
+  <h3 id="m-cache">构建缓存：一层失效，上面全部重来</h3>
+  <div class="two">
+    <div class="codebox" data-role="bad"><div class="code-bar"><b>缓存全废的写法</b></div><pre><code>FROM maven:3.9.16-eclipse-temurin-21-noble
+WORKDIR /src
+COPY . .                    <span class="cm"># 任何文件变了，这层就变</span>
+RUN mvn -B package          <span class="cm"># 于是它也重跑：重新下载依赖</span>
+ENTRYPOINT ["java","-jar","target/order-svc.jar"]</code></pre></div>
+    <div class="codebox" data-role="bk"><div class="code-bar"><b>本页的写法（节选）</b></div><pre><code>COPY --from=build /x/dependencies/ ./           <span class="cm"># 依赖不变 → 命中缓存</span>
+COPY --from=build /x/spring-boot-loader/ ./
+COPY --from=build /x/snapshot-dependencies/ ./
+COPY --from=build /x/application/ ./           <span class="cm"># 只有这层变</span></code></pre></div>
+  </div>
+  <p>BuildKit 给每条指令算一个缓存键：<b>父层是谁</b> + <b>指令文本</b> + （<code>COPY</code>、<code>ADD</code> 还要加上）<b>被复制文件内容的校验和</b>。三样都没变，直接用上次的层；有一样变了，这一层重做，而它上面的每一层父层都变了，也只能跟着重做。所以 Dockerfile 的顺序就是一句话：<b>变得越少的放越下面</b>。注意 <code>RUN</code> 的缓存键里只有命令文本，不看它会下载什么：<code>RUN apt-get update</code> 命中缓存时，用的是很久以前那次的结果（⑥ 坑 1）。</p>
+
+  <h3 id="m-multi">多阶段：构建工具留在前面，最后一个阶段才是镜像</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+<svg class="sv" viewBox="0 0 960 236" role="img" aria-label="多阶段构建。左边是 build 阶段，基于 572 MB 的 maven 镜像：COPY pom.xml 和 src，RUN mvn package，依赖缓存挂载在 /root/.m2 不进层，再把 jar 拆成四个目录。右边是运行阶段，基于 312 MB 的 JRE 镜像，用 COPY --from=build 只拿四个目录。最终镜像只有右边的层，336 MB；单阶段会把左边全部带上，650 MB。">
+  <rect class="x-zone" x="16" y="16" width="440" height="180" rx="14"/>
+  <text class="x-zl" x="30" y="36">阶段 build：maven:3.9.16-eclipse-temurin-21-noble（572 MB）</text>
+  <g data-role="pd">
+    <rect class="x-rs" x="30" y="50" width="412" height="30" rx="6"/><text class="x-mono" x="40" y="70">COPY pom.xml . ／ COPY src ./src</text>
+    <rect class="x-rs" x="30" y="88" width="412" height="44" rx="6"/><text class="x-mono" x="40" y="106">RUN --mount=type=cache,target=/root/.m2 \</text><text class="x-mono" x="40" y="123">    mvn -B -q package -DskipTests</text>
+    <rect class="x-rs" x="30" y="140" width="412" height="44" rx="6"/><text class="x-mono" x="40" y="158">RUN java -Djarmode=tools -jar target/order-svc.jar \</text><text class="x-mono" x="40" y="175">    extract --layers --destination /x</text>
+  </g>
+  <path class="x-ed c" data-role="bk" d="M444,162 H520" marker-end="url(#xa)"/>
+  <text class="x-tc" data-role="bk" x="452" y="152">COPY --from</text>
+  <rect class="x-zone" x="524" y="16" width="420" height="180" rx="14"/>
+  <text class="x-zl" x="538" y="36">运行阶段：eclipse-temurin:21.0.13_9-jre-noble（312 MB）</text>
+  <g data-role="bk">
+    <rect class="x-rs" x="538" y="50" width="392" height="30" rx="6"/><text class="x-mono" x="548" y="70">RUN useradd … app ／ USER app</text>
+    <rect class="x-r" x="538" y="88" width="392" height="96" rx="6"/>
+    <text class="x-mono" x="548" y="108">COPY --from=build /x/dependencies/ ./</text>
+    <text class="x-mono" x="548" y="126">COPY --from=build /x/spring-boot-loader/ ./</text>
+    <text class="x-mono" x="548" y="144">COPY --from=build /x/snapshot-dependencies/ ./</text>
+    <text class="x-mono" x="548" y="162">COPY --from=build /x/application/ ./</text>
+    <text class="x-mono dim" x="548" y="178">ENTRYPOINT ["java","-jar","order-svc.jar"]</text>
+  </g>
+  <text class="x-ts" x="30" y="220">左边的 Maven、JDK、源码、target/ 都不进最终镜像；<tspan class="x-tc" data-role="done">实测</tspan> 最终镜像 336 MB（单阶段 650 MB）。依赖缓存挂载在 /root/.m2，跨构建保留，但不进任何一层。</text>
+</svg>
+    </div>
+  </figure>
+
+  <h3 id="m-why">为什么这样设计</h3>
+  <div class="two">
+    <div class="card" data-role="bk">
+      <h4>选中的：分层，按内容寻址，只读叠加</h4>
+      <p>一台节点上几十个容器、一个仓库里几千个镜像，大部分内容是重复的：同一个 Ubuntu、同一个 JRE、同一批 Spring 依赖。按内容命名，重复的东西天然只存一份、只传一次；层只读，所以可以放心共享；容器要写，就在最上面单独加一层，改动不碰共享的部分。</p>
+    </div>
+    <div class="card" data-role="other">
+      <h4>被放弃的：整盘快照（虚拟机镜像）</h4>
+      <p>把整个文件系统打成一个文件：简单，但两个只差一行代码的版本是两个几 GB 的文件，存储、传输、启动都按整盘算，什么都共享不了。按文件同步差量（rsync 那样）也不行：要先比较两端的状态，结果没法缓存成一个不可变、可以校验的对象。</p>
+    </div>
+  </div>
+  <p class="tip">决定胜负的约束：<b>同一份内容要在成千上万台机器之间反复搬，而且搬过去必须和原来一字节不差</b>。按内容寻址同时解决了去重、增量和校验三件事。代价是：层只能往上叠，下面的层删不掉东西（⑥ 坑 2），顺序一旦写错，缓存就全废。</p>
+
+  <div class="lab" data-role="bk" id="lab">
+    <h3 style="margin:0">实验台：改一处，哪些层要重建、要推送</h3>
+    <div class="guess" id="lab-guess">
+      <p>先猜：用本页的写法（多阶段 + 分层），改一行业务代码，第 3 站要往 Harbor 推多少？</p>
+      <div class="opts">
+        <button type="button" data-g="all">120 MB 左右，整个镜像</button>
+        <button type="button" data-g="jar">21 MB 左右，整个 jar</button>
+        <button type="button" data-g="kb">几 KB</button>
+      </div>
+      <p class="res" id="lab-guess-res" hidden></p>
+    </div>
+    <div class="ctl-grid" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">
+      <div><b style="font-size:14px">Dockerfile 写法</b>
+        <div class="pick2" id="lab-style" role="group" aria-label="Dockerfile 写法">
+          <button type="button" class="btn" data-v="single">单阶段</button>
+          <button type="button" class="btn" data-v="fatjar">多阶段，整 jar 一层</button>
+          <button type="button" class="btn primary" data-v="layered">多阶段 + 四层</button>
+        </div>
+      </div>
+      <div><b style="font-size:14px">这次改了什么</b>
+        <div class="pick2" id="lab-change" role="group" aria-label="这次改了什么">
+          <button type="button" class="btn primary" data-v="code">改一行业务代码</button>
+          <button type="button" class="btn" data-v="dep">加一个依赖</button>
+          <button type="button" class="btn" data-v="readme">只改 README，没写 .dockerignore</button>
+        </div>
+      </div>
+    </div>
+    <div class="stackbox" id="lab-stack" aria-live="polite"></div>
+    <p class="lab-res" data-role="bk" id="lab-sum"></p>
+    <p class="tip">“改一行业务代码”三种写法的数字是 ⑤ 实测；“加一个依赖”按新 jar 1 MB 估算；“改 README”按缓存规则推出来。大小都是推送时的压缩后大小。</p>
+  </div>
+</section>
+
+<!-- ⑤ -->
+<section id="s5" data-role="bk">
+  <div class="mech-h">
+    <h2><span class="sn">⑤</span>亲眼看到：同一个 order-svc，三种 Dockerfile，改一行代码</h2>
+  </div>
+  <p>一个最小的 order-svc（Spring Boot 3.5.16，web + actuator），三份 Dockerfile：单阶段、多阶段整 jar、多阶段四层。<code>run.sh</code> 先各构建一次 1.8.3，把 <code>VERSION</code> 改成 1.8.4 再各构建一次，比较两版之间哪些层的摘要变了；然后起一个本地镜像仓库（<code>registry:3.0.0</code>），两版都推上去，按 manifest 算第二次推送真正传了多少。最后顺手测了 ⑥ 的三个坑。</p>
+  <div class="two">
+    <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>docker/Dockerfile.layered</b><a href="https://github.com/archeu/study-labs/tree/main/java/cloudnative/docker-image-layers">完整代码 →</a></div><pre><code>FROM maven:3.9.16-eclipse-temurin-21-noble AS build
+WORKDIR /src
+COPY pom.xml .
+COPY src ./src
+RUN --mount=type=cache,target=/root/.m2 mvn -B -q package -DskipTests
+<span class="cm"># Spring Boot 3.3 起的写法：拆出瘦 jar + lib/，按层分到四个目录</span>
+RUN java -Djarmode=tools -jar target/order-svc.jar extract --layers --destination /x
+
+FROM eclipse-temurin:21.0.13_9-jre-noble
+WORKDIR /app
+RUN useradd --system --uid 10001 app
+COPY --from=build /x/dependencies/ ./
+COPY --from=build /x/spring-boot-loader/ ./
+COPY --from=build /x/snapshot-dependencies/ ./
+COPY --from=build /x/application/ ./
+USER app
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "order-svc.jar"]</code></pre></div>
+    <div class="codebox"><div class="code-bar"><b>怎么跑</b></div><pre><code><span class="cm"># 要 Docker 23 以上（默认用 BuildKit）；第一次会拉三个镜像，约 1 分钟</span>
+cd study-labs/java/cloudnative/docker-image-layers
+./run.sh                 <span class="cm"># 默认 sudo docker；在 docker 组里就 DOCKER=docker ./run.sh</span>
+cat out/results.txt
+./run.sh clean           <span class="cm"># 删掉本实验的镜像和容器</span>
+
+<span class="cm"># 自己看一个镜像的层</span>
+docker history lab/order-svc-layered:1.8.4
+docker image inspect -f '{{json .RootFS.Layers}}' lab/order-svc-layered:1.8.4
+
+<span class="cm"># .dockerignore：不让 target/、.git/ 进构建上下文</span>
+target/
+.git/
+*.md</code></pre></div>
+  </div>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>out/results.txt（节选）</b><span>2026-11-15 · 2 核 ARM · Docker 27.3.1 · Spring Boot 3.5.16 · JRE 21.0.13</span></div><pre class="console"><span class="w">== 1. 第一次构建（1.8.3），镜像大小</span>
+single:  镜像 <b>650 MB</b>，12 层
+fatjar:  镜像 <b>336 MB</b>，7 层
+layered: 镜像 <b>336 MB</b>，11 层
+基础镜像 eclipse-temurin:21.0.13_9-jre-noble：312 MB，5 层
+<span class="w">-- layered 的 docker history（新加的几层）</span>
+5.63kB   COPY /x/application/ ./
+0B       COPY /x/snapshot-dependencies/ ./
+0B       COPY /x/spring-boot-loader/ ./
+23.6MB   COPY /x/dependencies/ ./
+4.72kB   RUN useradd --system --uid 10001 app
+
+<span class="w">== 2. 改一行代码（VERSION 1.8.3 → 1.8.4）再构建：哪些层变了</span>
+single:  重建 <b>17.5 s</b>，12 层里变了 2 层          <span class="c">← COPY . . 和 mvn package，依赖重新下载</span>
+fatjar:  重建  5.3 s，7 层里变了 1 层
+layered: 11 层里变了 1 层                    <span class="c">← 构建阶段和 fatjar 一样，直接命中了缓存</span>
+
+<span class="w">== 3. 推到本地镜像仓库：第二次推送真正传了多少（压缩后）</span>
+single:  1.8.4 共 313.2 MB，要新传 2 层 <b>68.23 MB</b>
+fatjar:  1.8.4 共 120.7 MB，要新传 1 层 <b>21.30 MB</b>
+layered: 1.8.4 共 120.5 MB，要新传 1 层 <span class="hi">3905 字节</span>
+</pre></div>
+  <div class="lab-res" data-role="bk">
+    <b>看懂这次运行</b>
+    <ul>
+      <li>单阶段的 650 MB 里，有 572 MB 是 maven 镜像本身，剩下的是源码、<code>target/</code> 和 Maven 下载的依赖仓库。多阶段把这些都留在了构建阶段，最终镜像就是 JRE 基础镜像加 24 MB。</li>
+      <li>fatjar 和 layered 一样大，层数不同。区别全在“改一行代码”时：fatjar 那一层就是整个 jar，21.3 MB 整层换掉；layered 把 jar 拆开，变的只有 5.6 KB 的瘦 jar，压缩后 3.9 KB。依赖那 21.1 MB 的层摘要没变，仓库说“已经有了”。</li>
+      <li>单阶段重建要 17.5 秒，大半时间在重新下载依赖：<code>COPY . .</code> 那层变了，下面的 <code>RUN mvn package</code> 就不能用缓存，而且它下载的依赖还被写进了层里。多阶段用 <code>--mount=type=cache</code> 把 <code>/root/.m2</code> 挂成缓存，重建只要 5 秒左右。</li>
+      <li>这台机器上 Harbor 换成了本地 <code>registry:3.0.0</code>，原理一样：按层的摘要判断有没有。</li>
+    </ul>
+  </div>
+  <p><b>到这里已经能交差了</b>：一份多阶段、分层的 Dockerfile，改代码只重建、只推送几 KB。<b>已知还没处理的细节</b>：<code>.dockerignore</code> 和指令顺序（<a href="#p-order">坑 1</a>），删文件不会让镜像变小（<a href="#p-whiteout">坑 2</a>），密码别进构建参数（<a href="#p-secret">坑 3</a>），ENTRYPOINT 的写法决定了能不能优雅停机（<a href="#p-pid1">坑 4</a>）。</p>
+</section>
+
+<!-- ⑥ -->
+<section id="s6" data-role="bad">
+  <div class="mech-h">
+    <h2><span class="sn">⑥</span>细节·规范·优化</h2>
+  </div>
+  <h3>第一圈 · 不知道就会出事的</h3>
+  <div class="pits">
+    <div class="pit" id="p-order"><b><em>1</em>指令顺序写反，或者没有 .dockerignore<a class="rootmark" href="#m-cache">← ④ 一层失效，上面全失效</a></b>
+      <dl><dt>现象</dt><dd>每次构建都从头来，十几分钟；改了 README 也要重新打包、重新推几十 MB。</dd><dt>根源</dt><dd><code>COPY . .</code> 的缓存键包含所有被复制文件的校验和，<code>.git/</code>、<code>target/</code>、README 任何一个变了，这层和上面所有层都失效。反过来，<code>RUN apt-get update</code> 的缓存键只有命令文本，可能一直用着几个月前的软件源。</dd><dt>做法</dt><dd class="fix">写 <code>.dockerignore</code>；先 <code>COPY pom.xml</code>，再 <code>COPY src</code>；<code>apt-get update</code> 和 <code>install</code> 写在同一个 <code>RUN</code> 里；基础镜像定期升级，而不是指望缓存失效。</dd></dl>
+    </div>
+    <div class="pit" id="p-whiteout"><b><em>2</em>在后一层删掉大文件，以为镜像变小了<span class="seen">实测</span><a class="rootmark" href="#m-layers">← ④ 层只能往上叠</a></b>
+      <dl><dt>现象</dt><dd>本机实测：基础镜像 312 MB，一层生成 50 MB 的文件，下一层 <code>rm</code> 掉，镜像变成 <b>362 MB</b>。</dd><dt>根源</dt><dd>下面那层的 tar 包里还有这 50 MB；上面那层只是放了个 whiteout 标记，让合并后的视图里看不见它。推、拉、存都照样算。</dd><dt>做法</dt><dd class="fix">在同一个 <code>RUN</code> 里下载、使用、删除；或者放进构建阶段，只把结果 <code>COPY --from</code> 过来。</dd></dl>
+    </div>
+    <div class="pit" id="p-secret"><b><em>3</em>密码当构建参数传进去<span class="seen">实测</span><a class="rootmark" href="#m-layers">← ④ 每一层的来历都记在镜像里</a></b>
+      <dl><dt>现象</dt><dd><code>docker build --build-arg DB_PASSWORD=…</code>，任何能拉到镜像的人 <code>docker history --no-trunc</code> 一看：<code>RUN |1 DB_PASSWORD=s3cr3t-pw /bin/sh -c …</code>，明文。</dd><dt>根源</dt><dd>镜像的 config 里记着每一层是哪条指令生成的，用到构建参数的 <code>RUN</code> 会把参数值一起记下来。<code>COPY</code> 进去再删，文件也还在下面的层里（坑 2）。</dd><dt>做法</dt><dd class="fix">构建时要用的密钥走 <code>RUN --mount=type=secret</code>，不落到任何一层；运行时要用的密码根本不进镜像，由全景第 4 站的 Secret 注入成环境变量或文件。</dd></dl>
+    </div>
+    <div class="pit" id="p-pid1"><b><em>4</em>ENTRYPOINT 写成 shell 形式，停一次要 10 秒<span class="seen">实测</span><a class="rootmark" href="#m-layers">← ④ 容器就是一个进程</a></b>
+      <dl><dt>现象</dt><dd>本机实测：<code>ENTRYPOINT java $JAVA_OPTS -jar order-svc.jar</code>，1 号进程是 <code>/bin/sh -c …</code>，<code>docker stop</code> 等了 <b>10.2 秒</b>，退出码 137；写成 <code>["java","-jar","order-svc.jar"]</code>，1 号进程就是 java，<b>0.2 秒</b>优雅退出，退出码 143。</dd><dt>根源</dt><dd>停容器是给 1 号进程发 SIGTERM。shell 当 1 号进程时不把信号转给 java，等到超时，只能 SIGKILL（137 = 128 + 9）。Spring Boot 的优雅停机根本没机会跑。到了全景第 9 站，就是每个老 Pod 都要等满 30 秒被强杀，手上的请求全断。</dd><dt>做法</dt><dd class="fix">用 exec 形式；要拼 <code>$JAVA_OPTS</code> 就用 JVM 自己认的 <code>JAVA_TOOL_OPTIONS</code> 环境变量，或者在启动脚本最后一行写 <code>exec java …</code>。信号和退出码在 J14 最后一页细讲。</dd></dl>
+    </div>
+    <div class="pit" id="p-tag"><b><em>5</em>用 latest 或会被覆盖的 tag 发布<a class="rootmark" href="#m-layers">← ④ tag 是指针，摘要才是内容</a></b>
+      <dl><dt>现象</dt><dd>同一个 Deployment 里，有的 Pod 跑旧代码、有的跑新代码；回滚到“1.8”，回到的不知道是哪一次构建。</dd><dt>根源</dt><dd>tag 可以被重新指向别的 manifest。节点按 <code>IfNotPresent</code> 缓存了旧内容，就不会再去拉。</dd><dt>做法</dt><dd class="fix">一次构建一个新 tag（版本号 + git 提交号），不覆盖；要绝对确定就用 <code>@sha256:…</code> 摘要引用。基础镜像也写到小版本：<code>21.0.13_9-jre-noble</code>。</dd></dl>
+    </div>
+    <div class="pit" id="p-arch"><b><em>6</em>在 Mac（ARM）上构建，推到 x86 集群<a class="rootmark" href="#m-layers">← ④ 层里是编译好的二进制</a></b>
+      <dl><dt>现象</dt><dd>本地好好的，到了集群里容器一启动就退出，日志只有一行 <code>exec format error</code>，Pod 反复重启。</dd><dt>根源</dt><dd>JRE 和系统库是按 CPU 架构编译的，镜像有架构之分。本页的镜像是 <code>linux/arm64</code>（这台机器是 ARM）。</dd><dt>做法</dt><dd class="fix">在 CI 里构建；要多个架构就 <code>docker buildx build --platform linux/amd64,linux/arm64</code>，推成一个多架构清单，节点自己挑。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 团队里该怎么写</h3>
+  <ul class="rules-list">
+    <li><b>多阶段，运行阶段只用 JRE</b>：防构建工具和源码进生产镜像。要排查时再用临时容器带 JDK 工具上去（<a href="../observability/arthas-diagnosis.html#p-ctr">Arthas 那页坑 4</a>）。</li>
+    <li><b>按变化频率排顺序</b>：基础镜像 → 系统包 → 依赖 → 应用。防一次小改动把缓存全废掉。</li>
+    <li><b>基础镜像写到小版本，定期主动升级</b>：防“昨天能构建、今天行为变了”，也防安全补丁永远不进来。</li>
+    <li><b>非 root 用户运行</b>（<code>USER app</code>）：防容器被攻破后直接拿到 root。</li>
+    <li><b>ENTRYPOINT 用 exec 形式，一个容器一个进程</b>：防信号到不了 java，防一个进程挂了另一个还假装活着。</li>
+    <li><b>tag 用版本号 + 提交号，镜像里写上来源标签</b>（<code>org.opencontainers.image.revision</code>）：防线上镜像说不清是哪次提交打的。</li>
+  </ul>
+
+  <h3>第三圈 · 优化和深处</h3>
+  <div class="two">
+    <div class="card" data-role="pd">
+      <h4>缓存挂载：依赖下载不进层，也不白下</h4>
+      <p><code>RUN --mount=type=cache,target=/root/.m2</code> 让 BuildKit 在构建之间保留这个目录，但它不属于任何一层。<span class="tag-real">实测</span> 单阶段每次改代码重建 17.5 秒、依赖全部重新下载；多阶段带缓存挂载约 5 秒。CI 的机器每次都是新的时，还要把 BuildKit 缓存导出到仓库（<code>--cache-to</code> / <code>--cache-from</code>），否则缓存挂载每次都是空的。</p>
+    </div>
+    <div class="card" data-role="bk">
+      <h4>压缩后的摘要和解压后的 diffID</h4>
+      <p>同一层有两个名字：<code>docker image inspect</code> 里的 <code>RootFS.Layers</code> 是解压后 tar 的摘要（diffID），仓库 manifest 里的是压缩后的摘要。同样的文件用不同的压缩参数，压缩后摘要就不同。⑤ 里两个空层压缩后都是 93 字节、摘要相同，仓库只存了一份。</p>
+    </div>
+    <div class="card" data-role="of">
+      <h4>基础镜像怎么选</h4>
+      <p>这里用的 <code>eclipse-temurin:…-jre-noble</code> 解压后 312 MB，其中 Ubuntu 和系统包占 147 MB。更小的选择有 Alpine（musl libc，和 glibc 有细微差别）、distroless（没有 shell，排查不方便），或者用 <code>jlink</code> 只打包用到的 JDK 模块。越小越快，但排查手段越少；本页没有实测这几种。</p>
+    </div>
+    <div class="card" data-role="other">
+      <h4>版本差异</h4>
+      <p>Docker 23.0 起 Linux 上默认用 BuildKit，<code>RUN --mount</code> 才能直接用。Spring Boot 2.3 起支持分层 jar，3.3 起推荐 <code>-Djarmode=tools … extract --layers</code>，原来的 <code>-Djarmode=layertools</code> 被标为过时；不加 <code>--launcher</code> 时拆出来的是“瘦 jar + lib/”，直接 <code>java -jar</code> 启动。</p>
+    </div>
+  </div>
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>镜像安全：漏洞扫描（Trivy）、签名（cosign）、SBOM，CI 里卡住高危漏洞。</li>
+    <li>Jib 实操：同一个 order-svc 不写 Dockerfile，对比它的分层和这页的四层。</li>
+    <li>把 CDS / AOT 缓存放进镜像，加快第 7 站的启动（J14 第 4 个知识点）。</li>
+    <li>containerd 和 OCI 规范：Kubernetes 节点上没有 Docker，镜像是怎么被拉下来、解开的。</li>
+    <li>大镜像的懒加载（eStargz、镜像预热）：AI 服务几个 GB 的模型镜像怎么办，接 AI 地图站 10。</li>
+  </ul>
+</section>
+
+<!-- ↺ -->
+<section id="loop" data-role="other">
+  <div class="mech-h">
+    <h2><span class="sn">↺</span>回到⑤：改一改</h2>
+  </div>
+  <ol class="rules-list">
+    <li><b>顺序写反</b>：把 <code>Dockerfile.layered</code> 里 <code>application</code> 那行挪到 <code>dependencies</code> 前面，改一行代码重建、重推。这次推了多少？（坑 1）</li>
+    <li><b>加一个依赖</b>：在 <code>pom.xml</code> 里加 <code>spring-boot-starter-validation</code>，看 layered 哪几层变了，和实验台的估算对一对。</li>
+    <li><b>把密码藏好</b>：用 <code>RUN --mount=type=secret,id=db</code> 改写坑 3 的 Dockerfile，构建时 <code>--secret id=db,src=…</code>，再 <code>docker history --no-trunc</code> 确认看不到了。（坑 3）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>镜像是按内容寻址的一叠只读层，每层用摘要当名字；构建时一层失效、上面全部重做，推拉时已有的摘要直接跳过。所以把变得少的放下面、把构建工具留在前一个阶段，每次发布就只搬变了的那几 KB。</p></details>
+    <details><summary>2. 老办法（jar + 装好环境的机器、虚拟机镜像、单阶段 Dockerfile）各疼在哪？</summary><p>jar 加机器：环境各不相同，扩容要先装环境。虚拟机镜像：一致了，但每次整盘几个 GB，什么都不能共享。单阶段 Dockerfile：一致、能分发，但镜像里带着 Maven 和依赖仓库，改一行代码缓存就废掉，每次重推几十 MB。</p></details>
+    <details><summary>3. 坑 2（删了文件镜像不变小）的根源是 ④ 的哪一条？</summary><p>层只能往上叠：每一层是相对下面那层的差异，删除只是在上层放一个 whiteout 标记，下面那层的 tar 包里内容还在，推、拉、存都照算。</p></details>
+    <details><summary>4. 预测：节点上已经有 order-svc 1.8.3（layered 写法），第 7 站拉 1.8.4 要下载多少？如果是 fatjar 写法呢？</summary><p>layered：只差 application 那一层，压缩后约 3.9 KB，几乎瞬间拉完。fatjar：要拉整个 jar 那层，约 21.3 MB。基础镜像层两种写法都已经在节点上了。推导和推送一样：按摘要比，有的跳过。</p></details>
+    <details><summary>5. 预测：基础镜像从 21.0.13 升到 21.0.14，用本页的写法重建，会发生什么？要推多少？</summary><p>JRE 那层内容变了，它和上面所有层在构建时都要重做（父层变了，缓存键全变）。但 COPY 进去的依赖和应用文件内容没变，重做出来的层多半和原来一样，仓库里已经有，不用再推；真正要推的主要是新的 JRE 层，压缩后约 50 MB。这里是按机制推出来的，本页没有实测。</p></details>
+    <details><summary>6. 放回全景：第 2、3 站前后各是什么？如果 1.8.4 的镜像是在 ARM 笔记本上打的、集群是 x86，整条发布链会怎样？</summary><p>前面是第 1 站 CI 跑测试，后面是第 4 站改部署清单、Argo CD 同步。镜像架构不对时，第 5、6 站都正常（控制器和调度器不看镜像内容），到第 7 站容器一启动就 <code>exec format error</code>，第 8 站的探针永远过不了，新 Pod 反复重启。因为 <code>maxUnavailable: 0</code>，老 Pod 一个都不会被停，用户没感觉；滚动卡在第 1 个新 Pod 上，到 <code>progressDeadlineSeconds</code> 才报失败，要靠人回滚。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM 虚拟机，Docker 27.3.1 + BuildKit，Spring Boot 3.5.16，基础镜像 <code>eclipse-temurin:21.0.13_9-jre-noble</code>，构建阶段 <code>maven:3.9.16-eclipse-temurin-21-noble</code>，本地仓库 <code>registry:3.0.0</code>）：<code>./run.sh</code> 完整一次，⑤ 和坑 2、3、4 的数字都来自这次运行，application 层 3905 字节是又推了一次、从 manifest 读出来的。“加一个依赖”和“升级基础镜像”是按机制估算。实验台的模拟逻辑在 node 里跑过，“改一行代码”三种写法和实测一致。</p>
+  <p>按文档：BuildKit 的缓存键由父层、指令和 COPY/ADD 文件的校验和决定；<code>RUN --mount=type=cache</code> 和 <code>type=secret</code> 的内容不进层；多阶段构建的最终镜像只包含最后一个阶段；Spring Boot 分层 jar 默认四层 dependencies、spring-boot-loader、snapshot-dependencies、application；Docker 23.0 起 Linux 默认构建器是 BuildKit；容器停止时向 1 号进程发 SIGTERM，超时（<code>docker stop</code> 默认 10 秒）后发 SIGKILL。</p>
+  <p>相关：<a href="../java/pano-j14-one-release.html">全景：一次发布，从合并到回滚</a> · <a href="../jvm/jvm-container.html">Java 在容器里</a> · <a href="../observability/arthas-diagnosis.html">Arthas 线上诊断</a> · <a href="../java/roadmap.html#j14">Java 地图 J14</a></p>
+</footer>
+</main>
+<script>
+/*SIM-START*/
+// 每种写法的层（自下而上），mb = 推送时压缩后的大小（实测；加依赖时 +1 MB 是估算）
+// on: 这一层的输入被哪些改动直接改变；volatile: 重跑一次内容就会变（RUN mvn 写进了时间戳和下载的文件）
+const STYLES = {
+  single: [
+    { name: "maven 基础镜像（JDK 21 + Maven）", mb: 245.0, base: true },
+    { name: "WORKDIR /src", mb: 0.0001 },
+    { name: "COPY . .（pom、src、README……）", mb: 0.01, on: ["code", "dep", "readme"] },
+    { name: "RUN mvn package（target/ + 下载的依赖）", mb: 68.2, volatile: true, depGrow: 1 },
+  ],
+  fatjar: [
+    { name: "eclipse-temurin JRE 基础镜像（5 层）", mb: 99.4, base: true },
+    { name: "WORKDIR /app", mb: 0.0001 },
+    { name: "COPY order-svc.jar（整个 fat jar）", mb: 21.3, on: ["code", "dep"], depGrow: 1 },
+  ],
+  layered: [
+    { name: "eclipse-temurin JRE 基础镜像（5 层）", mb: 99.4, base: true },
+    { name: "WORKDIR、useradd", mb: 0.0012 },
+    { name: "COPY dependencies/（lib/*.jar）", mb: 21.12, on: ["dep"], depGrow: 1 },
+    { name: "COPY spring-boot-loader/、snapshot-dependencies/", mb: 0.0002 },
+    { name: "COPY application/（瘦 jar）", mb: 0.0039, on: ["code", "dep"] },
+  ],
+};
+// 返回自上而下的层和每层的状态：reuse 直接用缓存；rerun 重做了但内容没变（摘要相同，不用推）；push 重做且内容变了
+function plan(style, change) {
+  const layers = STYLES[style];
+  let below = false;
+  const out = layers.map(l => {
+    const direct = !!(l.on && l.on.includes(change));
+    const rebuilt = !l.base && (direct || below);
+    if (rebuilt) below = true;
+    const changed = rebuilt && (direct || !!l.volatile);
+    const mb = l.mb + (change === "dep" && l.depGrow ? l.depGrow : 0);
+    return { name: l.name, mb, state: changed ? "push" : rebuilt ? "rerun" : "reuse" };
+  });
+  const pushMB = out.filter(l => l.state === "push").reduce((s, l) => s + l.mb, 0);
+  const totalMB = out.reduce((s, l) => s + l.mb, 0);
+  return { layers: out.reverse(), pushMB, totalMB, pct: pushMB / totalMB * 100 };
+}
+function fmtMB(mb) {
+  if (mb === 0) return "0";
+  if (mb < 0.001) return Math.round(mb * 1e6) + " 字节";
+  if (mb < 0.1) return (mb * 1000).toFixed(1) + " KB";
+  return mb.toFixed(1) + " MB";
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  let style = "layered", change = "code";
+  const LABEL = { reuse: "用缓存", rerun: "重做，摘要没变，不用推", push: "重做并推送" };
+  const NAMES = { single: "单阶段", fatjar: "多阶段、整 jar 一层", layered: "多阶段 + 四层" };
+  const CH = { code: "改一行业务代码", dep: "加一个依赖", readme: "只改 README（没写 .dockerignore）" };
+  function render() {
+    const p = plan(style, change);
+    $("#lab-stack").innerHTML = p.layers.map(l =>
+      `<div class="stk-row ${l.state}"><span class="stk-n">${l.name}</span><span class="stk-s">${fmtMB(l.mb)}</span><span class="stk-t">${LABEL[l.state]}</span></div>`).join("");
+    const n = p.layers.filter(l => l.state === "push").length;
+    let msg = `<b>${NAMES[style]}</b>，${CH[change]}：` + (n
+      ? `要推 ${n} 层，共 <b>${fmtMB(p.pushMB)}</b>，占整个镜像（压缩后 ${fmtMB(p.totalMB)}）的 ${p.pct < 0.1 ? "不到 0.1" : p.pct.toFixed(1)}%。`
+      : `没有一层的内容变了，<b>什么都不用推</b>。`);
+    if (style === "single" && change !== "dep") msg += " 依赖也被重新下载了一遍：它们写在 RUN mvn 那一层里。";
+    if (change === "readme" && style !== "single") msg += " 多阶段只 COPY 了 pom.xml 和 src/，README 根本不在缓存键里。";
+    if (change === "dep" && style === "layered") msg += " 瘦 jar 的清单里列着 lib/ 下的每个 jar，所以 application 层也跟着变。";
+    $("#lab-sum").innerHTML = msg;
+    $$("#lab-style button").forEach(b => b.classList.toggle("primary", b.dataset.v === style));
+    $$("#lab-change button").forEach(b => b.classList.toggle("primary", b.dataset.v === change));
+  }
+  $$("#lab-style button").forEach(b => b.addEventListener("click", () => { style = b.dataset.v; render(); }));
+  $$("#lab-change button").forEach(b => b.addEventListener("click", () => { change = b.dataset.v; render(); }));
+  // 先猜
+  $$("#lab-guess .opts button").forEach(b => b.addEventListener("click", () => {
+    $$("#lab-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", "false"); });
+    b.setAttribute("aria-pressed", "true");
+    const ok = b.dataset.g === "kb";
+    b.classList.add(ok ? "right" : "wrong");
+    if (!ok) $('#lab-guess [data-g="kb"]').classList.add("right");
+    style = "layered"; change = "code"; render();
+    const r = $("#lab-guess-res");
+    r.hidden = false;
+    r.innerHTML = (ok ? "猜对了。" : "实测是 3905 字节。") + "基础镜像和依赖层的摘要都没变，仓库里已经有了；变的只有 application 那一层里 5.6 KB 的瘦 jar。决定它的是 ④ 的两条：按内容寻址（有就跳过），和缓存链（依赖层在下面，没被应用层拖着失效）。";
+  }));
+  render();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

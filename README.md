@@ -258,3 +258,9 @@
 | 04 | [进 JVM 看一眼：Arthas 线上诊断](https://archeu.github.io/study-notes/observability/arthas-diagnosis.html) | Attach API 加载 agent、只读命令和 retransformClasses 增强命令、只看得到增强后进入的调用，本机复现全景第 9 站：thread 找到 10 个对账线程、栈里事务等渠道、vmtool 读出池子 10 active 4 waiting、jad、trace 20 秒 100% 在 queryOrder、watch 参数返回值，高频 trace、忘了 stop、容器 attach、热改代码等坑，增强时机时间线 |
 | 05 | [先止血，再找因：排查方法论，从现象到根因](https://archeu.github.io/study-notes/observability/triage-method.html) | 第二圈：值班排查七步路线（定级、止血先留现场、RED 先整体、按实例和 USE 拆、链路往下剥、问变更、假设验证），RED、USE、变更优先、科学方法、事故指挥各管一段，先重启、确认偏误、修症状、没发布就没变更等误用，证据引用前几页实测，凌晨三点排查推演 |
 | 06 | [对事不对人：故障复盘，时间线、根因、改进项](https://archeu.github.io/study-notes/observability/postmortem-review.html) | 复盘七步、对事不对人、瑞士奶酪模型、五个为什么分清根因诱因和促成因素、MTTD 和 MTTR 各由哪类改进缩短，用 Prometheus 实测原始事件自动生成时间线，全景那次故障的完整复盘文档，改进项评审器，四个刻意练习 |
+
+## 云原生与交付
+
+| # | 页面 | 内容 |
+|---|------|------|
+| 01 | [改一行代码，只推一层：Docker 镜像分层与多阶段构建](https://archeu.github.io/study-notes/cloudnative/docker-image-layers.html) | J14 第 1 个知识点：镜像是按内容寻址的一叠只读层、manifest 和摘要、overlay2 可写层与 copy-up、whiteout，BuildKit 缓存键和“一层失效上面全失效”，多阶段构建，Spring Boot 四层 jar；本机实测单阶段 650 MB 对多阶段 336 MB，改一行代码推 68.2 MB / 21.3 MB / 3.9 KB，删文件不变小、构建参数留在历史里、shell 形式 ENTRYPOINT 停机 10 秒，改哪层推多少实验台 |
