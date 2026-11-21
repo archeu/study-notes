@@ -1,0 +1,884 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>设计题：LRU、LFU 与限流，行情快照缓存和每账户每秒 20 单</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* 本页：布局、六个角色色各代表什么、有哪些交互，写在这里 */
+/* learn 六步页的基础样式（固定一份，不要从别的页面抄）。配色：pd bk cg g2 rn of 六个角色色，warn / bad / good / neutral 含义固定。
+   组件写法见 assets/skeleton.html。本页特有的样式写在文件末尾的标记后面，不改上面的规则。 */
+:root{--paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;}
+}
+:root[data-theme="dark"]{--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;}
+*{box-sizing:border-box}
+body{background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){
+  *{transition:none!important;scroll-behavior:auto!important}
+}
+html{scroll-behavior:smooth}
+section[id],.sub[id],.pit[id],figure[id]{scroll-margin-top:64px}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)}
+.f-of{fill:var(--of)}
+.f-cg{fill:var(--cg)}
+.f-g2{fill:var(--g2)}
+.f-bad{fill:var(--bad)}
+.f-pd{fill:var(--pd)}
+.f-bk{fill:var(--bk)}
+.f-good{fill:var(--good)}
+.f-rn{fill:var(--rn)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mech-h .sn{font-size:20px}
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p,details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+@media (max-width:980px){
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .two,.design,.pits,.rules-list,.next{grid-template-columns:1fr}
+}
+@media (max-width:520px){
+  .presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+table.t td.bad,table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.s{color:var(--of)}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.cap{font-size:13.5px;color:var(--muted)}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){
+  .steps-out li{grid-template-columns:minmax(0,1fr)}
+}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try code{overflow-wrap:anywhere}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){
+  .tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+.x-box{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.x-zone{fill:none;stroke:var(--line-strong);stroke-width:1.3;stroke-dasharray:6 5}
+.x-zl{font-size:12px;fill:var(--muted)}
+.x-r{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.x-rs{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.x-fill{fill:var(--rc)}
+.x-t{font-size:13px;fill:var(--ink)}
+.x-tb{font-size:13.5px;font-weight:700;fill:var(--ink)}
+.x-ts{font-size:11.5px;fill:var(--muted)}
+.x-tc{font-size:12px;font-weight:700;fill:var(--rc)}
+.x-mono{font-family:var(--font-mono);font-size:11px;fill:var(--ink)}
+.x-mono.dim{fill:var(--muted)}
+.x-mono.bad{fill:var(--bad);font-weight:600}
+.x-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.x-ed{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.x-ed.dash{stroke-dasharray:5 4}
+.x-ed.bad{stroke:var(--bad)}
+.x-ed.c{stroke:var(--rc);stroke-width:2}
+.x-mk{fill:var(--line-strong)}
+.x-mkb{fill:var(--bad)}
+.fig-box{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card);padding:10px}
+.fig-box > svg{min-width:760px;width:100%;display:block}
+.swipe{display:none;font-size:13px;color:var(--muted);margin:0 0 4px}
+@media (max-width:800px){
+  .swipe{display:block}
+}
+.ids{font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ids .a{color:var(--cg);font-weight:600}
+.ids .b{color:var(--of);font-weight:600}
+.verdict-box{font-size:14.5px;padding:10px 14px;border-radius:12px;border:2px solid var(--rc);background:var(--rt)}
+.knob-row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end}
+.knob-row label{display:flex;flex-direction:column;gap:4px;font-size:13.5px;color:var(--muted)}
+.knob-row select{font:inherit;font-size:14px;padding:4px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){
+  .ctl-grid{grid-template-columns:1fr!important}
+}
+.codebox pre .bad{color:var(--bad);font-weight:600}
+.codebox pre .ok{color:var(--good);font-weight:600}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.sv .fade{opacity:.25;transition:opacity .25s}
+.sv .lit{opacity:1;transition:opacity .25s}
+.sv .lit .x-rs,.sv .lit .x-r{stroke-width:3}
+/* ===== 本页特有的样式写在这一行下面 ===== */
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>算法基础</span><span aria-hidden="true">/</span><span class="tb-here">第 24 课 · LRU、LFU 与限流</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs><marker id="xa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="x-mk"/></marker></defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">算法基础 · 第 24 课 · 设计题 · LRU · LFU · 令牌桶 · HashMap + 双向链表 · JDK 17 实测</p>
+  <h1>设计题：LRU、LFU 与限流，行情快照缓存和每账户每秒 20 单</h1>
+  <p class="lead">设计题考的不是新算法，而是<b>把已经学过的结构拼起来，让每个操作都是 O(1)</b>：LRU = 哈希表 + 双向链表，LFU = 哈希表 + 按次数分的桶 + 一个最小次数，每账户限流 = 哈希表 + 懒补充的令牌桶 + LRU 淘汰账户。再往上一层是取舍：<b>LRU 怕扫描，LFU 怕热点漂移</b>。</p>
+  <nav class="route" aria-label="六步学习路线">
+<a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+<a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+<a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+<a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+<a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+<a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+<a href="#loop"><b>↺</b>回到⑤</a>
+</nav>
+  <p class="where"><span>全景：<a href="pano-algo-trading-day.html#s-11">撮合引擎的一天 · 第 11 站</a>（限流在<a href="pano-algo-trading-day.html#s-4">第 4 站</a>）</span><span>地图：<a href="../java/roadmap.html#j01">J01 · 数据结构与算法</a></span><span>上一课：<a href="kmp-trie.html">第 23 课 · KMP 与 Trie</a></span><span>深度：懂设计</span></p>
+  <p class="scene"><b>这一页的位置</b><span>第六圈第二课，把第一、二圈拼起来用：<a href="linked-list.html">第 4 课的双向链表和哨兵</a>、<a href="hash-table.html">第 8 课的哈希表</a>。已有两页讲过相邻的东西，这里不重讲：<a href="../javase/hashmap-relatives.html#m-lru">LinkedHashMap 一行实现 LRU</a>、<a href="../arch/rate-limit-algorithms.html">五种限流算法对比</a>；本页讲面试要你<b>手写</b>的那一层，以及“每个账户一个限流器”这个它们没讲的问题。</span></p>
+</header>
+
+<section id="s1" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">①</span>要解决的问题：容量有限，该踢谁；人数很多，怎么分别限</h2></div>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 200" role="img" aria-label="左：行情快照缓存只放得下 100 个交易对，交易对有 1 万个，满了要踢一个。右：每个账户每秒最多 20 单，账户有几百万个，大多数很少下单">
+        <g data-role="pd"><rect class="x-r" x="12" y="14" width="456" height="172" rx="12"/><text class="x-tc" x="28" y="38">第 11 站 · 行情快照缓存</text>
+          <text class="x-tb" x="28" y="68">容量 100 个，交易对 1 万个</text>
+          <text class="x-ts" x="28" y="94">BTC-USDT、ETH-USDT 一秒被看几千次</text>
+          <text class="x-ts" x="28" y="116">冷门的一天几次；收盘报表会把冷门的全扫一遍</text>
+          <text class="x-ts" x="28" y="148">要求：get / put 都 O(1)；满了踢“以后最不会用的”</text></g>
+        <g data-role="g2"><rect class="x-r" x="492" y="14" width="456" height="172" rx="12"/><text class="x-tc" x="508" y="38">第 4 站 · 每账户限频</text>
+          <text class="x-tb" x="508" y="68">每个账户每秒最多 20 单</text>
+          <text class="x-ts" x="508" y="94">账户几百万个，活跃的几万个</text>
+          <text class="x-ts" x="508" y="116">一个账户刷单，不能影响别的账户</text>
+          <text class="x-ts" x="508" y="148">要求：每单判断 O(1)；内存不随“来过的账户”无限涨</text></g>
+      </svg>
+    </div>
+    <figcaption>两个都是面试高频设计题（LeetCode 146 LRU、460 LFU），也都是撮合系统里真实的需求。</figcaption>
+  </figure>
+</section>
+
+<section id="s2" data-role="other">
+  <div class="mech-h"><h2><span class="sn">②</span>不用它会怎样</h2></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>会怎样</th></tr></thead>
+      <tbody>
+        <tr><th>缓存用普通 <code>HashMap</code>，只放不删</th><td class="bad">1 万个交易对的快照迟早全进来；换成订单号、用户 id 当 key，就是 OOM</td></tr>
+        <tr><th>满了随便踢一个 / 踢最早进来的（FIFO）</th><td class="bad">BTC-USDT 最早进来，最先被踢，下一秒又要重建；⑤ 实测 FIFO 命中率 34%，LFU 50%</td></tr>
+        <tr><th>每次踢“最久没用的”：遍历所有 key 找最旧的时间戳</th><td class="bad">每次 put O(n)；第 3 课的估算：缓存 10 万个、每秒几千次 put 就不行了</td></tr>
+        <tr><th>每个账户一个定时任务，每秒把令牌补满</th><td class="bad">几百万个定时任务；不活跃的账户也在被补</td></tr>
+        <tr><th>限流表 <code>HashMap&lt;账户, 桶&gt;</code>，只加不删</th><td class="bad">来过的账户越来越多，表只涨不跌</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="verdict" data-role="bad"><b>不懂精华时的典型误用</b>：把 LRU 写成“HashMap 存值 + 每个值带一个最近访问时间”，淘汰时找最小时间。功能对，复杂度错了：精华在于让“最旧的那个”永远在链表尾巴上，<b>不用找</b>。</div>
+</section>
+
+<section id="s3" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">③</span>几种流派：踢谁的问题</h2></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>策略</th><th>踢谁</th><th>押的是</th><th>怕什么</th></tr></thead>
+      <tbody>
+        <tr><th>FIFO</th><td>最早进来的</td><td>什么都不押</td><td class="bad">把常用的也按时踢掉</td></tr>
+        <tr class="pick"><th><b>LRU</b></th><td>最久没被用的</td><td>最近用过的，马上还会用（时间局部性）</td><td class="bad">一次扫描把热数据全挤走</td></tr>
+        <tr class="pick"><th><b>LFU</b></th><td>被用次数最少的</td><td>用得多的，以后也用得多</td><td class="bad">过去的热点赖着不走，新热点进不来</td></tr>
+        <tr><th>W-TinyLFU（Caffeine）</th><td>新来的要和将被踢的比“近期频次”，赢了才进</td><td>近期频次，用计数草图 + 定期减半</td><td>实现复杂，自己不写，用库</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页手写 LRU 和 LFU</b>：面试必考，也是理解 Caffeine 为什么要那样设计的前提。生产里的本地缓存直接用 <a href="../redis/cache-multilevel.html">Caffeine</a>；限流算法怎么选看 <a href="../arch/rate-limit-algorithms.html">限流算法</a>那页，本页只用令牌桶。</p>
+</section>
+
+<section id="s4" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">④</span>核心取舍：每个操作 O(1)，靠两个结构互相指</h2></div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>双向链表 + 哨兵</b>：知道节点就能 O(1) 摘下、O(1) 插到头部；head、tail 两个哨兵让边界不用判空。见 <a href="linked-list.html">第 4 课</a>。</li>
+      <li><b>哈希表</b>：按 key O(1) 找到东西，但没有顺序。见 <a href="hash-table.html">第 8 课</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-lru">取舍 1 · LRU：哈希表负责“找到”，链表负责“排队”</h3>
+  <p>哈希表的值不是缓存的值，而是<b>链表节点</b>。get：哈希表找到节点 → 从链表里摘下 → 插到头部。put 满了：直接摘链表尾巴（就是最久没用的）→ 从哈希表里删它的 key（所以节点里要存 key）。</p>
+  <div class="stepper" id="stp" tabindex="0" aria-label="分步动画：容量 3 的 LRU，依次 put 和 get，看链表顺序怎么变，左右方向键切换">
+    <div class="st-ctl">
+      <button class="btn" type="button" id="st-prev">← 上一步</button>
+      <button class="btn primary" type="button" id="st-next">下一步 →</button>
+      <button class="btn" type="button" id="st-auto" aria-pressed="false">自动播放</button>
+      <button class="btn" type="button" id="st-reset">从头来</button>
+      <span class="pos" id="st-pos" aria-live="polite"></span>
+    </div>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box"><svg class="sv" viewBox="0 0 960 220" role="img" aria-label="上面一行是 HashMap 里有哪些 key，下面是 head 到 tail 的双向链表，越靠近 head 越是最近用过的">
+      <text class="x-tb" x="16" y="34">HashMap</text>
+      <g id="lru-map"></g>
+      <g data-role="other"><rect class="x-r" x="16" y="96" width="90" height="56" rx="10"/><text class="x-tb" x="34" y="129">head</text><rect class="x-r" x="734" y="96" width="90" height="56" rx="10"/><text class="x-tb" x="756" y="129">tail</text></g>
+      <g id="lru-list"></g>
+      <text class="x-ts" x="16" y="186">← 最近用过</text><text class="x-ts" x="650" y="186">最久没用 → 满了踢这个</text>
+      <g id="lru-out" data-role="bad"></g>
+    </svg></div>
+    <div class="st-cap" data-role="of" id="st-cap"><b class="h">准备</b>点“下一步”。</div>
+  </div>
+
+  <h3 id="m-lfu">取舍 2 · LFU：再加一层“按次数分桶”，最小次数能直接维护</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 210" role="img" aria-label="LFU 的结构：freq 表记每个 key 的次数；buckets 表按次数分桶，次数 1 的桶里是 SOL，次数 2 的是 ETH，次数 3 的是 BTC；minFreq 等于 1，满了就踢次数 1 的桶里最早的那个">
+        <g data-role="pd"><rect class="x-r" x="16" y="20" width="250" height="170" rx="12"/><text class="x-tc" x="32" y="44">freq：key → 次数</text><text class="x-mono" x="32" y="80">BTC → 3</text><text class="x-mono" x="32" y="106">ETH → 2</text><text class="x-mono" x="32" y="132">SOL → 1</text><text class="x-ts" x="32" y="170">（vals 表存值，同理）</text></g>
+        <g data-role="bk"><rect class="x-r" x="300" y="20" width="400" height="170" rx="12"/><text class="x-tc" x="316" y="44">buckets：次数 → 这些 key（先来先出）</text>
+          <text class="x-mono" x="316" y="80">3 → [BTC]</text><text class="x-mono" x="316" y="106">2 → [ETH]</text><text class="x-mono" x="316" y="132">1 → [SOL]   ← 满了踢这里最早的</text>
+          <text class="x-ts" x="316" y="170">访问一次：从 f 桶挪到 f+1 桶，O(1)</text></g>
+        <g data-role="rn"><rect class="x-rs" x="730" y="20" width="214" height="170" rx="12"/><text class="x-tc" x="746" y="44">minFreq = 1</text><text class="x-ts" x="746" y="76">新 key 进来：一定是 1</text><text class="x-ts" x="746" y="100">访问让 f 桶空了，</text><text class="x-ts" x="746" y="122">且 f 是最小：变成 f+1</text><text class="x-ts" x="746" y="156">从不用“找”最小值</text></g>
+      </svg>
+    </div>
+    <figcaption>关键在 minFreq：次数只会一次 +1，新来的一定是 1，所以最小次数只有两种变法，都能当场算出，不需要堆（第 6 课的堆是 O(log n)）。桶用 <code>LinkedHashSet</code>，同次数时踢最早的，等于在每个桶里套了一个 LRU。</figcaption>
+  </figure>
+
+  <h3 id="m-limit">取舍 3 · 每账户限流：懒补充的令牌桶，账户表也要淘汰</h3>
+  <div class="two">
+    <div class="card" data-role="g2"><h4>懒补充：不用定时任务</h4><p>每个桶只存两个数：剩余令牌 <code>tokens</code>、上次时间 <code>last</code>。请求来时先补：<code>tokens = min(20, tokens + (now − last) × 20/秒)</code>，再扣 1。不来请求的账户不花任何 CPU。（算法本身见 <a href="../arch/rate-limit-algorithms.html#m-lazy">限流算法 · 懒计算</a>。）</p></div>
+    <div class="card" data-role="pd"><h4>账户表本身是个缓存</h4><p><code>HashMap&lt;账户, 桶&gt;</code> 会被“来过一次的账户”撑大。把它做成 LRU，最久没来的先踢。<b>踢掉不会放错</b>：被踢说明很久没来，它的桶早就补满了；下次来时新建一个满桶，结果一样。</p></div>
+  </div>
+
+  <h3 id="m-design">核心取舍：LRU 押“最近”，LFU 押“常用”</h3>
+  <div class="design">
+    <div class="card" data-role="pd"><h3>LRU</h3><ul class="pains"><li class="ok">新热点一来就能进，适应快</li><li class="ok">结构简单，一张哈希表一条链表</li><li class="bad">报表扫一遍 500 个冷门交易对，容量 100 的缓存被冲干净</li></ul></div>
+    <div class="card" data-role="bk"><h3>LFU</h3><ul class="pains"><li class="ok">扫描进来的次数都是 1，热门的次数几千，扫描冲不动</li><li class="bad">昨天的热门攒了几万次，今天没人看也踢不掉；新热点要从 1 爬起</li><li>还要多存次数和桶</li></ul></div>
+  </div>
+  <div class="verdict" data-role="pd"><b>决定胜负的约束</b>：访问模式。热点稳定、偶有扫描：LFU 赢；热点常变：LRU 赢。真实流量两样都有，所以 Caffeine 的 W-TinyLFU 两个都要：一个小的 LRU 窗口接住新来的，主区按“近期频次”（定期减半，让旧热点过气）决定谁留下。</div>
+
+  <div class="codebox"><div class="code-bar"><b>LRU 的核心四行</b><span>完整的在 ⑤</span></div><pre><code>Map&lt;K, Node&gt; map;  Node head, tail;           <span class="cm">// 两个哨兵</span>
+V get(K k)  { Node n = map.get(k); if (n == null) return null;
+              unlink(n); addFirst(n); return n.val; }   <span class="cm">// 读也要挪：读就是写</span>
+void put(K k, V v) { ...; if (map.size() == cap) { Node old = tail.prev;
+              unlink(old); map.remove(old.key); } ... }  <span class="cm">// 节点里要存 key</span></code></pre></div>
+</section>
+
+<section id="s5" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑤</span>套进场景：手写三个，再比命中率</h2></div>
+  <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>LruCache · LfuCache · HitRate · AccountLimiter</b><a href="https://github.com/archeu/study-labs/tree/main/java/algo/lru-lfu-limit">完整代码 →</a></div><pre><code><span class="cm">// 每账户令牌桶：LinkedHashMap 按访问顺序 + removeEldestEntry，就是一个 LRU 账户表</span>
+this.buckets = new LinkedHashMap&lt;Long, Bucket&gt;(16, 0.75f, true) {
+    protected boolean removeEldestEntry(Map.Entry&lt;Long, Bucket&gt; e) { return size() &gt; maxAccounts; }
+};
+public synchronized boolean tryAcquire(long account, long nowNanos) {
+    Bucket b = buckets.get(account);
+    if (b == null) { b = new Bucket(capacity, nowNanos); buckets.put(account, b); }
+    b.tokens = Math.min(capacity, b.tokens + (nowNanos - b.last) * perNano);   <span class="cm">// 懒补充</span>
+    b.last = nowNanos;
+    if (b.tokens &gt;= 1) { b.tokens -= 1; return true; }
+    return false;
+}</code></pre></div>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>运行输出</b><span>2026-11-21 · 2 核 Neoverse-N1 · OpenJDK 17.0.21，--release 8</span></div><pre class="console">put BTC ETH SOL   → [SOL, ETH, BTC]
+get BTC           → [BTC, SOL, ETH]
+put DOGE（踢 ETH）→ [DOGE, BTC, SOL]
+put XRP（踢 BTC） → [XRP, SOL, DOGE]，get ETH = null
+BTC 读 2 次、ETH 读 1 次 → freq={BTC=3, SOL=1, ETH=2} minFreq=1
+put DOGE（踢次数最少的 SOL）→ freq={BTC=3, ETH=2, DOGE=1} minFreq=1
+容量 100，交易对 1 万个，每种模式 200000 次访问：命中率
+  A 稳定热点         FIFO  34.4%   LRU  39.1%   <span class="hi">LFU  49.7%</span>
+  B 热点 + 报表扫描    FIFO  33.0%   <span class="r">LRU  36.6%</span>   <span class="hi">LFU  49.8%</span>
+  C 热点漂移         FIFO  34.4%   <span class="hi">LRU  39.1%</span>   <span class="r">LFU  25.9%</span>
+账户 1024 在同一毫秒连发 30 单：放行 20，拒绝 10
+0.5 秒后再发 30 单：放行 10（这 0.5 秒补了 10 个令牌）
+之后每 50 ms 一单、连发 100 单（正好每秒 20 单）：放行 100
+100 万个不同账户各来一次，账户表上限 1000：表里现在 1000 个账户</pre></div>
+  <div class="lab-res" data-role="pd"><b>读出来的结论</b><ul><li>稳定的 Zipf 热点下 LFU 比 LRU 高 10 个百分点：频次比“最近一次”更能代表以后。</li><li>加报表扫描（每 1000 次正常访问夹一次 500 个冷门交易对，命中率只算正常访问），LRU 掉 2.5 个点，LFU 纹丝不动。</li><li>热点在中途整体换一批，LFU 跌到 26%：前一半攒的次数让旧热点赖在缓存里。没有“最好的策略”，只有“适合这种流量的策略”。</li></ul></div>
+  <div class="verdict" data-role="done"><b>到这里已经能交差了</b>：面试手写 LRU / LFU，生产上给每个账户限频，都有能跑的代码。<br><b>已知还没处理的细节</b>：多线程（<a href="#p-thread">反例 1</a>），LinkedHashMap 构造参数（<a href="#p-order">反例 2</a>），LFU 的旧热点（<a href="#p-stale">反例 3</a>），限流用错时钟（<a href="#p-clock">反例 4</a>）。</div>
+</section>
+
+<section id="s6" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑥</span>反例和误用</h2></div>
+  <h3>第一圈 · 套上了名字，没满足约束</h3>
+  <div class="pits">
+    <div class="pit" id="p-thread"><b><em>1</em>多线程下只给 put 加锁<a class="rootmark" href="#m-lru">← ④ 取舍 1</a></b>
+      <dl><dt>现象</dt><dd>高并发读行情时链表指针错乱：节点丢失、<code>size</code> 和链表长度对不上，甚至遍历死循环。</dd><dt>根源</dt><dd>LRU 的 get 也要把节点挪到头部，<b>读就是写</b>。<code>ReadWriteLock</code> 的读锁允许并发读，正好让两个 get 同时改链表。</dd><dt>做法</dt><dd class="fix">整体一把锁（<code>synchronized</code>）；要高并发就用 Caffeine：它把“读了谁”先记进缓冲区，再由单线程批量调整顺序。</dd></dl>
+    </div>
+    <div class="pit" id="p-order"><b><em>2</em>LinkedHashMap 忘了 accessOrder = true<a class="rootmark" href="#m-lru">← ④ 取舍 1</a></b>
+      <dl><dt>现象</dt><dd>写了 <code>removeEldestEntry</code>，命中率却和 FIFO 一样。</dd><dt>根源</dt><dd>默认构造是按插入顺序，get 不挪位置，“最老的”就是最早插入的。</dd><dt>做法</dt><dd class="fix"><code>new LinkedHashMap&lt;&gt;(16, 0.75f, true)</code>，见 <a href="../javase/hashmap-relatives.html#m-lru">LinkedHashMap 那页</a>。</dd></dl>
+    </div>
+    <div class="pit" id="p-stale"><b><em>3</em>LFU 的旧热点赖着不走<span class="seen">实测</span><a class="rootmark" href="#m-design">← ④ 核心取舍</a></b>
+      <dl><dt>现象</dt><dd>热点漂移时 LFU 命中率 26%，比 FIFO 还低。</dd><dt>根源</dt><dd>次数只增不减：过去的热门攒了几千次，新热点从 1 开始，一进来就是“次数最少”，最先被踢。</dd><dt>做法</dt><dd class="fix">给次数加衰减：定期全体减半（Caffeine 的做法），或者只数最近一个窗口内的次数。</dd></dl>
+    </div>
+    <div class="pit" id="p-clock"><b><em>4</em>限流用 currentTimeMillis 算时间差<a class="rootmark" href="#m-limit">← ④ 取舍 3</a></b>
+      <dl><dt>现象</dt><dd>NTP 把系统时间往回调了几秒，<code>now − last</code> 变成负数，令牌被扣成负的，这个账户几秒内一单都下不了。</dd><dt>根源</dt><dd>懒补充依赖时间差，墙上时钟会被回拨。</dd><dt>做法</dt><dd class="fix">用 <code>System.nanoTime()</code>（单调递增）；补充量再加一道 <code>max(0, …)</code>。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <ul class="rules-list">
+    <li><b>缓存一定有上限和淘汰</b>：按条数或按字节，防的是 key 空间无界（订单号、用户 id）时的 OOM。</li>
+    <li><b>限流按账户隔离、表也要有上限</b>：防一个账户刷单拖累所有人，也防账户表无限涨。</li>
+    <li><b>手写只在面试和学习时</b>：生产用 Caffeine（本地缓存）和成熟的限流组件，它们处理了并发、统计、过期。</li>
+    <li><b>先测访问模式再选策略</b>：拿真实的访问日志回放，比较几种策略的命中率，⑤ 的 <code>HitRate</code> 就是最小版本。</li>
+  </ul>
+
+  <h3>第三圈 · 设计题的通用套路</h3>
+  <div class="two">
+    <div class="card" data-role="of"><h4>“O(1) 找到” + “O(1) 维护顺序”</h4><p>哈希表找节点，节点同时挂在一个有序结构上（链表、桶、堆）。LRU、LFU、带过期的缓存（再挂一个按过期时间的堆，第 6 课）、“插入删除随机取都 O(1)”（数组 + 哈希表存下标）都是这个形状。</p></div>
+    <div class="card" data-role="bk"><h4>先问清楚的四件事</h4><p>容量按条数还是字节？要不要线程安全？要不要过期时间？淘汰时要不要回调（比如写回数据库）？面试时先问，答案决定结构。</p></div>
+    <div class="card" data-role="cg"><h4>分布式限流</h4><p>多台网关共享“每账户 20 单”：计数放 Redis，用 Lua 脚本把“补令牌 + 扣令牌”做成原子操作，见 <a href="../arch/rate-limit-algorithms.html#m-dist">限流算法 · 分布式</a>。</p></div>
+    <div class="card" data-role="g2"><h4>Redis 的近似 LRU</h4><p>Redis 不维护全局链表，淘汰时随机抽几个 key，踢里面最久没用的（<code>maxmemory-samples</code>）。用一点精度换掉每次访问改链表的开销。</p></div>
+  </div>
+
+  <div class="lab" data-role="g2" id="lab">
+    <h3 style="margin:0">实验台：同一份流量，三种淘汰策略</h3>
+    <div class="guess" id="lab-guess">
+      <p>先猜：热点在中途整体换一批交易对，LFU 的命中率和 LRU 比？</p>
+      <div class="opts">
+        <button type="button" data-g="a">LFU 更高：它记得谁最常用</button>
+        <button type="button" data-g="b">差不多</button>
+        <button type="button" data-g="c">LFU 明显更低</button>
+      </div>
+      <p class="res" id="lab-guess-res" hidden></p>
+    </div>
+    <div class="knob-row">
+      <label for="k-wl">访问模式<select id="k-wl"><option value="A">稳定热点</option><option value="B" selected>热点 + 报表扫描</option><option value="C">热点漂移</option></select></label>
+      <label for="k-cap">缓存容量<select id="k-cap"><option>50</option><option selected>100</option><option>200</option></select></label>
+      <label for="k-scan">扫描间隔（次）<select id="k-scan"><option>200</option><option selected>1000</option><option>5000</option></select></label>
+    </div>
+    <div class="tiles4" id="lab-tiles"></div>
+    <p class="verdict-box" data-role="g2" id="lab-sum"></p>
+    <p class="tip">浏览器里现算：1 万个交易对，Zipf 分布，10 万次正常访问；“扫描”每隔若干次插入 500 个冷门交易对的顺序读取，进缓存但不计入命中率；“漂移”在一半处把热门整体换成另一批。和 ⑤ 的 Java 版同一个模型，随机数不同，数字会差一点。</p>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li><b>W-TinyLFU 的 Count-Min Sketch</b>：几 KB 内存近似记几百万个 key 的频次，定期减半。</li>
+    <li><b>ARC、LIRS</b>：数据库和文件系统里自适应地在“最近”和“常用”之间调权重。</li>
+    <li><b>带过期的 LRU</b>：每条加 TTL，过期的优先踢，再挂一个按到期时间的堆或时间轮。</li>
+  </ul>
+</section>
+
+<section id="loop" data-role="other">
+  <div class="mech-h"><h2><span class="sn">↺</span>回到⑤：改一改</h2></div>
+  <ol class="rules-list">
+    <li><b>线程安全的 LRU</b>：给 <code>LruCache</code> 的 get / put 加 <code>synchronized</code>，开 8 个线程各做 10 万次随机 get / put，最后检查 map 大小和链表长度一致；再去掉锁跑一次看会坏成什么样。（反例 1）</li>
+    <li><b>LFU 加衰减</b>：每 1 万次访问把所有次数减半（桶要重建），重跑 <code>HitRate</code> 的“热点漂移”，LFU 应该明显回升。（反例 3）</li>
+    <li><b>令牌桶加突发上限</b>：把容量改成 5、速率仍是每秒 20：同一毫秒连发 30 单只放 5 单，但持续每 50 ms 一单仍然全放。体会“容量管突发，速率管平均”。（取舍 3）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>设计题就是把哈希表（O(1) 找到）和一个能 O(1) 维护顺序的结构（链表、次数桶）互相指起来；LRU 押最近、LFU 押常用，前者怕扫描，后者怕热点漂移。</p></details>
+    <details><summary>2. LRU 只用 HashMap 加时间戳差在哪？</summary><p>淘汰时要遍历找最旧的，O(n)；双向链表让最旧的永远在尾巴上，不用找。</p></details>
+    <details><summary>3. 为什么 LRU 的 get 也要加锁（不能用读锁）？</summary><p>get 要把节点挪到链表头，会改指针，读就是写；读锁允许多个 get 并发改链表。</p></details>
+    <details><summary>4. 预测：LRU 链表的节点里不存 key，只存 value，会出什么问题？</summary><p>淘汰时从链表尾巴拿到节点，却不知道它在 HashMap 里的 key，删不掉；HashMap 里留下一个指向已摘除节点的条目，下次 get 到它会操作一个不在链表上的节点，size 也对不上。</p><p class="from">从 ④ 取舍 1 推出：两个结构互相指，链表要能反查哈希表。</p></details>
+    <details><summary>5. 预测：每账户限流的账户表上限设成 1000，而某一秒有 5000 个活跃账户在下单，会怎样？</summary><p>账户在表里不停被挤出、再以“满桶”重新进来，限流基本失效：一个刷单的账户只要被挤出一次，就又拿到 20 个令牌。上限要大于同时活跃的账户数，被踢的才都是“很久没来”的。</p><p class="from">从 ④ 取舍 3 推出：“踢掉不会放错”的前提是被踢的账户桶已经补满。</p></details>
+    <details><summary>6. 放回全景：第 11 站的快照缓存被报表扫描冲掉，影响谁？第 4 站限流失效呢？</summary><p>快照缓存被冲掉：行情接口要回源重算快照，延迟上升、数据库压力变大，但撮合（第 5 站）不受影响。第 4 站限流失效：刷单的订单涌进第 3 站的定长队列，队列满了，正常用户的单也被拒，影响一路传到撮合。</p></details>
+  </div>
+</section>
+</main>
+
+<footer>
+  <p>档位：标准。本机跑过（2026-11-21，2 核 Neoverse-N1 虚机，OpenJDK 17.0.21，<code>--release 8</code> 编译）：⑤ 的全部输出（LRU、LFU 的操作序列，三种访问模式的命中率，令牌桶和账户表上限）。按公开资料：Caffeine 用 W-TinyLFU（窗口 LRU + 频次草图，计数定期减半）；Redis 的近似 LRU 和 <code>maxmemory-samples</code>（Redis 文档 “Key eviction”）。没有在本机跑多线程下的链表损坏，反例 1 的现象是按原理推的。实验台是浏览器里现算的。</p>
+  <p>相关：<a href="pano-algo-trading-day.html">全景：撮合引擎的一天</a> · <a href="linked-list.html">第 4 课 · 链表</a> · <a href="hash-table.html">第 8 课 · 哈希表</a> · <a href="../javase/hashmap-relatives.html">LinkedHashMap</a> · <a href="../arch/rate-limit-algorithms.html">限流算法</a> · <a href="../redis/cache-multilevel.html">Caffeine 两级缓存</a> · 下一课：第 25 课 · 题型地图</p>
+</footer>
+<script>
+/*SIM-START*/
+// LRU 分步：每一步给出操作后链表（head → tail）、被挪动的、被踢掉的
+const OPS = [["put", "BTC"], ["put", "ETH"], ["put", "SOL"], ["get", "BTC"], ["put", "DOGE"], ["get", "SOL"], ["put", "XRP"]];
+function lruTrace(ops, cap) {
+  let list = []; const out = [];
+  for (const [op, k] of ops) {
+    let moved = null, evicted = null, hit = null;
+    const at = list.indexOf(k);
+    if (op === "get") { hit = at >= 0; if (hit) { list.splice(at, 1); list.unshift(k); moved = k; } }
+    else { if (at >= 0) { list.splice(at, 1); } else if (list.length === cap) { evicted = list.pop(); } list.unshift(k); moved = k; }
+    out.push({ op, k, list: [...list], moved, evicted, hit });
+  }
+  return out;
+}
+const TRACE = lruTrace(OPS, 3);
+const CAPS = [
+  "put BTC：HashMap 里没有，新建节点插到 head 后面，同时 map.put(BTC, 节点)。",
+  "put ETH：同样插到最前面，BTC 被推到后面。",
+  "put SOL：缓存满了（3 个）。链表从前到后就是“从新到旧”。",
+  "get BTC：HashMap O(1) 找到节点，从链表中间摘下，插回最前面。读也改了链表。",
+  "put DOGE：满了，直接摘 tail 前面那个——ETH，再 map.remove(ETH)，节点里存着 key 才删得掉。DOGE 插到最前面。",
+  "get SOL：摘下 SOL 放到最前面。",
+  "put XRP：满了，踢 tail 前面的 BTC。之后 get ETH、get BTC 都会返回 null。"
+];
+const STEPS = TRACE.map((t, i) => ({ h: (i + 1) + " · " + t.op + " " + t.k, cap: CAPS[i], lit: [] }));
+function stateAt(i) {
+  const step = Math.min(STEPS.length, Math.max(0, i | 0)), cur = STEPS[step - 1];
+  return { step, total: STEPS.length, lit: [], h: cur ? cur.h : "准备", cap: cur ? cur.cap : "点“下一步”。容量 3，依次 put BTC、ETH、SOL，get BTC，put DOGE，get SOL，put XRP。", trace: step > 0 ? TRACE[step - 1] : { list: [], moved: null, evicted: null } };
+}
+// 命中率模拟
+function rng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function zipfSampler(n, r) { const cdf = new Float64Array(n); let s = 0; for (let i = 0; i < n; i++) { s += 1 / (i + 1); cdf[i] = s; } for (let i = 0; i < n; i++) cdf[i] /= s; return () => { const u = r(); let lo = 0, hi = n - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (cdf[m] < u) lo = m + 1; else hi = m; } return lo; }; }
+function workload(kind, normal, scanEvery) {
+  const r = rng(24), z = zipfSampler(10000, r), w = [];
+  let cnt = 0;
+  while (cnt < normal) {
+    if (kind === "B" && cnt > 0 && cnt % scanEvery === 0 && w[w.length - 1] >= 0) { for (let k = 0; k < 500; k++) w.push(-(9000 + k) - 1); }
+    let key = z();
+    if (kind === "C" && cnt >= normal / 2) key = (key + 5000) % 10000;
+    w.push(key); cnt++;
+  }
+  return w;
+}
+function fifo(cap) { const q = [], s = new Set(); let h = 0; return k => { if (s.has(k)) return true; if (s.size === cap) { s.delete(q[h]); h++; } q.push(k); s.add(k); return false; }; }
+function lru(cap) { const m = new Map(); return k => { if (m.has(k)) { m.delete(k); m.set(k, 1); return true; } if (m.size === cap) m.delete(m.keys().next().value); m.set(k, 1); return false; }; }
+function lfu(cap) {
+  const freq = new Map(), buckets = new Map(); let minF = 0;
+  const bucket = f => { let b = buckets.get(f); if (!b) { b = new Set(); buckets.set(f, b); } return b; };
+  const touch = k => { const f = freq.get(k), b = buckets.get(f); b.delete(k); if (b.size === 0) { buckets.delete(f); if (minF === f) minF = f + 1; } freq.set(k, f + 1); bucket(f + 1).add(k); };
+  return k => {
+    if (freq.has(k)) { touch(k); return true; }
+    if (freq.size === cap) { const b = buckets.get(minF), old = b.values().next().value; b.delete(old); if (b.size === 0) buckets.delete(minF); freq.delete(old); }
+    freq.set(k, 1); bucket(1).add(k); minF = 1; return false;
+  };
+}
+function rate(access, w) { let hit = 0, n = 0; for (const k of w) { if (k < 0) { access(-k - 1); continue; } n++; if (access(k)) hit++; } return 100 * hit / n; }
+function simulate(kind, cap, scanEvery) { const w = workload(kind, 100000, scanEvery); return { kind, cap, scanEvery, fifo: rate(fifo(cap), w), lru: rate(lru(cap), w), lfu: rate(lfu(cap), w) }; }
+/*SIM-END*/
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+(() => {
+  if (!document.getElementById("stp")) return;
+  const ids = [...new Set(STEPS.flatMap(s => s.lit))];
+  let cur = 0, timer = null;
+  function render(i) {
+    const st = stateAt(i); cur = st.step;
+    ids.forEach(id => { const el = document.getElementById(id); if (!el) return; const on = st.lit.includes(id); el.classList.toggle("lit", st.step > 0 && on); el.classList.toggle("fade", st.step > 0 && !on); });
+    $("#st-cap").innerHTML = '<b class="h">' + esc(st.h) + "</b>" + esc(st.cap);
+    $("#st-pos").textContent = st.step + " / " + st.total;
+    $("#st-prev").disabled = st.step === 0;
+    $("#st-next").disabled = st.step === st.total;
+    if (typeof onStep === "function") onStep(st);
+  }
+  function stopAuto() { if (timer) { clearInterval(timer); timer = null; } $("#st-auto").setAttribute("aria-pressed", "false"); $("#st-auto").textContent = "自动播放"; }
+  $("#st-prev").addEventListener("click", () => { stopAuto(); render(cur - 1); });
+  $("#st-next").addEventListener("click", () => { stopAuto(); render(cur + 1); });
+  $("#st-reset").addEventListener("click", () => { stopAuto(); render(0); });
+  $("#st-auto").addEventListener("click", () => {
+    if (timer) { stopAuto(); return; }
+    if (cur === STEPS.length) render(0);
+    $("#st-auto").setAttribute("aria-pressed", "true"); $("#st-auto").textContent = "暂停";
+    timer = setInterval(() => { if (cur >= STEPS.length) stopAuto(); else render(cur + 1); }, 3200);
+  });
+  $("#stp").addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") { stopAuto(); render(cur + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { stopAuto(); render(cur - 1); e.preventDefault(); }
+  });
+  render(0);
+})();
+function initGuess(answer, explain) {
+  $$("#lab-guess .opts button").forEach(btn => btn.addEventListener("click", () => {
+    $$("#lab-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", "false"); });
+    btn.setAttribute("aria-pressed", "true");
+    const ok = btn.dataset.g === answer;
+    btn.classList.add(ok ? "right" : "wrong");
+    if (!ok) $('#lab-guess [data-g="' + answer + '"]').classList.add("right");
+    const g = $("#lab-guess-res"); g.hidden = false;
+    g.textContent = (ok ? "猜对了。" : "不是这个。") + explain();
+  }));
+}
+function onStep(st) {
+  const t = st.trace, NS = "http://www.w3.org/2000/svg";
+  const mk = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; };
+  const list = $("#lru-list"), map = $("#lru-map"), out = $("#lru-out");
+  [list, map, out].forEach(g => { while (g.firstChild) g.removeChild(g.firstChild); });
+  t.list.forEach((k, i) => {
+    const x = 140 + i * 196, g = mk("g", { "data-role": k === t.moved ? "of" : "pd" });
+    g.appendChild(mk("rect", { class: k === t.moved ? "x-rs" : "x-r", x, y: 96, width: 150, height: 56, rx: 10 }));
+    g.appendChild(mk("text", { class: "x-tb", x: x + 22, y: 129 }, k + (k === t.moved ? (st.trace.op === "get" ? " ← 刚读" : " ← 新放") : "")));
+    list.appendChild(g);
+    list.appendChild(mk("line", { class: "x-ed", x1: x - 34, y1: 124, x2: x - 2, y2: 124, "marker-end": "url(#xa)" }));
+  });
+  if (t.list.length) list.appendChild(mk("line", { class: "x-ed", x1: 140 + (t.list.length - 1) * 196 + 152, y1: 124, x2: 732, y2: 124, "marker-end": "url(#xa)" }));
+  else list.appendChild(mk("line", { class: "x-ed", x1: 108, y1: 124, x2: 732, y2: 124, "marker-end": "url(#xa)" }));
+  [...t.list].sort().forEach((k, i) => { const g = mk("g", { "data-role": "bk" }); g.appendChild(mk("rect", { class: "x-r", x: 120 + i * 120, y: 14, width: 108, height: 30, rx: 6 })); g.appendChild(mk("text", { class: "x-mono", x: 130 + i * 120, y: 34 }, k + " → ●")); map.appendChild(g); });
+  if (t.evicted) { out.appendChild(mk("text", { class: "x-tc", x: 840, y: 118 }, "踢掉")); out.appendChild(mk("text", { class: "x-tb", x: 840, y: 142 }, t.evicted)); }
+}
+function draw() {
+  const r = simulate($("#k-wl").value, +$("#k-cap").value, +$("#k-scan").value);
+  const best = Math.max(r.fifo, r.lru, r.lfu);
+  const tile = (name, v, role) => '<div class="tile" data-role="' + role + '"><small>' + name + (v === best ? " · 最高" : "") + '</small><b>' + v.toFixed(1) + '%</b><span>命中率</span></div>';
+  $("#lab-tiles").innerHTML = tile("FIFO", r.fifo, "other") + tile("LRU", r.lru, "pd") + tile("LFU", r.lfu, "bk");
+  const base = simulate("A", r.cap, 1000);
+  let s = "容量 " + r.cap + "：";
+  if (r.kind === "A") s += "稳定热点下 LFU 比 LRU 高 " + (r.lfu - r.lru).toFixed(1) + " 个点，频次更能预测以后。";
+  else if (r.kind === "B") s += "每 " + r.scanEvery + " 次访问一次扫描：LRU 从 " + base.lru.toFixed(1) + "% 掉到 " + r.lru.toFixed(1) + "%，LFU 从 " + base.lfu.toFixed(1) + "% 到 " + r.lfu.toFixed(1) + "%。扫描进来的次数都是 1，冲不动 LFU 的热门，却能把 LRU 整个冲一遍。";
+  else s += "热点中途换一批：LFU " + r.lfu.toFixed(1) + "%，比 LRU 的 " + r.lru.toFixed(1) + "% 低 " + (r.lru - r.lfu).toFixed(1) + " 个点。旧热点攒的次数让它们赖着不走。";
+  $("#lab-sum").textContent = s;
+}
+["#k-wl", "#k-cap", "#k-scan"].forEach(id => $(id).addEventListener("change", draw));
+initGuess("c", () => { const r = simulate("C", 100, 1000); return "容量 100 时 LFU " + r.lfu.toFixed(1) + "%、LRU " + r.lru.toFixed(1) + "%，LFU 甚至不如 FIFO（" + r.fifo.toFixed(1) + "%）。新热点进来次数是 1，正好是最先被踢的那批。"; });
+draw();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
