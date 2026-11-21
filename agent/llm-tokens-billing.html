@@ -1,0 +1,856 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<!-- 布局：⑤实测为主线。角色色：pd=分词器/token，bk=词表和 BPE，g2=计费，rn=输出，of=缓存和批处理。交互：⑥一个成本计算器（先猜再算）。 -->
+<title>token、分词和计费：同一段日志要花多少钱</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* 本页：布局、六个角色色各代表什么、有哪些交互，写在这里 */
+/* learn 六步页的基础样式（固定一份，不要从别的页面抄）。配色：pd bk cg g2 rn of 六个角色色，warn / bad / good / neutral 含义固定。
+   组件写法见 assets/skeleton.html。本页特有的样式写在文件末尾的标记后面，不改上面的规则。 */
+:root{--paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;}
+}
+:root[data-theme="dark"]{--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;}
+*{box-sizing:border-box}
+body{background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){
+  *{transition:none!important;scroll-behavior:auto!important}
+}
+html{scroll-behavior:smooth}
+section[id],.sub[id],.pit[id],figure[id]{scroll-margin-top:64px}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)}
+.f-of{fill:var(--of)}
+.f-cg{fill:var(--cg)}
+.f-g2{fill:var(--g2)}
+.f-bad{fill:var(--bad)}
+.f-pd{fill:var(--pd)}
+.f-bk{fill:var(--bk)}
+.f-good{fill:var(--good)}
+.f-rn{fill:var(--rn)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains li.mid::before{content:"•";color:var(--muted)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mech-h .sn{font-size:20px}
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p,details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+@media (max-width:980px){
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .two,.design,.pits,.rules-list,.next{grid-template-columns:1fr}
+}
+@media (max-width:520px){
+  .presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+table.t td.bad,table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.s{color:var(--of)}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.cap{font-size:13.5px;color:var(--muted)}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){
+  .steps-out li{grid-template-columns:minmax(0,1fr)}
+}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try code{overflow-wrap:anywhere}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){
+  .tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+.x-box{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.x-zone{fill:none;stroke:var(--line-strong);stroke-width:1.3;stroke-dasharray:6 5}
+.x-zl{font-size:12px;fill:var(--muted)}
+.x-r{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.x-rs{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.x-fill{fill:var(--rc)}
+.x-t{font-size:13px;fill:var(--ink)}
+.x-tb{font-size:13.5px;font-weight:700;fill:var(--ink)}
+.x-ts{font-size:11.5px;fill:var(--muted)}
+.x-tc{font-size:12px;font-weight:700;fill:var(--rc)}
+.x-mono{font-family:var(--font-mono);font-size:11px;fill:var(--ink)}
+.x-mono.dim{fill:var(--muted)}
+.x-mono.bad{fill:var(--bad);font-weight:600}
+.x-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.x-ed{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.x-ed.dash{stroke-dasharray:5 4}
+.x-ed.bad{stroke:var(--bad)}
+.x-ed.c{stroke:var(--rc);stroke-width:2}
+.x-mk{fill:var(--line-strong)}
+.x-mkb{fill:var(--bad)}
+.fig-box{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card);padding:10px}
+.fig-box > svg{min-width:760px;width:100%;display:block}
+.swipe{display:none;font-size:13px;color:var(--muted);margin:0 0 4px}
+@media (max-width:800px){
+  .swipe{display:block}
+}
+.ids{font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ids .a{color:var(--cg);font-weight:600}
+.ids .b{color:var(--of);font-weight:600}
+.verdict-box{font-size:14.5px;padding:10px 14px;border-radius:12px;border:2px solid var(--rc);background:var(--rt)}
+.knob-row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end}
+.knob-row label{display:flex;flex-direction:column;gap:4px;font-size:13.5px;color:var(--muted)}
+.knob-row select{font:inherit;font-size:14px;padding:4px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){
+  .ctl-grid{grid-template-columns:1fr!important}
+}
+.codebox pre .bad{color:var(--bad);font-weight:600}
+.codebox pre .ok{color:var(--good);font-weight:600}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.sv .fade{opacity:.25;transition:opacity .25s}
+.sv .lit{opacity:1;transition:opacity .25s}
+.sv .lit .x-rs,.sv .lit .x-r{stroke-width:3}
+/* ===== 本页特有的样式写在这一行下面 ===== */
+.tok-line{display:flex;flex-wrap:wrap;gap:4px;margin:8px 0;font-family:var(--font-mono);font-size:13px}
+.tok-line span{border:1px solid var(--rc,#888);background:var(--rt,transparent);border-radius:6px;padding:2px 6px;white-space:pre}
+.tok-line span.byte{border-style:dashed;color:var(--bad)}
+.tok-row{margin:10px 0}
+.tok-row>p{margin:0;font-size:14px}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>AI Agent 工程师</span><span aria-hidden="true">/</span><span class="tb-here">token、分词和计费</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs><marker id="xa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="x-mk"/></marker></defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">tokenizer · BPE · 字节回退 · count_tokens · usage · Qwen2.5 分词器实测</p>
+  <h1>token、分词和计费：同一段日志要花多少钱</h1>
+  <p class="lead">token 是模型的计量单位：上下文窗口按它算，速度按它算，<b>钱也按它算</b>。分词器把文字切成词表里有的片段：常见的词一个 token，数字、时间戳、ID 几乎一个字符一个。实测同样是一行字，Java 栈每个 token 能装 4 个字符，UUID 只装 1 个。所以<b>按字数估成本会差好几倍</b>，算 Claude 的数要用 Claude 自己的 <code>count_tokens</code>。</p>
+  <nav class="route" aria-label="六步学习路线">
+<a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+<a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+<a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+<a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+<a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+<a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+<a href="#loop"><b>↺</b>回到⑤</a>
+</nav>
+  <p class="where"><span>全景：<a href="pano-02-prompt-to-answer.html#s-2">一句话怎么变成模型的回答 · 第 2、10 站</a></span><span>地图：<a href="roadmap.html#st02">站 02 · token、分词和计费</a></span><span>深度：会用</span></p>
+  <p class="scene"><b>这一页的位置</b><span>站 02 第 2 个知识点，接着<a href="llm-next-token.html">下一个词预测</a>：上一页说模型一圈出一个 token，这一页说 token 到底是什么、一圈多少钱。站 02 的第一个小实验“同一段日志的 token 数和成本”就在 ⑤。</span></p>
+</header>
+
+<section id="s1" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">①</span>为什么需要：值班助手每问一次，账单上记的是什么</h2></div>
+  <p>在全景第 2 站和第 10 站，这一步要解决两件事：61 行 GC 日志进模型之前被切成了多少块；问完一次，账单上按什么算钱。值班助手一天要问几千次，这两个数决定了它用不用得起。</p>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 210" role="img" aria-label="一次调用的计费：系统提示、日志、问题都切成 token 算输入，模型写出的 token 算输出，各乘单价相加">
+        <g data-role="pd"><rect class="x-r" x="12" y="20" width="230" height="150" rx="12"/><text class="x-tc" x="26" y="42">值班助手发出的文字</text><text class="x-ts" x="26" y="68">系统提示 1 行</text><text class="x-ts" x="26" y="88">GC 日志 61 行，7417 个字符</text><text class="x-ts" x="26" y="108">问题 1 句</text><text class="x-ts" x="26" y="128">+ 对话模板的特殊标记</text><text class="x-ts" x="26" y="156">你以为：约 7500 个字</text></g>
+        <line class="x-ed" x1="244" y1="95" x2="300" y2="95" marker-end="url(#xa)"/>
+        <g data-role="bk"><rect class="x-rs" x="304" y="55" width="170" height="80" rx="12"/><text class="x-tc" x="318" y="78">第 2 站</text><text class="x-tb" x="318" y="102">分词器</text><text class="x-ts" x="318" y="122">查词表，切成编号</text></g>
+        <line class="x-ed" x1="476" y1="95" x2="532" y2="95" marker-end="url(#xa)"/>
+        <g data-role="g2"><rect class="x-r" x="536" y="20" width="412" height="150" rx="12"/><text class="x-tc" x="550" y="42">第 10 站：账单</text><text class="x-mono" x="550" y="70">输入  5008 token × $4  / 百万 = $0.0200</text><text class="x-mono" x="550" y="94">输出   300 token × $20 / 百万 = $0.0060</text><text class="x-mono" x="550" y="118">一次                           $0.0260</text><text class="x-ts" x="550" y="146">（Claude Opus 5.5 价格；token 数是本机 Qwen 分词器实测）</text><text class="x-ts" x="550" y="162">每天 2000 次 ≈ $52，一个月 ≈ $1560</text></g>
+        <text class="x-ts" x="12" y="198">钱按 token 收，不按字收。7417 个字符的日志切出来约 5000 个 token，比“中文一个字一个 token”的直觉多，也比“英文 4 个字符一个 token”多。</text>
+      </svg>
+    </div>
+  </figure>
+  <p>这一页学完要能做到地图上“怎么算过关”的第二条：<b>给一个调用场景，估得出大概花多少钱</b>。</p>
+</section>
+
+<section id="s2" data-role="other">
+  <div class="mech-h"><h2><span class="sn">②</span>没有它会怎样：按字数估，差好几倍</h2></div>
+  <p>不懂分词时，最自然的估法是“字数 ÷ 某个系数”。拿 ⑤ 里实测的几行文字对一下（本机 Qwen2.5 的分词器）：</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>文字</th><th>字符数</th><th>token 数</th><th>每个 token 装几个字符</th><th>按“4 字符 1 token”估</th></tr></thead>
+      <tbody>
+        <tr><th>Java 栈一行 <code>at com.shop.order…</code></th><td>61</td><td>15</td><td class="good">4.07</td><td class="good">15，准</td></tr>
+        <tr><th>英文句子</th><td>66</td><td>19</td><td>3.47</td><td>17，差一点</td></tr>
+        <tr><th>JSON 一条订单</th><td>79</td><td>42</td><td>1.88</td><td class="bad">20，少估一半</td></tr>
+        <tr><th>GC 日志一行</th><td>112</td><td>78</td><td class="bad">1.44</td><td class="bad">28，少估 64%</td></tr>
+        <tr><th>中文句子</th><td>30</td><td>23</td><td>1.30</td><td class="bad">8，少估 65%</td></tr>
+        <tr><th>UUID</th><td>36</td><td>35</td><td class="bad">1.03</td><td class="bad">9，少估 74%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul class="pains">
+    <li class="bad">值班助手发的恰好是最“费 token”的那几类：时间戳、GC 编号、内存数字、订单号。按英文的经验系数估，日志的成本会少算一半以上。</li>
+    <li class="bad">按“中文一个字一个 token”估也不对：常用词“订单”“服务”“是因为”各只占一个 token，而前面带空格的“变”被拆成了两段字节，占两个。</li>
+    <li class="ok">唯一准的办法是用同一个模型的分词器真切一遍：本机用 <code>/tokenize</code>，Claude 用 <code>count_tokens</code> 接口。</li>
+  </ul>
+  <div class="verdict" data-role="bad"><b>不懂精华时的典型误用</b>：拿 OpenAI 的 tiktoken 或者“字数 × 系数”给 Claude 做预算。Claude 的文档明说 tiktoken 在一般文本上就少算 15%～20%，代码和非英文少得更多；而且每家、甚至同一家不同代的模型词表都不一样。</div>
+</section>
+
+<section id="s3" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">③</span>相邻方案：文字该切多碎</h2></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>切法</th><th>词表多大</th><th>一行 GC 日志切成几块</th><th>输在哪</th></tr></thead>
+      <tbody>
+        <tr><th>按字节</th><td>256</td><td>112</td><td class="bad">序列最长：同样一段话，模型要多转很多圈，窗口也装得最少</td></tr>
+        <tr><th>按整词</th><td>几百万还不够</td><td>—</td><td class="bad">“G1Compaction”“ORD-20261108-000123”这种词典里没有的词没法表示，只能记成“未知”</td></tr>
+        <tr class="pick"><th><b>子词：BPE（字节级）</b></th><td>十几万（Qwen2.5 是 151936）</td><td>78</td><td class="good">常见的片段合成一个 token，罕见的退回到字节，任何文字都切得出来</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页学字节级 BPE</b>：Qwen、GPT、Llama 这些模型公开的分词器都是这一路（Claude 的分词器没有公开，只能通过 <code>count_tokens</code> 看结果）。原理一样，各家的词表不一样。</p>
+</section>
+
+<section id="s4" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">④</span>原理：词表是“合并”出来的，钱是按块数收的</h2></div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>UTF-8</b>：英文字母和数字一个字节，常用汉字三个字节，表情符号四个字节。“变”是 <code>e5 8f 98</code>。</li>
+      <li><b>token id</b>：词表里每一项的编号。模型只认编号，<a href="llm-next-token.html">上一页</a>的循环里接上的也是编号。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-bpe">机制 1 · BPE：从 256 个字节开始，反复合并最常挨在一起的一对</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 250" role="img" aria-label="BPE 训练：一开始每个字节一个 token，统计语料里最常相邻的一对合并成新 token，反复进行，常见的词最后变成一个 token">
+        <text class="x-ts" x="12" y="20">训练分词器（模型训练之前，只做一次）。语料里到处是 “ Pause”：</text>
+        <g data-role="bk">
+          <rect class="x-r" x="12" y="34" width="300" height="54" rx="10"/><text class="x-tc" x="24" y="54">第 0 轮：每个字节一块</text><text class="x-mono" x="24" y="76">␣ P a u s e    （6 块）</text>
+          <rect class="x-r" x="330" y="34" width="300" height="54" rx="10"/><text class="x-tc" x="342" y="54">合并最常见的一对 “s”+“e”</text><text class="x-mono" x="342" y="76">␣ P a u se     （5 块）</text>
+          <rect class="x-r" x="648" y="34" width="300" height="54" rx="10"/><text class="x-tc" x="660" y="54">再合并 “u”+“se”、“a”+“use”…</text><text class="x-mono" x="660" y="76">␣ P ause       （3 块）</text>
+        </g>
+        <g data-role="pd"><rect class="x-rs" x="330" y="104" width="300" height="54" rx="10"/><text class="x-tc" x="342" y="124">十几万轮以后</text><text class="x-mono" x="342" y="146">" Pause" 是一个 token（49656 号）</text></g>
+        <line class="x-ed" x1="798" y1="90" x2="632" y2="128" marker-end="url(#xa)"/>
+        <text class="x-ts" x="12" y="186">合并停在词表够大的时候（Qwen2.5：151936 项）。语料里常见的片段就成了一个 token，罕见的片段永远停在小块上。</text>
+        <text class="x-ts" x="12" y="206">切新文字时，按训练时学到的合并顺序照做一遍：先切出最小块，再一步步合并，合不下去的就留着。</text>
+        <text class="x-ts" x="12" y="226">合并顺序是真实的规则，但上面每一步合的是哪一对，是为了示意挑的；真实顺序取决于语料里的频率。</text>
+      </svg>
+    </div>
+  </figure>
+  <p>这解释了 ② 那张表：Java 包名、英文单词在语料里出现得极多，早就被合并成大块；UUID、订单号是随机的，没有哪一对常见到值得合并，只能一个字符一块。</p>
+  <p>还有一条额外的规则：切之前，Qwen 的分词器会先把数字拆成一位一位的（<span class="tag-real">实测</span> <code>1873</code> 切成 1、8、7、3），所以日志里的数字一律一位一个 token。不是所有分词器都这样，有的允许最多三位一组，这也是各家 token 数对不上的原因之一。</p>
+
+  <h3 id="m-zh">机制 2 · 中文和罕见字符：退回到字节，永远切得出来</h3>
+  <div class="tok-row" data-role="pd"><p><span class="tag-real">实测</span> “订单服务在 20:15 变慢，是因为一次很长的 GC 停顿。”切成 23 个 token：</p>
+    <div class="tok-line"><span>订单</span><span>服务</span><span>在</span><span> </span><span>2</span><span>0</span><span>:</span><span>1</span><span>5</span><span class="byte">␣ e5 8f</span><span class="byte">98</span><span>慢</span><span>，</span><span>是因为</span><span>一次</span><span>很长</span><span>的</span><span> GC</span><span class="byte">␣ e5</span><span class="byte">81</span><span class="byte">9c</span><span>顿</span><span>。</span></div>
+  </div>
+  <p>“订单”“是因为”是一个 token；可是“ 变”（前面带空格）这个组合在语料里不够常见，被切成了两段字节，“ 停”更碎，切成三段。虚线框就是字节回退：词表里没有现成的片段，就退回到 UTF-8 字节，所以字节级 BPE 没有“未知字”。代价是这样的字更贵，而且单个 token 可能只是半个字，<a href="llm-next-token.html#s5">上一页 ⑤</a> 里服务端不肯吐出“半个字”就是这个原因。</p>
+
+  <h3 id="m-bill">机制 3 · 计费：输入、输出分开数，各乘各的单价</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>账单上的一项</th><th>数的是什么</th><th>Opus 5.5 单价（美元 / 百万 token）</th><th>返回的 <code>usage</code> 字段</th></tr></thead>
+      <tbody>
+        <tr><th>输入</th><td>系统提示 + 工具定义 + 全部对话历史 + 这次的问题，统统切成 token</td><td>4</td><td><code>input_tokens</code></td></tr>
+        <tr><th>输出</th><td>模型写出的每个 token，<b>包括它的“思考”</b>，哪怕思考内容不显示给你</td><td>20</td><td><code>output_tokens</code></td></tr>
+        <tr><th>写入提示缓存</th><td>第一次把一段前缀存进缓存（5 分钟有效）</td><td>5（输入价 × 1.25）</td><td><code>cache_creation_input_tokens</code></td></tr>
+        <tr><th>命中提示缓存</th><td>前缀一字不差，再来一次</td><td>0.20（输入价 × 0.05）</td><td><code>cache_read_input_tokens</code></td></tr>
+        <tr><th>批处理</th><td>不急的请求攒成一批，异步跑</td><td>上面各项打 5 折</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">价格按 Claude 官方文档（2026-11 核对）：Sonnet 5.5 是 2 / 10，缓存命中 0.10；Haiku 5.5 是 0.1 / 0.5（提示不超过 10 万 token 时）。缓存和批处理放到站 03 的“省钱”那一页细讲。</p>
+  <p>两点最容易漏：一是<b>输入不只是你的问题</b>，系统提示、工具说明、前面几轮的对话每次都要重发、重新计费；二是<b>输出包括思考</b>，Opus 5.5 的思考关不掉，只能用 <code>effort</code> 调深浅（<a href="llm-reasoning-thinking.html">推理模型那一页</a>）。</p>
+
+  <h3 id="m-design">为什么这样设计：词表不能太小，也不能太大</h3>
+  <div class="design">
+    <div class="card" data-role="pd"><h3>十几万项的子词词表</h3><ul class="pains">
+      <li class="ok">常见文字切得粗：同一段话 token 少，模型转的圈少、窗口装得多、钱花得少。</li>
+      <li class="ok">罕见文字退回字节：任何输入都能表示，不会有“未知字”。</li>
+      <li class="mid">代价：词表每一项在模型的输入端和输出端各占一行参数。本页的模型 151936 × 896 ≈ 1.36 亿个数，约占它 4.9 亿参数的四分之一（输入输出共用一张表时）。第 6 站每圈要给 15 万多个候选打分，也是这张表的大小决定的。</li>
+    </ul></div>
+    <div class="card" data-role="other"><h3>两个极端</h3><ul class="pains">
+      <li class="bad">只用 256 个字节：参数省了，但一行日志 112 块，回答也要多写好几倍的圈，又慢又贵，窗口还装不下多少东西。</li>
+      <li class="bad">词表大到每个词一项：表本身大得放不下，绝大多数项一年见不到几次，学不好；而且新词（新的类名、订单号）照样表示不了。</li>
+    </ul></div>
+  </div>
+  <div class="verdict" data-role="pd"><b>决定胜负的约束</b>：模型每多处理一个 token 都要完整算一遍，所以序列越短越好；但词表每多一项都要占参数、每圈都要打分。十几万项是两头折中出来的结果，各家取的点不同，所以同一段文字在不同模型上的 token 数不同，单价也就不能直接比，要比“这段文字一次多少钱”。</div>
+
+  <h3>最少的语法</h3>
+  <div class="two">
+    <div class="codebox"><div class="code-bar"><b>算 Claude 的 token 数</b><span>按 Claude API 文档</span></div><pre><code>from anthropic import Anthropic
+client = Anthropic()
+r = client.messages.count_tokens(
+    model="claude-opus-5-5",          <span class="cm"># 和真正调用时同一个模型</span>
+    system="只根据日志回答……",
+    messages=[{"role": "user", "content": log + question}],
+)
+print(r.input_tokens)                 <span class="cm"># 不生成、不收钱</span></code></pre></div>
+    <div class="codebox"><div class="code-bar"><b>调用后看实际用量</b><span>每次都记下来</span></div><pre><code>msg = client.messages.create(...)
+u = msg.usage
+u.input_tokens                  <span class="cm"># 没命中缓存的输入</span>
+u.cache_creation_input_tokens   <span class="cm"># 写进缓存的</span>
+u.cache_read_input_tokens       <span class="cm"># 从缓存读的</span>
+u.output_tokens                 <span class="cm"># 输出，含思考</span></code></pre></div>
+  </div>
+</section>
+
+<section id="s5" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑤</span>亲眼看到：同一段日志的 token 数和成本</h2></div>
+  <p>这台机器上没有 Claude 的 API key，所以用本机 llama-server 里 Qwen2.5 的分词器（<code>/tokenize</code> 接口）来切，再乘 Claude 的单价估钱。<b>token 数会和 Claude 实际的不一样</b>，但“哪类文字贵、瘦身能省多少”的结论是通的；有 key 时把 <code>count()</code> 换成 <code>count_tokens</code> 就是准数。</p>
+  <ol class="steps-out">
+    <li><b>1 准备</b><span>沿用<a href="llm-next-token.html#s5">上一页</a>起好的 llama-server（8090 端口）。脚本只用标准库。</span></li>
+    <li><b>2 切几类文字</b><span><code>python main.py split</code>：每类文字切成几块、每块是什么。</span></li>
+    <li><b>3 算日志的钱</b><span><code>python main.py log</code>：order-04 的 61 行 GC 日志（20:06～20:16，固定随机种子生成，20:12:43 那次 Full GC 和全景里一致），原样发和瘦身后发，各要多少 token、多少钱。</span></li>
+  </ol>
+  <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>main.py（瘦身那一段）</b><a href="https://github.com/archeu/study-labs/tree/main/agent/llm-tokens-billing">完整代码 →</a></div><pre><code>def slim(log):
+    <span class="cm">"""时间戳只留时分秒，去掉每行都一样的 [info][gc] 和括号里的原因，只留 >100ms 的停顿"""</span>
+    out = []
+    for line in log.splitlines():
+        m = re.match(r"\[2026-11-08T(\d\d:\d\d:\d\d)\.\d+\+0800\]\[info\]\[gc\] GC\(\d+\) "
+                     r"(Pause \w+).*? (\d+M->\d+M)\(1024M\) ([\d.]+)ms", line)
+        if m and float(m.group(4)) > 100:
+            out.append(f"{m.group(1)} {m.group(2)} {m.group(3)} {float(m.group(4)):.0f}ms")
+    return "堆上限 1024M，只列停顿超过 100ms 的 GC：\n" + "\n".join(out)</code></pre></div>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>python main.py log</b><span>2026-11-22 · Qwen2.5 分词器 · Claude 单价</span></div><pre class="console">原样 61 行：61 行，7417 个字符 → 整个请求 5008 个 token（Qwen 分词器）
+   Claude Opus 5.5    一次 $0.02603  （输入 $0.02003 + 输出 300 个 $0.00600）   每天 2000 次 $52.06
+   Claude Sonnet 5.5  一次 $0.01302  （输入 $0.01002 + 输出 300 个 $0.00300）   每天 2000 次 $26.03
+   Claude Haiku 5.5   一次 $0.00065  （输入 $0.00050 + 输出 300 个 $0.00015）   每天 2000 次 $1.30
+
+瘦身后：28 行，1070 个字符 → 整个请求 801 个 token（Qwen 分词器）
+   Claude Opus 5.5    一次 $0.00920  （输入 $0.00320 + 输出 300 个 $0.00600）   每天 2000 次 $18.41
+   Claude Sonnet 5.5  一次 $0.00460  （输入 $0.00160 + 输出 300 个 $0.00300）   每天 2000 次 $9.20
+   Claude Haiku 5.5   一次 $0.00023  （输入 $0.00008 + 输出 300 个 $0.00015）   每天 2000 次 $0.46
+
+瘦身后的日志：
+堆上限 1024M，只列停顿超过 100ms 的 GC：
+20:06:20 Pause Young 448M->212M 180ms
+……
+<span class="hi">20:12:43 Pause Full 1010M->702M 1873ms</span>
+……</pre></div>
+  <div class="lab-res" data-role="pd"><b>读出来的结论</b><ul>
+    <li>7417 个字符的日志，整个请求 5008 个 token：平均每个 token 装 1.5 个字符，和 ② 表里“GC 日志一行 1.44”对得上。全景里那次 4950 个 token，量级一样。</li>
+    <li>瘦身后输入从 5008 降到 801，少了 84%；但一次的总价只降了 65%（Opus 5.5），因为 300 个输出 token 一分没省，而输出单价是输入的 5 倍。</li>
+    <li>同一个请求，Opus 5.5 和 Haiku 5.5 差 40 倍。选哪个，看<a href="llm-choose-model.html">怎么选模型</a>那一页。</li>
+    <li>瘦身是有代价的：去掉了 100ms 以下的停顿和 GC 编号，模型就没法回答“一共几次 GC”。删什么、留什么，是业务判断，不是越短越好。</li>
+  </ul></div>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>python main.py split（节选）</b><span>每块之间用 | 隔开，&lt;…&gt; 是字节</span></div><pre class="console">类型     字符  字节 token  字符/token  切法
+英文句子    66    66    19     3.47  The |  order |  service |  slowed |  down |  at |   | 2 | 0 | : | 1 | 5 | …
+中文句子    30    68    23     1.30  订单 | 服务 | 在 |   | 2 | 0 | : | 1 | 5 | <span class="r">&lt;20 e5 8f&gt; | &lt;98&gt;</span> | 慢 | ， | 是因为 …
+GC 日志    112   112    78     1.44  [ | 2 | 0 | 2 | 6 | - | 1 | 1 | - | 0 | 8 | T | 2 | 0 …
+Java 栈     61    61    15     4.07  	at |  com | .shop | .order | .Order | Service | .create | (Order | …
+JSON        79    79    42     1.88  {" | orderId | ":" | ORD | - | 2 | 0 | 2 | 6 | 1 | 1 | 0 | 8 | - …
+UUID        36    36    35     1.03  3 | f | 2 | b | 8 | c | 1 | e | - | 9 | a | 4 | d | - …</pre></div>
+  <div class="verdict" data-role="done"><b>到这里已经能交差了</b>：拿到一个调用场景，你能切出 token 数、乘上单价、算出一天一个月要花多少，并知道日志是“贵文字”。<br><b>已知还没处理的细节</b>：拿别家分词器估（<a href="#p-other">坑 1</a>），漏算系统提示和历史（<a href="#p-hidden">坑 2</a>），漏算思考（<a href="#p-think">坑 3</a>），“100 个字”不等于 100 个 token（<a href="#p-limit">坑 4</a>）。</div>
+</section>
+
+<section id="s6" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑥</span>细节：算钱时最常漏掉的几块</h2></div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-other"><b><em>1</em>拿别家的分词器给 Claude 估数<a class="rootmark" href="#m-bpe">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>用 tiktoken 估出来 4000，上线后账单上是 5000 多。换一代模型，同样的提示词 token 数又变了。</dd><dt>根源</dt><dd>词表是各家用各自的语料合并出来的，合并顺序不同，切法就不同。Claude 的文档写明：Opus 4.7 起的新分词器，同样的文字大约是旧分词器的 1～1.35 倍 token。</dd><dt>做法</dt><dd class="fix">预算和超长检查都用 <code>count_tokens</code>，传和真实调用同一个 <code>model</code>；换模型时重新量一遍，不沿用旧数。</dd></dl>
+    </div>
+    <div class="pit" id="p-hidden"><b><em>2</em>只算了问题，没算系统提示、工具说明和历史<a class="rootmark" href="#m-bill">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>值班助手改成多轮追问，第 10 轮的账单是第 1 轮的十倍。</dd><dt>根源</dt><dd>模型每次调用都是从头读一遍前文，API 不替你记住上一轮（站 03 讲“多轮其实是无状态的”）。每轮新增 500 token，10 轮下来输入累计是 500 × (1+2+…+10) = 27500，不是 5000。</dd><dt>做法</dt><dd class="fix">按“这一次请求的完整内容”估，不按“这次新说的话”估；长对话用提示缓存（命中部分只收 5%）、定期压缩历史。</dd></dl>
+    </div>
+    <div class="pit" id="p-think"><b><em>3</em>看到的回答只有 50 个字，输出却收了 2000 个 token<a class="rootmark" href="#m-bill">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd><code>usage.output_tokens</code> 远大于回答的长度。</dd><dt>根源</dt><dd>思考也是一圈一圈写出来的 token，按输出单价收；默认不显示思考内容，但照样计费。Opus 5.5 的思考关不掉。</dd><dt>做法</dt><dd class="fix">简单任务把 <code>effort</code> 调到 <code>low</code>；成本统计一律以 <code>usage</code> 为准，不按回答字数推算。</dd></dl>
+    </div>
+    <div class="pit" id="p-limit"><b><em>4</em>“不超过 100 字”和 <code>max_tokens: 100</code> 不是一回事<a class="rootmark" href="#m-zh">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>要求“100 字以内”，同时设 <code>max_tokens: 100</code>，回答在半句话处被截断。</dd><dt>根源</dt><dd>中文平均 1.3 个字一个 token，带数字和时间就更碎；而且有思考时，思考也算在 <code>max_tokens</code> 里。</dd><dt>做法</dt><dd class="fix">长度要求写进提示词；<code>max_tokens</code> 只当保险丝，留出几倍余量，再检查 <code>stop_reason</code>（<a href="llm-next-token.html#p-cut">上一页坑 2</a>）。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <ul class="rules-list">
+    <li><b>日志先过滤再发</b>：只发和问题相关的时间段、相关的行，重复的前缀去掉。防的是把钱花在“贵文字”上，也防关键行被淹没（<a href="llm-context-window.html">上下文窗口</a>那一页实测）。</li>
+    <li><b>每次调用都把 <code>usage</code> 落库</b>：按功能、按模型、按天汇总。防的是月底才发现账单翻倍。</li>
+    <li><b>请求发出前先查长度</b>：超过预算的输入直接截断或拒绝，并打日志。防的是一条异常的超长日志把单次费用顶到几十倍。</li>
+    <li><b>价格写进配置，不写死在代码里</b>：模型一换代、价格一调整，改配置就行。防的是成本报表悄悄算错。</li>
+  </ul>
+
+  <h3>第三圈 · 为什么价格长这样</h3>
+  <div class="two">
+    <div class="card" data-role="rn"><h4>输出为什么比输入贵 5 倍</h4><p>输入几千个 token 一次并行读完，输出一圈只出一个，每圈都要把模型权重完整读一遍（<a href="llm-next-token.html#m-design">上一页</a>）。占用的机器时间不一样，价格就不一样。</p></div>
+    <div class="card" data-role="of"><h4>缓存命中为什么只收 5%</h4><p>命中的那段前缀，服务端已经算好了每一层的中间结果（KV 缓存），不用再算，只要读出来。Opus 5.5 命中价 0.20，是输入价 4 的 5%（<a href="llm-attention-kv-cache.html">注意力和 KV 缓存</a>）。</p></div>
+    <div class="card" data-role="bk"><h4>数字一位一个 token</h4><p>Qwen 把数字拆成单个数字，好处是 1873 和 1874 共用同一套“数字 token”，做加减比较时更规整；代价就是日志里数字特别费 token。别家有的三位一组，token 少一些。</p></div>
+    <div class="card" data-role="pd"><h4>比价要比“这段文字一次多少钱”</h4><p>各家词表不同，同样的日志在 A 模型 5000 个 token、在 B 模型可能 6000 个。单价低的不一定便宜，拿自己的真实请求在各家都量一遍再比。</p></div>
+  </div>
+
+  <div class="lab" data-role="g2" id="lab">
+    <h3 style="margin:0">实验台：值班助手一个月要花多少钱</h3>
+    <div class="guess" id="lab-guess">
+      <p>先猜：每天问 2000 次，每次输入 5008、输出 300 个 token，用 Claude Opus 5.5，一个月（30 天）大约多少钱？</p>
+      <div class="opts">
+        <button type="button" data-g="a">约 $16</button>
+        <button type="button" data-g="b">约 $160</button>
+        <button type="button" data-g="c">约 $1,560</button>
+        <button type="button" data-g="d">约 $15,600</button>
+      </div>
+      <p class="res" id="lab-guess-res" hidden></p>
+    </div>
+    <div class="knob-row">
+      <label for="k-model">模型<select id="k-model"><option value="opus" selected>Claude Opus 5.5</option><option value="sonnet">Claude Sonnet 5.5</option><option value="haiku">Claude Haiku 5.5</option></select></label>
+      <label for="k-in">每次输入<select id="k-in"><option value="801">801（瘦身后）</option><option value="5008" selected>5008（原样 61 行）</option><option value="30000">30000（60 分钟日志）</option><option value="150000">150000（一整天的日志）</option></select></label>
+      <label for="k-out">每次输出（含思考）<select id="k-out"><option value="300" selected>300</option><option value="1500">1500</option><option value="5000">5000</option></select></label>
+      <label for="k-day">每天几次<select id="k-day"><option value="100">100</option><option value="2000" selected>2000</option><option value="20000">20000</option></select></label>
+      <label for="k-batch">批处理（半价）<select id="k-batch"><option value="0" selected>不用</option><option value="1">用</option></select></label>
+    </div>
+    <div class="tiles4" id="lab-tiles"></div>
+    <p class="verdict-box" data-role="g2" id="lab-sum"></p>
+    <p class="tip">按 Claude 官方单价（2026-11）估算，不含提示缓存；Haiku 5.5 单次提示超过 10 万 token 时按 0.5 / 2.5 计。token 数用的是本机 Qwen 分词器的实测，Claude 的实际数要用 <code>count_tokens</code> 量。</p>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>分词器怎么训练：BPE、WordPiece、Unigram 的区别，SentencePiece 是什么。</li>
+    <li>多语言的“token 税”：同一句话的中、英、日文各要多少 token，对成本和窗口的影响。</li>
+    <li>图片和 PDF 怎么折算成 token（多模态输入的计费）。</li>
+    <li>按功能、按租户做成本归因和限额（站 09 可观测、站 10 上线时再做）。</li>
+  </ul>
+</section>
+
+<section id="loop" data-role="other">
+  <div class="mech-h"><h2><span class="sn">↺</span>回到⑤：改一改</h2></div>
+  <ol class="rules-list">
+    <li><b>换一种瘦身</b>：把 <code>slim()</code> 改成“只留 20:10 以后的原始行”，看 token 数和成本；再想想这种瘦身丢了什么。（规范 1）</li>
+    <li><b>多轮的账</b>：写一个函数，模拟值班助手连续追问 10 轮、每轮新增 500 token、每次都带上全部历史，打印每轮的输入 token 和累计成本。（坑 2）</li>
+    <li><b>中文字数和 token</b>：拿 10 句值班报告里的中文句子，算“字符数 ÷ token 数”的平均值和最小值，据此给“100 字以内”配一个够用的 <code>max_tokens</code>。（坑 4）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>钱、窗口、速度都按 token 算；分词器把常见片段合成一个 token、罕见的退回字节，所以日志、ID、数字特别费 token，按字数估会差好几倍，要用同一模型的分词器真量。</p></details>
+    <details><summary>2. 为什么“4 个字符 1 个 token”在 Java 栈上准，在 UUID 上差了 4 倍？</summary><p>Java 包名和英文单词在语料里极常见，早被合并成大块；UUID 是随机的十六进制，没有哪一对常见到值得合并，只能一个字符一块。</p><p class="from">从 ④ 机制 1 推出</p></details>
+    <details><summary>3. 预测：把日志里的时间戳从 <code>[2026-11-08T20:12:43.207+0800]</code> 改成 <code>20:12:43</code>，每行大约省多少 token？</summary><p>原时间戳 30 个字符，按本页实测几乎一个字符一个 token，约 30 个；改成 8 个字符，约 8 个。每行省 20 个左右，61 行省一千多，占整个请求的四分之一上下。</p><p class="from">从 ④ 机制 1（数字一位一个 token）推出；可以在 ⑤ 里改一行验证。</p></details>
+    <details><summary>4. 预测：同一段 5000 token 的日志，问 10 个不同问题，每次只换问题、日志放在前面。打开提示缓存后，第 2～10 次的输入费用大约变成原来的多少？</summary><p>日志这段前缀一字不差，第 2 次起命中缓存，按 5% 计（Opus 5.5）；只有问题那几十个 token 按原价。所以输入费用降到原来的 5% 多一点。第 1 次要多付 25% 的写入费。顺序反过来（问题在前、日志在后）就一次也命中不了。</p><p class="from">从 ④ 机制 3 的计费表推出；缓存要求“前缀一字不差”，站 03 细讲。</p></details>
+    <details><summary>5. 为什么不干脆用 256 个字节当词表，省掉十几万行参数？</summary><p>序列会长好几倍：模型每处理一个 token 都要完整算一遍，回答要多转好几倍的圈，窗口也装不下多少内容。省下的参数远抵不过慢和贵。</p><p class="from">从 ④ 为什么这样设计 推出</p></details>
+    <details><summary>6. 放回全景：第 2 站前后各发生了什么？如果分词器坏了，把每个字都切成单个字节，整条链路会怎样？</summary><p>第 2 站之前是第 1 站值班助手拼好请求；之后是第 3 站检查装不装得下窗口、第 4 站查向量表。全切成字节后，5008 个 token 会变成七八千甚至更多：第 3 站可能装不下 8192 的窗口直接报错；装得下的话，第 5 站读输入更慢，第 10 站按 token 计费的账单也跟着涨，而且模型从没在这种切法上训练过，回答会变得很差。</p></details>
+  </div>
+</section>
+</main>
+
+<footer>
+  <p>档位：标准。本机跑过（2 核 ARM，llama.cpp b12618 里 Qwen2.5-0.5B-Instruct 的分词器，Python 3.13，2026-11-22）：⑤ 的各类文字切法、61 行 GC 日志原样和瘦身后的 token 数。按文档（Claude API 文档，2026-11 核对）：各模型单价、缓存写入 1.25 倍和命中价、批处理半价、<code>count_tokens</code> 和 <code>usage</code> 字段、tiktoken 少算和新分词器 1～1.35 倍的说法、思考按输出计费。估算：⑤ 和实验台的美元数是“Qwen 的 token 数 × Claude 单价”，不是 Claude 的真实账单。</p>
+  <p>相关：<a href="pano-02-prompt-to-answer.html">全景：一句话怎么变成模型的回答</a> · <a href="llm-next-token.html">上一个：下一个词预测</a> · <a href="llm-context-window.html">下一个：上下文窗口</a> · <a href="roadmap.html#st02">AI 地图站 02</a></p>
+</footer>
+
+<script>
+/*SIM-START*/
+// Claude 官方单价（美元 / 百万 token，2026-11 核对）。Haiku 5.5 提示超过 10 万 token 时用 long 档。
+const PRICE = {
+  opus:   { name: "Claude Opus 5.5",   in: 4.00, out: 20.00 },
+  sonnet: { name: "Claude Sonnet 5.5", in: 2.00, out: 10.00 },
+  haiku:  { name: "Claude Haiku 5.5",  in: 0.10, out: 0.50, longIn: 0.50, longOut: 2.50, longAt: 100000 }
+};
+function simulate(model, inTok, outTok, perDay, batch) {
+  const p = PRICE[model];
+  const long = p.longAt && inTok > p.longAt;
+  const pin = long ? p.longIn : p.in, pout = long ? p.longOut : p.out;
+  const k = batch ? 0.5 : 1;
+  const inCost = inTok * pin / 1e6 * k, outCost = outTok * pout / 1e6 * k;
+  const call = inCost + outCost;
+  return { name: p.name, long, call, inCost, outCost, day: call * perDay, month: call * perDay * 30, outShare: outCost / call };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const usd = v => v >= 100 ? "$" + Math.round(v).toLocaleString("en-US") : v >= 1 ? "$" + v.toFixed(2) : "$" + v.toFixed(5);
+  function draw() {
+    const m = $("#k-model").value, inTok = +$("#k-in").value, outTok = +$("#k-out").value, day = +$("#k-day").value, batch = $("#k-batch").value === "1";
+    const r = simulate(m, inTok, outTok, day, batch);
+    $("#lab-tiles").innerHTML =
+      '<div class="tile" data-role="g2"><small>一次</small><b>' + usd(r.call) + '</b><span>输入 ' + usd(r.inCost) + ' + 输出 ' + usd(r.outCost) + '</span></div>' +
+      '<div class="tile" data-role="pd"><small>一天</small><b>' + usd(r.day) + '</b><span>' + day.toLocaleString("en-US") + ' 次</span></div>' +
+      '<div class="tile" data-role="rn"><small>一个月（30 天）</small><b>' + usd(r.month) + '</b><span>' + r.name + (batch ? "，批处理" : "") + '</span></div>' +
+      '<div class="tile" data-role="of"><small>输出占比</small><b>' + Math.round(r.outShare * 100) + '%</b><span>输出 ' + outTok + ' 个 token</span></div>';
+    let tip;
+    if (r.outShare > 0.5) tip = "钱主要花在输出上（" + Math.round(r.outShare * 100) + "%）：先限制回答长度、调低 effort，日志瘦身省不了多少。";
+    else tip = "钱主要花在输入上（" + Math.round((1 - r.outShare) * 100) + "%）：日志先过滤、固定的前缀用提示缓存，省得最多。";
+    if (r.long) tip += " 这次输入超过 10 万 token，Haiku 5.5 按长提示的 0.5 / 2.5 计价。";
+    if (inTok > 8192) tip += " 另外，本页本机那个 8192 窗口的小模型已经装不下这么长的输入了。";
+    $("#lab-sum").textContent = r.name + "，每次 " + inTok + " 进 " + outTok + " 出，每天 " + day + " 次：一个月 " + usd(r.month) + "。" + tip;
+  }
+  ["#k-model", "#k-in", "#k-out", "#k-day", "#k-batch"].forEach(s => $(s).addEventListener("change", draw));
+  const ANSWER = "c";
+  $$("#lab-guess .opts button").forEach(btn => btn.addEventListener("click", () => {
+    $$("#lab-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", "false"); });
+    btn.setAttribute("aria-pressed", "true");
+    const ok = btn.dataset.g === ANSWER;
+    btn.classList.add(ok ? "right" : "wrong");
+    if (!ok) $('#lab-guess [data-g="' + ANSWER + '"]').classList.add("right");
+    $("#k-model").value = "opus"; $("#k-in").value = "5008"; $("#k-out").value = "300"; $("#k-day").value = "2000"; $("#k-batch").value = "0";
+    const r = simulate("opus", 5008, 300, 2000, false);
+    const g = $("#lab-guess-res"); g.hidden = false;
+    g.textContent = (ok ? "猜对了。" : "不是这个。") + "一次 " + usd(r.call) + "，看着不起眼；乘上每天 2000 次、30 天，就是 " + usd(r.month) + "。其中 " + Math.round((1 - r.outShare) * 100) + "% 花在 5008 个输入 token 上。";
+    draw();
+  }));
+  draw();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

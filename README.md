@@ -22,6 +22,7 @@
 | 09 | [pytest 写测试](https://study.ainiya.de/agent/python-pytest.html) | 站 01 第 7 个知识点：按名字收集、assert 改写、按参数名注入的 fixture 和作用域、dependency_overrides 加 MockTransport 不起外部服务测接口；对照 JUnit、Mockito、MockMvc，10 个测试先红后绿抓到一个真 bug，8 个坑，fixture 作用域实验台 |
 | 10 | [用 AI 编程工具干活：Claude Code、Cursor](https://study.ainiya.de/agent/ai-coding-tools.html) | 站 01 第 8 个知识点（站末总结）：智能体循环、上下文窗口与 CLAUDE.md、checkpoint 和权限模式，复盘一次真实的修 bug，6 个在 ~/claude/oncall-helper 里亲手做的练习，“这件事交给 AI 吗”判断台 |
 | 11 | [一次只写一个 token：下一个词预测](https://study.ainiya.de/agent/llm-next-token.html) | 手写生成循环逐 token 看前 3 名候选、训练就是猜下一个、结束符和 max_tokens、自回归为什么赢、开头一错一路错和不理结束符的实测，逐圈分步动画 |
+| 12 | [token、分词和计费：同一段日志要花多少钱](https://study.ainiya.de/agent/llm-tokens-billing.html) | BPE 怎么合并出词表、中文和数字为什么费 token、字节回退、输入输出缓存批处理怎么计费、61 行 GC 日志原样和瘦身的 token 数实测，月成本计算器 |
 
 # Java 后端架构（补给库）
 
