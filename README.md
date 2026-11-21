@@ -24,6 +24,7 @@
 | 11 | [一次只写一个 token：下一个词预测](https://study.ainiya.de/agent/llm-next-token.html) | 手写生成循环逐 token 看前 3 名候选、训练就是猜下一个、结束符和 max_tokens、自回归为什么赢、开头一错一路错和不理结束符的实测，逐圈分步动画 |
 | 12 | [token、分词和计费：同一段日志要花多少钱](https://study.ainiya.de/agent/llm-tokens-billing.html) | BPE 怎么合并出词表、中文和数字为什么费 token、字节回退、输入输出缓存批处理怎么计费、61 行 GC 日志原样和瘦身的 token 数实测，月成本计算器 |
 | 13 | [上下文窗口：输入输出共用，越长越慢越贵](https://study.ainiya.de/agent/llm-context-window.html) | 输入输出共用一条定长带子、KV 缓存占内存、读输入和写输出为什么随长度变慢、关键一行埋在中间被漏、超长 400 和埋针实测，窗口装箱计算器 |
+| 14 | [采样：temperature 和 top_p 改的是什么](https://study.ainiya.de/agent/llm-sampling.html) | 温度怎么调概率表的形状、top_p 怎么砍长尾、抽签和 seed、温度 0 为什么也会变（批处理和浮点）、温度 0/1 各 10 次和 4 个并发的实测、Claude 新模型不收采样参数，采样实验台 |
 
 # Java 后端架构（补给库）
 
