@@ -315,3 +315,4 @@
 | 24 | [动态规划进阶：背包和序列，一笔资金分给几个策略](https://study.ainiya.de/algo/dp-knapsack.html) | 算法基础第 22 课：资金分策略的 0-1 背包、一维为什么倒序、完全背包凑钱和组合 / 排列计数、编辑距离做交易对纠错、O(nW) 伪多项式和预算粒度，分资金实验台 |
 | 25 | [字符串：KMP 与 Trie，输入 BT 就补全交易对](https://study.ainiya.de/algo/kmp-trie.html) | 算法基础第 23 课：Trie 节点即前缀、补全实测对比全表扫 / TreeMap 区间 / Trie、KMP 失配时主串不退、next 数组即最长相等前后缀、JDK indexOf 的朴素实现和最坏输入，朴素与 KMP 比较次数实验台 |
 | 26 | [设计题：LRU、LFU 与限流，行情快照缓存和每账户每秒 20 单](https://study.ainiya.de/algo/lru-lfu-limit.html) | 算法基础第 24 课：手写 LRU（哈希表 + 双向链表）和 O(1) LFU（次数桶 + minFreq）、懒补充令牌桶和账户表淘汰、LRU 怕扫描 LFU 怕热点漂移的实测，三种淘汰策略命中率实验台 |
+| 27 | [题型地图：看到题怎么认出用哪招，12 站换成 12 组面试题](https://study.ainiya.de/algo/problem-map.html) | 算法基础第 25 课：规模定复杂度、信号词表、按不变式认题的六类地图、12 站对应的 LeetCode 题、1801 积压订单就是撮合、本机每秒能跑多少次，14 题看题认招实验台 |
