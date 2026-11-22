@@ -26,6 +26,7 @@
 | 13 | [上下文窗口：输入输出共用，越长越慢越贵](https://study.ainiya.de/agent/llm-context-window.html) | 输入输出共用一条定长带子、KV 缓存占内存、读输入和写输出为什么随长度变慢、关键一行埋在中间被漏、超长 400 和埋针实测，窗口装箱计算器 |
 | 14 | [采样：temperature 和 top_p 改的是什么](https://study.ainiya.de/agent/llm-sampling.html) | 温度怎么调概率表的形状、top_p 怎么砍长尾、抽签和 seed、温度 0 为什么也会变（批处理和浮点）、温度 0/1 各 10 次和 4 个并发的实测、Claude 新模型不收采样参数，采样实验台 |
 | 15 | [够用的数学：向量、点积和概率](https://study.ainiya.de/agent/llm-math-basics.html) | 补给页零基础：向量和意思近、点积和余弦、矩阵乘就是一堆点积、softmax 和先减最大值、概率连乘改 log 相加、五段 Python 手算，迷你注意力实验台 |
+| 16 | [注意力和 KV 缓存（只讲到够用）](https://study.ainiya.de/agent/llm-attention-kv-cache.html) | Q/K/V 和因果遮罩、旧位置的 K/V 为什么能缓存、提示缓存为什么只认前缀、有无 KV 缓存写 20 个 token（0.8 秒对 128 秒）和时间戳放开头的实测，KV 缓存分步动画 |
 
 # Java 后端架构（补给库）
 
