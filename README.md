@@ -30,6 +30,7 @@
 | 17 | [推理模型和“思考”：用 token 换质量](https://study.ainiya.de/agent/llm-reasoning-thinking.html) | 一圈算力固定所以要打草稿、强化学习练出来的思考、思考按输出计费并算进 max_tokens、Claude 的 effort 和 display、Qwen3-0.6B 开关思考的数数实测（多 70～300 倍 token 仍答错），思考成本计算器 |
 | 18 | [为什么会一本正经地编（幻觉）](https://study.ainiya.de/agent/llm-hallucination.html) | 幻觉的四个来源（只学像不像、必须挑一个、知识压在参数里、一错到底）、为什么先查再答能缓解、提示词温度和概率为什么都兜不住、三道题三种做法的实测，核对规则实验台 |
 | 19 | [Embedding：文本变向量，意思近的靠得近](https://study.ainiya.de/agent/llm-embedding.html) | 向量表和句向量的区别、池化和归一化、对比学习、余弦只看排名、8 条工单 3 个提问的字重合对比余弦实测、否定句和指令前缀两个坑，相似工单检索实验台 |
+| 20 | [怎么选模型：能力、价格、速度、开源闭源、国内外](https://study.ainiya.de/agent/llm-choose-model.html) | 按调用分类、先过硬约束（数据、合规、窗口、功能、延迟）再在自己的评测集上量质量成本速度、Claude 三档、开源和国内外的取舍、规则和两个小模型的告警分类实测，按调用分配模型的月成本计算器 |
 
 # Java 后端架构（补给库）
 
