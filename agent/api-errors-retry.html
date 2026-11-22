@@ -1,0 +1,832 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<!-- 布局：设计思想型，⑤五种重试策略对照实测 + SDK 重试实测。角色色：rn=出错和重试，of=退避，cg=抖动，bk=服务端（限流），pd=客户端，g2=结果。交互：⑥重试策略模拟器（先猜再跑）。 -->
+<title>出错怎么办：429 限流、过载、超时，退避加抖动</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* 本页：布局、六个角色色各代表什么、有哪些交互，写在这里 */
+/* learn 六步页的基础样式（固定一份，不要从别的页面抄）。配色：pd bk cg g2 rn of 六个角色色，warn / bad / good / neutral 含义固定。
+   组件写法见 assets/skeleton.html。本页特有的样式写在文件末尾的标记后面，不改上面的规则。 */
+:root{--paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;}
+}
+:root[data-theme="dark"]{--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;}
+*{box-sizing:border-box}
+body{background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){
+  *{transition:none!important;scroll-behavior:auto!important}
+}
+html{scroll-behavior:smooth}
+section[id],.sub[id],.pit[id],figure[id]{scroll-margin-top:64px}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)}
+.f-of{fill:var(--of)}
+.f-cg{fill:var(--cg)}
+.f-g2{fill:var(--g2)}
+.f-bad{fill:var(--bad)}
+.f-pd{fill:var(--pd)}
+.f-bk{fill:var(--bk)}
+.f-good{fill:var(--good)}
+.f-rn{fill:var(--rn)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains li.mid::before{content:"•";color:var(--muted)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mech-h .sn{font-size:20px}
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p,details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+@media (max-width:980px){
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .two,.design,.pits,.rules-list,.next{grid-template-columns:1fr}
+}
+@media (max-width:520px){
+  .presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+table.t td.bad,table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.s{color:var(--of)}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.cap{font-size:13.5px;color:var(--muted)}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){
+  .steps-out li{grid-template-columns:minmax(0,1fr)}
+}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try code{overflow-wrap:anywhere}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){
+  .tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+.x-box{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.x-zone{fill:none;stroke:var(--line-strong);stroke-width:1.3;stroke-dasharray:6 5}
+.x-zl{font-size:12px;fill:var(--muted)}
+.x-r{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.x-rs{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.x-fill{fill:var(--rc)}
+.x-t{font-size:13px;fill:var(--ink)}
+.x-tb{font-size:13.5px;font-weight:700;fill:var(--ink)}
+.x-ts{font-size:11.5px;fill:var(--muted)}
+.x-tc{font-size:12px;font-weight:700;fill:var(--rc)}
+.x-mono{font-family:var(--font-mono);font-size:11px;fill:var(--ink)}
+.x-mono.dim{fill:var(--muted)}
+.x-mono.bad{fill:var(--bad);font-weight:600}
+.x-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.x-ed{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.x-ed.dash{stroke-dasharray:5 4}
+.x-ed.bad{stroke:var(--bad)}
+.x-ed.c{stroke:var(--rc);stroke-width:2}
+.x-mk{fill:var(--line-strong)}
+.x-mkb{fill:var(--bad)}
+.fig-box{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card);padding:10px}
+.fig-box > svg{min-width:760px;width:100%;display:block}
+.swipe{display:none;font-size:13px;color:var(--muted);margin:0 0 4px}
+@media (max-width:800px){
+  .swipe{display:block}
+}
+.ids{font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ids .a{color:var(--cg);font-weight:600}
+.ids .b{color:var(--of);font-weight:600}
+.verdict-box{font-size:14.5px;padding:10px 14px;border-radius:12px;border:2px solid var(--rc);background:var(--rt)}
+.knob-row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end}
+.knob-row label{display:flex;flex-direction:column;gap:4px;font-size:13.5px;color:var(--muted)}
+.knob-row select{font:inherit;font-size:14px;padding:4px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){
+  .ctl-grid{grid-template-columns:1fr!important}
+}
+.codebox pre .bad{color:var(--bad);font-weight:600}
+.codebox pre .ok{color:var(--good);font-weight:600}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.sv .fade{opacity:.25;transition:opacity .25s}
+.sv .lit{opacity:1;transition:opacity .25s}
+.sv .lit .x-rs,.sv .lit .x-r{stroke-width:3}
+/* ===== 本页特有的样式写在这一行下面 ===== */
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>AI Agent 工程师</span><span aria-hidden="true">/</span><span class="tb-here">出错和重试</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs><marker id="xa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="x-mk"/></marker></defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">429 rate_limit_error · 529 overloaded_error · retry-after · 超时 · 指数退避 · 抖动 · 假服务 30 个客户端实测</p>
+  <h1>出错怎么办：429 限流、过载、超时，退避加抖动</h1>
+  <p class="lead">模型调用是个又慢又会失败的远程调用：会被限流（<b>429</b>）、会遇上整体过载（<b>529</b>）、会超时。该重试的要重试，但<b>不能一起、立刻重试</b>：一群客户端同时被拒、同时重来，又同时撞上限流。办法是<b>退避</b>（每次多等一会儿）加<b>抖动</b>（等多久带点随机，把大家错开），服务端给了 <code>retry-after</code> 就听它的。实测 30 个客户端撞上每秒 5 个的限流：立即重试 1 秒内打出 413 次请求、只成功 10 个；按 <code>retry-after</code> 加抖动，78 次请求全部成功。</p>
+  <nav class="route" aria-label="六步学习路线">
+<a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+<a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+<a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+<a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+<a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+<a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+<a href="#loop"><b>↺</b>回到⑤</a>
+</nav>
+  <p class="where"><span>全景：<a href="pano-03-triage-call.html#s-5">一次分诊调用的来回 · 第 4、5 站</a></span><span>地图：<a href="roadmap.html#st03">站 03 · 出错怎么办：429 限流、过载、超时，退避加抖动</a></span><span>深度：懂设计</span></p>
+  <p class="scene"><b>这一页的位置</b><span>站 03 第 5 个知识点，地图过关题 3“讲清重试为什么要退避加抖动，不加会怎样”的答案在 ④ 和 ⑤。补给：<a href="../perf/response-time-queueing.html">响应时间为什么越压越长（重试反馈环）</a>、<a href="../network/http-client-pool-timeouts.html">HTTP 客户端超时</a>、<a href="../arch/three-highs-map.html">三高知识地图</a>。</span></p>
+</header>
+
+<section id="s1" data-role="rn">
+  <div class="mech-h"><h2><span class="sn">①</span>要解决的问题：晚高峰，20 个分诊实例一起被限流</h2></div>
+  <p>在全景第 4、5 站，这一步要解决：请求被拒、服务过载、半天不回时，值班助手该怎么办。晚高峰告警成片涌进来，几十个分诊请求几乎同时发出，账号的每分钟限额一下就用完了，网关开始回 429。</p>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 200" role="img" aria-label="三种失败：429 是你的账号超额，等 retry-after 再试；529 是服务整体过载，退避重试或换模型；超时是等太久，要区分连接超时和生成太慢">
+        <g data-role="rn"><rect class="x-r" x="12" y="20" width="300" height="140" rx="12"/><text class="x-tc" x="24" y="42">429 rate_limit_error</text><text class="x-tb" x="24" y="68">你的账号超额了</text><text class="x-ts" x="24" y="92">每分钟请求数、输入或输出 token 数</text><text class="x-ts" x="24" y="112">响应头带 retry-after：等几秒再来</text><text class="x-ts" x="24" y="140">别人不受影响，只拦你</text></g>
+        <g data-role="of"><rect class="x-r" x="330" y="20" width="300" height="140" rx="12"/><text class="x-tc" x="342" y="42">529 overloaded_error</text><text class="x-tb" x="342" y="68">服务整体过载</text><text class="x-ts" x="342" y="92">不是你超额，是大家都在抢</text><text class="x-ts" x="342" y="112">退避重试；持续过载就换备用模型</text><text class="x-ts" x="342" y="140">也可能出现在流的中途（流式那页）</text></g>
+        <g data-role="bk"><rect class="x-r" x="648" y="20" width="300" height="140" rx="12"/><text class="x-tc" x="660" y="42">超时 / 连接错误</text><text class="x-tb" x="660" y="68">等太久或者断了</text><text class="x-ts" x="660" y="92">连接都没建立：可以放心重试</text><text class="x-ts" x="660" y="112">生成太慢被你掐断：重试要重付钱</text><text class="x-ts" x="660" y="140">长输出改流式（流式那页）</text></g>
+        <text class="x-ts" x="12" y="188">错误类型和状态码按 Claude API 文档；SDK 默认会对 408、409、429、5xx 和连接错误自动重试 2 次。</text>
+      </svg>
+    </div>
+  </figure>
+</section>
+
+<section id="s2" data-role="other">
+  <div class="mech-h"><h2><span class="sn">②</span>不用它会怎样：两种极端</h2></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>会怎样</th><th>⑤ 实测（30 个客户端，限流每秒 5 个）</th></tr></thead>
+      <tbody>
+        <tr><th>不重试，一次失败就报错</th><td class="bad">晚高峰大量分诊直接失败，值班页面一片“分诊失败”；其实等一两秒就能成功</td><td>按限流规则，第一轮只有 5 个能过，另外 25 个直接失败</td></tr>
+        <tr><th>失败了立刻重试，直到成功</th><td class="bad">失败的请求马上变成新的请求，限流越撞越狠，服务端被自己的重试淹没（重试反馈环）</td><td class="bad">1 秒内打出 413 次请求，429 有 403 次；最挤的 100 毫秒里 160 个请求，服务端连接被重置；最后只成功 10 个</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="verdict" data-role="bad"><b>不懂精华时的典型误用</b>：每一层都加重试。SDK 自己重试 2 次，你的代码包一层重试 3 次，上游网关再重试 2 次，一次失败最多变成 3 × 4 × 3 = 36 次请求，在服务最脆弱的时候把它压垮。重试只在一层做，其他层透传。</div>
+</section>
+
+<section id="s3" data-role="rn">
+  <div class="mech-h"><h2><span class="sn">③</span>几种流派：失败以后等多久</h2></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>流派</th><th>第 n 次失败后等</th><th>问题</th></tr></thead>
+      <tbody>
+        <tr><th>立即重试</th><td>0</td><td class="bad">放大故障</td></tr>
+        <tr><th>固定间隔</th><td>每次 1 秒</td><td class="mid">大家同时失败、同时等 1 秒、同时再来，永远同步</td></tr>
+        <tr><th>指数退避</th><td>0.2 × 2ⁿ 秒，有上限</td><td class="mid">压力降了，但同一时刻失败的仍然同一时刻重来，成群地撞</td></tr>
+        <tr class="pick"><th><b>指数退避 + 全抖动</b></th><td>在 0 到 0.2 × 2ⁿ 之间随机</td><td class="good">把同一批失败的请求在时间上摊开</td></tr>
+        <tr class="pick"><th><b>听服务端的 retry-after（+ 抖动）</b></th><td>服务端说等几秒就等几秒，再加一点随机</td><td class="good">服务端最清楚什么时候有余量</td></tr>
+        <tr><th>熔断 / 降级</th><td>一段时间内不再调，直接走备用</td><td class="mid">持续故障时用，配合备用模型（站 03 抽象层）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页学“有上限的指数退避 + 全抖动，优先听 retry-after”</b>：这也是各家 SDK 默认的做法（按 SDK 文档：自动重试并带退避）；你要做的是别在它外面再乱加一层。</p>
+</section>
+
+<section id="s4" data-role="rn">
+  <div class="mech-h"><h2><span class="sn">④</span>核心取舍：重试是在“成功率”和“给服务端添乱”之间找平衡</h2></div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>令牌桶限流</b>：桶里的令牌按固定速率补充，每个请求拿一个，拿不到就被拒（<a href="../arch/rate-limit-algorithms.html">限流算法</a>）。</li>
+      <li><b>重试反馈环</b>：失败 → 重试 → 负载更高 → 更多失败（<a href="../perf/response-time-queueing.html">响应时间为什么越压越长</a>）。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-which">取舍 1 · 先分清：哪些该重试，哪些重试也没用</h3>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>错误</th><th>重试</th><th>理由</th></tr></thead>
+      <tbody>
+        <tr><th>429 限流</th><td class="good">要，按 <code>retry-after</code> 等</td><td>暂时的，过几秒就有额度</td></tr>
+        <tr><th>529 过载、500 等 5xx</th><td class="good">要，退避；持续就切备用模型</td><td>服务端的问题，可能很快恢复</td></tr>
+        <tr><th>连接错误、连接超时</th><td class="good">要</td><td>请求多半还没到服务端</td></tr>
+        <tr><th>读超时（生成太慢）</th><td class="mid">谨慎</td><td>服务端可能已经在生成、在计费；重试是从头再来一遍。长输出用流式</td></tr>
+        <tr><th>400 参数错、401 鉴权、404 模型名错</th><td class="bad">不要</td><td>请求本身是错的，再发一万次也是错</td></tr>
+        <tr><th>200 但内容不合格</th><td class="mid">另一种重试</td><td>是<a href="api-structured-output.html">结构化输出</a>那一层的事，要带着错误原因重发</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="m-backoff">取舍 2 · 退避：失败越多，等得越久</h3>
+  <p>第 n 次失败后等 <code>min(上限, 基数 × 2ⁿ)</code>：0.2、0.4、0.8、1.6 秒……服务越是持续出问题，客户端越是退得远，给它喘息的空间；上限防止等到地老天荒。退避解决的是“压力”，没解决“同步”：30 个同一时刻失败的客户端，按同一个公式等，就会在同一时刻一起回来。</p>
+
+  <h3 id="m-jitter">取舍 3 · 抖动：把同一批失败的请求在时间上摊开</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 230" role="img" aria-label="没有抖动时，同一时刻失败的客户端在同一时刻重试，形成一个个尖峰；加了全抖动后，重试在 0 到退避时长之间均匀散开，每个时刻的请求数接近服务端的处理能力">
+        <text class="x-tc" x="12" y="20">指数退避，不加抖动：大家一起等、一起回来</text>
+        <line class="x-ed" x1="20" y1="96" x2="940" y2="96"/>
+        <g data-role="rn">
+          <rect class="x-rs" x="30" y="36" width="14" height="60"/><text class="x-ts" x="22" y="112">0 s</text>
+          <rect class="x-rs" x="110" y="46" width="14" height="50"/><text class="x-ts" x="102" y="112">0.2</text>
+          <rect class="x-rs" x="270" y="52" width="14" height="44"/><text class="x-ts" x="262" y="112">0.6</text>
+          <rect class="x-rs" x="590" y="58" width="14" height="38"/><text class="x-ts" x="582" y="112">1.4</text>
+        </g>
+        <g data-role="bk"><line class="x-ed bad" x1="20" y1="80" x2="940" y2="80"/><text class="x-ts" x="760" y="74">服务端每个时刻能接的量</text></g>
+        <text class="x-ts" x="640" y="58">每个尖峰都远超能力：大部分又被拒</text>
+        <text class="x-tc" x="12" y="140">加上全抖动：等 0～2ⁿ×0.2 秒之间的随机时长</text>
+        <line class="x-ed" x1="20" y1="216" x2="940" y2="216"/>
+        <g data-role="cg">
+          <rect class="x-rs" x="30" y="156" width="14" height="60"/>
+          <rect class="x-rs" x="60" y="200" width="10" height="16"/><rect class="x-rs" x="90" y="198" width="10" height="18"/><rect class="x-rs" x="130" y="202" width="10" height="14"/><rect class="x-rs" x="170" y="199" width="10" height="17"/><rect class="x-rs" x="215" y="203" width="10" height="13"/><rect class="x-rs" x="260" y="201" width="10" height="15"/><rect class="x-rs" x="320" y="204" width="10" height="12"/><rect class="x-rs" x="380" y="202" width="10" height="14"/><rect class="x-rs" x="450" y="205" width="10" height="11"/><rect class="x-rs" x="520" y="203" width="10" height="13"/><rect class="x-rs" x="600" y="205" width="10" height="11"/><rect class="x-rs" x="690" y="206" width="10" height="10"/>
+        </g>
+        <g data-role="bk"><line class="x-ed bad" x1="20" y1="200" x2="940" y2="200"/></g>
+        <text class="x-ts" x="720" y="186">重试被摊开，大多落在能力线以下</text>
+      </svg>
+    </div>
+    <figcaption>示意图。⑤ 的实测：不加抖动全部成功要 20.6 秒，加了全抖动 8.0 秒。</figcaption>
+  </figure>
+  <p>“全抖动”是在 0 到退避时长之间均匀随机，比“退避时长再加一点随机”散得更开。它的代价是有些客户端会运气好、几乎不等就重试；但从整体看，单位时间内撞上服务端的请求数被压平了，这正是限流最想要的。</p>
+
+  <h3 id="m-retryafter">取舍 4 · 能听服务端的，就听服务端的</h3>
+  <p>429 响应里的 <code>retry-after</code> 是服务端告诉你“多久以后有额度”，比客户端自己猜的准。在它的基础上再加一点抖动，避免所有人在同一秒回来。⑤ 里这一种的 429 次数最少（48 次，其他退避策略都在一百次以上）。</p>
+
+  <h3 id="m-design">核心取舍：为什么不是“越快重试越好”，也不是“越晚越好”</h3>
+  <div class="design">
+    <div class="card" data-role="rn"><h3>有上限的退避 + 抖动，只在一层做</h3><ul class="pains">
+      <li class="ok">短暂故障时，几秒内就恢复成功；持续故障时，自动退得越来越远，不添乱。</li>
+      <li class="ok">抖动让同一批失败的客户端不再同步，服务端的负载曲线被压平。</li>
+      <li class="mid">代价：单个请求的最坏耗时变长；要给整体设一个截止时间，超过就放弃或降级。</li>
+    </ul></div>
+    <div class="card" data-role="other"><h3>立即重试，或者每层都重试</h3><ul class="pains">
+      <li class="ok">单个请求看起来“最积极”。</li>
+      <li class="bad">把一次短暂的限流放大成长时间的过载；多层重试相乘，压力成倍放大（② 的误用）。</li>
+    </ul></div>
+  </div>
+  <div class="verdict" data-role="rn"><b>决定胜负的约束（过关题 3 的答案）</b>：服务端的余量是所有客户端共享的。重试的目标不是“让我这个请求最快成功”，而是“让大家在余量里尽快都成功”：退避降低总压力，抖动打散同步，<code>retry-after</code> 让客户端按服务端的节奏来。不加退避，失败立刻变成新的负载；不加抖动，大家成群地撞，每一波都大部分落空。</div>
+
+  <h3>最少的语法</h3>
+  <div class="two">
+    <div class="codebox"><div class="code-bar"><b>官方 SDK：用它自带的重试</b><span>按 Claude SDK 文档</span></div><pre><code>client = anthropic.Anthropic(
+    max_retries=3,        <span class="cm"># 默认 2；408/409/429/5xx/连接错误自动重试</span>
+    timeout=60.0,         <span class="cm"># 单次请求的超时（秒）</span>
+)
+try:
+    msg = client.messages.create(...)
+except anthropic.RateLimitError:     <span class="cm"># 重试用完了仍是 429</span>
+    ...
+except anthropic.APIStatusError as e:
+    ...                              <span class="cm"># 其他状态码，按 e.status_code 分别处理</span></code></pre></div>
+    <div class="codebox"><div class="code-bar"><b>自己写：有上限的指数退避 + 全抖动</b><span>⑤ 的策略之一</span></div><pre><code>def backoff(attempt, base=0.2, cap=8.0):
+    return random.uniform(0, min(cap, base * 2 ** attempt))
+
+for attempt in range(MAX_TRIES):
+    code, retry_after = call()
+    if code == 200: break
+    if code not in (408, 409, 429, 500, 502, 503, 529): raise
+    time.sleep(float(retry_after) + random.uniform(0, 1)
+               if retry_after else backoff(attempt))</code></pre></div>
+  </div>
+</section>
+
+<section id="s5" data-role="rn">
+  <div class="mech-h"><h2><span class="sn">⑤</span>套进场景：30 个分诊请求同时撞上限流</h2></div>
+  <p>站 03 的动手项“写一个会返回 429 的假服务，验证退避加抖动”。<code>fake_server.py</code> 用标准库实现一个“假 Claude”：令牌桶每秒补 5 个、最多存 5 个，拿不到令牌就回 429 并带 <code>retry-after: 1</code>。30 个线程同时各发一个请求，每种策略最多试 20 次，每轮开始前等令牌桶回满。</p>
+  <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>main.py（五种等法）</b><a href="https://github.com/archeu/study-labs/tree/main/agent/api-errors-retry">完整代码 →</a></div><pre><code>def wait_time(strategy, attempt, retry_after):
+    exp = min(CAP, BASE * 2 ** attempt)            <span class="cm"># BASE=0.2s，CAP=8s</span>
+    return {"立即重试": 0.0,
+            "固定 1 秒": 1.0,
+            "指数退避": exp,
+            "指数退避+全抖动": random.uniform(0, exp),
+            "按 retry-after+抖动": float(retry_after or 1) + random.uniform(0, 1.0)}[strategy]</code></pre></div>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>python main.py herd</b><span>2026-11-22 · 2 核 ARM · Python 3.13 · 30 个客户端 · 限流每秒 5 个</span></div><pre class="console">立即重试         成功 <span class="r">10/30</span>  请求共  413 次（429  403 次）  全部成功用时   1.0 s  最挤的 100ms 里 <span class="r">160</span> 个请求
+                 <span class="c">（还有客户端遇到 ConnectionResetError：服务端被打到重置连接）</span>
+固定 1 秒        成功 30/30  请求共  105 次（429   75 次）  全部成功用时   5.0 s  最挤的 100ms 里 30 个请求
+指数退避         成功 30/30  请求共  143 次（429  113 次）  全部成功用时  <span class="r">20.6 s</span>  最挤的 100ms 里 30 个请求
+指数退避+全抖动  成功 30/30  请求共  149 次（429  119 次）  全部成功用时   8.0 s  最挤的 100ms 里 47 个请求
+按 retry-after+抖动 成功 30/30  请求共 <span class="hi">78</span> 次（429 <span class="hi">48</span> 次）  全部成功用时   5.3 s  最挤的 100ms 里 30 个请求</pre></div>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>python main.py sdk：官方 SDK 自带的重试</b><span>anthropic 2.12.0，max_retries=2</span></div><pre class="console">529 两次后成功：SDK 一共发了 3 次请求，间隔 ['0.45s', '0.75s']，总用时 1.23s，结果 GC
+超时 1s、服务要 3s：SDK 发了 3 次，间隔 ['1.47s', '1.91s']，4.38s 后抛 APITimeoutError</pre></div>
+  <div class="lab-res" data-role="rn"><b>读出来的结论</b><ul>
+    <li><b>立即重试是在攻击自己的服务</b>：1 秒内 413 次请求，最挤的 100 毫秒里 160 个，服务端开始重置连接；20 次额度很快耗光，30 个里只成功 10 个。</li>
+    <li><b>指数退避不加抖动，拖得最久</b>：30 个客户端同一时刻失败、按同一个公式等，于是在 0.2、0.6、1.4 秒……一波一波地一起回来，每波只有 5 个能过，剩下的等得越来越久，最后一个 20.6 秒才成功。</li>
+    <li><b>加上全抖动，同样的退避快了一倍多</b>：8.0 秒，请求被摊开了。</li>
+    <li><b>听 <code>retry-after</code> 最省</b>：服务端说 1 秒后有额度，客户端就在 1～2 秒之间随机回来，请求最少（78 次），时间也接近理论下限（30 个 ÷ 每秒 5 个 ≈ 5 秒）。</li>
+    <li>“固定 1 秒”在这里看起来不错，是因为它的间隔恰好等于令牌桶的补充周期；换一个限流节奏，它就和“不加抖动”一样一直同步地撞。</li>
+    <li><b>SDK 已经替你做了退避</b>：两次 529 之后间隔 0.45 秒、0.75 秒（递增且带随机）。超时也会重试：单次 1 秒超时、最多重试 2 次，4.38 秒后才最终抛错，墙钟时间约是“超时 ×（重试次数 + 1）”加上退避。</li>
+  </ul></div>
+  <div class="verdict" data-role="done"><b>到这里已经能交差了</b>：你能说清哪些错误该重试、退避和抖动各解决什么，并能用假服务亲手验证。<br><b>反例和误用</b>：多层重试相乘（<a href="#p-layers">误用 1</a>），重试不该重试的（<a href="#p-400">误用 2</a>），超时设得比生成还短（<a href="#p-timeout">误用 3</a>），没有总截止时间（<a href="#p-deadline">误用 4</a>）。</div>
+</section>
+
+<section id="s6" data-role="rn">
+  <div class="mech-h"><h2><span class="sn">⑥</span>反例和误用</h2></div>
+  <h3>第一圈 · 常见误用</h3>
+  <div class="pits">
+    <div class="pit" id="p-layers"><b><em>1</em>每一层都加重试<a class="rootmark" href="#m-design">← ④ 核心取舍</a></b>
+      <dl><dt>现象</dt><dd>一次 529，日志里出现几十次请求；故障恢复后又被自己的重试打趴下。</dd><dt>根源</dt><dd>SDK 默认重试 2 次（共 3 次），外面再包 3 次、网关再 2 次，次数相乘。</dd><dt>做法</dt><dd class="fix">只在一层重试：要么用 SDK 的（调 <code>max_retries</code>），要么把它设成 0、自己写；网关层对模型调用关掉重试。</dd></dl>
+    </div>
+    <div class="pit" id="p-400"><b><em>2</em>400、401 也去重试<a class="rootmark" href="#m-which">← ④ 取舍 1</a></b>
+      <dl><dt>现象</dt><dd>参数写错（比如给 Opus 5.5 传了 <code>temperature</code>）后，重试 3 次都是 400，浪费时间还刷屏报警。</dd><dt>根源</dt><dd>请求本身是错的，重发不会变对。</dd><dt>做法</dt><dd class="fix">按状态码分类：只对 408、409、429、5xx、连接错误重试；用 SDK 的具体异常类（<code>RateLimitError</code>、<code>APIConnectionError</code>…）分开处理，别用一个大 <code>except</code> 全兜住。</dd></dl>
+    </div>
+    <div class="pit" id="p-timeout"><b><em>3</em>超时设得比生成时间还短<span class="seen">实测</span><a class="rootmark" href="#m-which">← ④ 取舍 1</a></b>
+      <dl><dt>现象</dt><dd>诊断报告总是写到一半就超时，重试又从头写，钱花两三遍，最后还是失败。</dd><dt>根源</dt><dd>读超时掐断的是“正在生成”的请求；⑤ 实测 1 秒超时、服务要 3 秒，SDK 重试 3 次全部超时，4.38 秒后报错。</dd><dt>做法</dt><dd class="fix">连接超时短（几秒），读超时按最长输出估；长输出用流式（字节一直在流，不会触发读超时）。</dd></dl>
+    </div>
+    <div class="pit" id="p-deadline"><b><em>4</em>只有重试次数，没有总截止时间<a class="rootmark" href="#m-backoff">← ④ 取舍 2</a></b>
+      <dl><dt>现象</dt><dd>退避上限 60 秒、重试 5 次，一个分诊请求最坏要等好几分钟，用户早就走了，后台还在等。</dd><dt>根源</dt><dd>指数退避让最坏耗时迅速变长；“次数”控制不了“时间”。</dd><dt>做法</dt><dd class="fix">给整个调用一个截止时间（比如分诊 30 秒），到点就放弃并降级：换备用模型、走规则兜底，或者在页面上显示“稍后自动补上”。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <ul class="rules-list">
+    <li><b>重试只在一层，策略写进配置</b>：次数、基数、上限、截止时间都在配置里。防误用 1、4。</li>
+    <li><b>按状态码和异常类分流</b>：可重试的退避重试，不可重试的立刻报错，内容不合格的交给结构化输出那一层。防误用 2。</li>
+    <li><b>监控 429 和 529 的比例</b>：429 多说明自己用量超了（该申请额度或削峰），529 多说明服务方有问题（该切备用）。</li>
+    <li><b>削峰比重试更根本</b>：不急的调用（夜里的复盘报告）走批处理或排队，别和白天的分诊抢额度（<a href="api-prompt-cache-batch.html">省钱那页</a>）。</li>
+  </ul>
+
+  <h3>第三圈 · 更深一层</h3>
+  <div class="two">
+    <div class="card" data-role="bk"><h4>自适应限流</h4><p>客户端自己维护一个发送速率，收到 429 就降、成功就慢慢升（类似 TCP 拥塞控制的加性增、乘性减），比被动重试更早地把压力压下来。</p></div>
+    <div class="card" data-role="of"><h4>熔断和备用模型</h4><p>连续一段时间 529 就打开熔断，直接走备用模型或降级逻辑，过一会儿再试探（<a href="../cloud/sentinel-circuit-breaker.html">Sentinel 熔断那页</a>；站 03 抽象层负责“换谁”）。</p></div>
+  </div>
+
+  <div class="lab" data-role="rn" id="lab">
+    <h3 style="margin:0">实验台：重试策略模拟器</h3>
+    <div class="guess" id="lab-guess">
+      <p>先猜：100 个客户端同时撞上每秒 5 个的限流，用“指数退避，不加抖动”，全部成功大约要多久？</p>
+      <div class="opts">
+        <button type="button" data-g="a">20 秒左右（100 ÷ 5）</button>
+        <button type="button" data-g="b">明显更久：同步的一波波，大部分每波都落空</button>
+      </div>
+      <p class="res" id="lab-guess-res" hidden></p>
+    </div>
+    <div class="knob-row">
+      <label for="k-s">策略<select id="k-s"><option value="0">立即重试</option><option value="1">固定 1 秒</option><option value="2" selected>指数退避</option><option value="3">指数退避+全抖动</option><option value="4">按 retry-after+抖动</option></select></label>
+      <label for="k-n">客户端数<select id="k-n"><option value="30" selected>30（⑤ 的规模）</option><option value="100">100</option></select></label>
+      <label for="k-r">限流（每秒放行）<select id="k-r"><option value="5" selected>5</option><option value="20">20</option></select></label>
+    </div>
+    <div class="tiles4" id="lab-tiles"></div>
+    <p class="verdict-box" data-role="rn" id="lab-sum"></p>
+    <p class="tip">按 ⑤ 的规则在页面里模拟（令牌桶、同样的五种等法、最多 20 次、每次往返 5 毫秒，固定随机种子）。数字和 ⑤ 的实测在同一个量级，但不会完全一样：真实服务还有线程调度和网络的抖动。</p>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>站 10：多个服务共享一个模型账号的额度怎么分（配额、优先级队列）。</li>
+    <li>幂等：模型调用本身无副作用，但调用之后“写工单”有，重试时怎么不写两次。</li>
+    <li>对冲请求（hedged request）：慢了就同时发第二个，谁先回用谁，用钱换尾延迟。</li>
+  </ul>
+</section>
+
+<section id="loop" data-role="other">
+  <div class="mech-h"><h2><span class="sn">↺</span>回到⑤：改一改</h2></div>
+  <ol class="rules-list">
+    <li><b>加截止时间</b>：给 <code>client()</code> 加一个 10 秒的总截止时间，超时就记为失败；用“指数退避”跑一次，看有几个客户端会被截掉。（误用 4）</li>
+    <li><b>两层重试</b>：在 <code>cmd_sdk</code> 的 529 场景外面再包一层 3 次的循环，数一数服务端一共收到多少次请求。（误用 1）</li>
+    <li><b>自适应</b>：给 30 个客户端共享一个“允许速率”，收到 429 减半、成功加 0.5，和“按 retry-after+抖动”比请求数。（第三圈）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>只对暂时性错误（429、5xx、连接错误）重试，而且只在一层做；用有上限的指数退避降低压力、用抖动打散同步、优先听 retry-after，并给整体设截止时间和降级。</p></details>
+    <details><summary>2. 重试为什么要退避？不加会怎样？</summary><p>失败的请求立刻变成新的请求，限流越撞越狠，服务被自己的重试淹没；⑤ 实测立即重试 1 秒 413 次请求，只成功 10 个。</p><p class="from">从 ④ 取舍 2 和 ⑤ 推出</p></details>
+    <details><summary>3. 已经有退避了，为什么还要抖动？</summary><p>同一时刻失败的客户端按同一个公式等，会在同一时刻一起回来，每一波都远超余量、大部分落空；抖动把它们摊开。⑤ 实测：不加抖动 20.6 秒，加了 8.0 秒。</p><p class="from">从 ④ 取舍 3 推出</p></details>
+    <details><summary>4. 预测：SDK 设 <code>max_retries=3</code>、<code>timeout=60</code>，服务一直不回，最坏多久才报错？</summary><p>大约 4 × 60 秒再加上几次退避，四分钟出头。按 SDK 文档，超时也会重试，墙钟时间可以达到“超时 ×（重试次数 + 1）”。要另设总截止时间。</p><p class="from">从 ⑤ 的 sdk 实测和误用 4 推出</p></details>
+    <details><summary>5. 预测：429 越来越多，是该把重试次数调大，还是调小？</summary><p>先看原因：持续的 429 说明自己的用量就是超了，调大重试只会更堵；该削峰（排队、批处理）、申请更高额度，或者把一部分调用换到别的模型或账号。重试只适合“短暂”的超额。</p><p class="from">从 ④ 核心取舍和第二圈推出</p></details>
+    <details><summary>6. 放回全景：第 4、5 站前后是什么？如果第 5 站持续回 529 十分钟，而第 4 站只有 SDK 默认重试，链路会怎样？</summary><p>前面是第 3 站 SDK 拼好请求，后面是第 6 站模型生成。持续 529 时，每个分诊请求重试 2 次后失败，第 8～10 站都不会发生，值班页面十分钟内全是“分诊失败”。需要抽象层（第 2 站）在连续失败后切到备用模型，或者走规则兜底。</p></details>
+  </div>
+</section>
+</main>
+
+<footer>
+  <p>档位：标准。本机跑过（2026-11-22，2 核 ARM，Python 3.13 标准库写的假服务和客户端，官方 <code>anthropic</code> SDK 2.12.0）：五种重试策略下 30 个客户端的请求数、429 数、完成时间、最挤的 100 毫秒；SDK 在 529 和超时下的自动重试次数和间隔。按文档（Claude API 和 SDK，2026-11）：429 / 529 的错误类型、<code>retry-after</code>、SDK 默认重试的状态码和次数、超时也会重试。④ 取舍 3 的图是示意。实验台是页面内的模拟，不是实测。</p>
+  <p>相关：<a href="pano-03-triage-call.html">全景：一次分诊调用的来回</a> · <a href="api-structured-output.html">上一个：结构化输出</a> · <a href="api-prompt-cache-batch.html">下一个：省钱</a> · <a href="../arch/rate-limit-algorithms.html">限流算法</a> · <a href="../perf/response-time-queueing.html">重试反馈环</a> · <a href="roadmap.html#st03">AI 地图站 03</a></p>
+</footer>
+
+<script>
+/*SIM-START*/
+const NAMES = ["立即重试", "固定 1 秒", "指数退避", "指数退避+全抖动", "按 retry-after+抖动"];
+function rng(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+function simulate(strategy, nClients, rate, seed = 7) {
+  const R = rng(seed), BASE = 0.2, CAP = 8, MAX = 20, RTT = 0.005, BURST = rate, DT = 0.005;
+  let tokens = BURST, reqs = 0, r429 = 0, done = 0, failed = 0, lastDone = 0;
+  const cl = Array.from({ length: nClients }, () => ({ next: 0, att: 0, state: 0 }));   // state 0 等待 1 成功 2 放弃
+  const buckets = {};
+  for (let t = 0; t < 300 && done + failed < nClients; t += DT) {
+    tokens = Math.min(BURST, tokens + rate * DT);
+    for (const c of cl) {
+      if (c.state !== 0 || c.next > t) continue;
+      reqs++; const b = Math.floor(t / 0.1); buckets[b] = (buckets[b] || 0) + 1;
+      if (tokens >= 1) { tokens -= 1; c.state = 1; done++; lastDone = t; continue; }
+      r429++;
+      const exp = Math.min(CAP, BASE * Math.pow(2, c.att));
+      const w = [0, 1, exp, R() * exp, 1 + R()][strategy];
+      c.att++;
+      if (c.att >= MAX) { c.state = 2; failed++; continue; }
+      c.next = t + RTT + w;
+    }
+  }
+  return { reqs, r429, done, failed, time: lastDone, peak: Math.max(...Object.values(buckets)) };
+}
+/*SIM-END*/
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  function draw() {
+    const s = +$("#k-s").value, n = +$("#k-n").value, rate = +$("#k-r").value;
+    const r = simulate(s, n, rate);
+    $("#lab-tiles").innerHTML =
+      '<div class="tile" data-role="' + (r.failed ? "bad" : "done") + '"><small>成功</small><b>' + r.done + "/" + n + "</b><span>" + (r.failed ? r.failed + " 个 20 次都没过" : "全部成功") + "</span></div>" +
+      '<div class="tile" data-role="rn"><small>请求总数（其中 429）</small><b>' + r.reqs + "</b><span>429 有 " + r.r429 + " 次</span></div>" +
+      '<div class="tile" data-role="of"><small>最后一个成功在</small><b>' + r.time.toFixed(1) + " 秒</b><span>理论下限约 " + Math.max(0, (n - rate) / rate).toFixed(1) + " 秒</span></div>" +
+      '<div class="tile" data-role="bk"><small>最挤的 100 毫秒</small><b>' + r.peak + "</b><span>个请求</span></div>";
+    const msg = [
+      "失败立刻变成新请求：短时间内打出 " + r.reqs + " 次请求，20 次额度很快耗光。",
+      "间隔固定，大家同步地一波波回来；这里恰好和补充节奏对上，换个节奏就会一直同步地撞。",
+      "有退避但没抖动：同一时刻失败的一起等、一起回来，每波只有少数能过，拖到 " + r.time.toFixed(1) + " 秒。",
+      "全抖动把重试摊开，" + r.time.toFixed(1) + " 秒全部成功。",
+      "听服务端的节奏再加一点随机：请求最少（" + r.reqs + " 次），接近理论下限。"][s];
+    $("#lab-sum").textContent = NAMES[s] + "：" + msg;
+  }
+  ["#k-s", "#k-n", "#k-r"].forEach(id => $(id).addEventListener("change", draw));
+  const ANSWER = "b";
+  $$("#lab-guess .opts button").forEach(btn => btn.addEventListener("click", () => {
+    $$("#lab-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", "false"); });
+    btn.setAttribute("aria-pressed", "true");
+    const ok = btn.dataset.g === ANSWER;
+    btn.classList.add(ok ? "right" : "wrong");
+    if (!ok) $('#lab-guess [data-g="' + ANSWER + '"]').classList.add("right");
+    $("#k-s").value = "2"; $("#k-n").value = "100"; $("#k-r").value = "5";
+    const a = simulate(2, 100, 5), b = simulate(3, 100, 5);
+    const g = $("#lab-guess-res"); g.hidden = false;
+    g.textContent = (ok ? "猜对了。" : "不是这个。") + "模拟结果：不加抖动 " + a.time.toFixed(1) + " 秒，还有 " + a.failed + " 个 20 次都没过；同样的退避加上全抖动 " + b.time.toFixed(1) + " 秒。";
+    draw();
+  }));
+  draw();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
