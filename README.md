@@ -28,6 +28,7 @@
 | 15 | [够用的数学：向量、点积和概率](https://study.ainiya.de/agent/llm-math-basics.html) | 补给页零基础：向量和意思近、点积和余弦、矩阵乘就是一堆点积、softmax 和先减最大值、概率连乘改 log 相加、五段 Python 手算，迷你注意力实验台 |
 | 16 | [注意力和 KV 缓存（只讲到够用）](https://study.ainiya.de/agent/llm-attention-kv-cache.html) | Q/K/V 和因果遮罩、旧位置的 K/V 为什么能缓存、提示缓存为什么只认前缀、有无 KV 缓存写 20 个 token（0.8 秒对 128 秒）和时间戳放开头的实测，KV 缓存分步动画 |
 | 17 | [推理模型和“思考”：用 token 换质量](https://study.ainiya.de/agent/llm-reasoning-thinking.html) | 一圈算力固定所以要打草稿、强化学习练出来的思考、思考按输出计费并算进 max_tokens、Claude 的 effort 和 display、Qwen3-0.6B 开关思考的数数实测（多 70～300 倍 token 仍答错），思考成本计算器 |
+| 18 | [为什么会一本正经地编（幻觉）](https://study.ainiya.de/agent/llm-hallucination.html) | 幻觉的四个来源（只学像不像、必须挑一个、知识压在参数里、一错到底）、为什么先查再答能缓解、提示词温度和概率为什么都兜不住、三道题三种做法的实测，核对规则实验台 |
 
 # Java 后端架构（补给库）
 
