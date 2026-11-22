@@ -25,6 +25,7 @@
 | 12 | [token、分词和计费：同一段日志要花多少钱](https://study.ainiya.de/agent/llm-tokens-billing.html) | BPE 怎么合并出词表、中文和数字为什么费 token、字节回退、输入输出缓存批处理怎么计费、61 行 GC 日志原样和瘦身的 token 数实测，月成本计算器 |
 | 13 | [上下文窗口：输入输出共用，越长越慢越贵](https://study.ainiya.de/agent/llm-context-window.html) | 输入输出共用一条定长带子、KV 缓存占内存、读输入和写输出为什么随长度变慢、关键一行埋在中间被漏、超长 400 和埋针实测，窗口装箱计算器 |
 | 14 | [采样：temperature 和 top_p 改的是什么](https://study.ainiya.de/agent/llm-sampling.html) | 温度怎么调概率表的形状、top_p 怎么砍长尾、抽签和 seed、温度 0 为什么也会变（批处理和浮点）、温度 0/1 各 10 次和 4 个并发的实测、Claude 新模型不收采样参数，采样实验台 |
+| 15 | [够用的数学：向量、点积和概率](https://study.ainiya.de/agent/llm-math-basics.html) | 补给页零基础：向量和意思近、点积和余弦、矩阵乘就是一堆点积、softmax 和先减最大值、概率连乘改 log 相加、五段 Python 手算，迷你注意力实验台 |
 
 # Java 后端架构（补给库）
 
