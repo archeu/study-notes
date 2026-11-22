@@ -34,6 +34,7 @@
 | 21 | [全景：一次分诊调用的来回](https://study.ainiya.de/agent/pano-03-triage-call.html) | 站 03 场景全景：组装提示词、抽象层选模型、SDK 拼请求、HTTP 超时和重试、限流排队、缓存和生成、SSE 流回、收齐看 stop_reason、Pydantic 校验和重试、记录返回 10 站，官方 SDK 连本机模型的实测时间尺，分步演示 |
 | 22 | [Messages API：角色、system、多轮其实是无状态的](https://study.ainiya.de/agent/api-messages.html) | 请求和响应的形状、system / user / assistant 三种角色、content 是块数组、stop_reason 和 usage、无状态和多轮重发、官方 SDK 连本机的原始 JSON 和带不带历史实测，多轮消息增长分步动画 |
 | 23 | [提示词基本功：说清楚、给例子、用标签分隔](https://study.ainiya.de/agent/prompt-basics.html) | 说清字段取值和边界、示例为什么会被照抄、XML 标签分隔材料和防注入、不变的在前问题在后、四版提示词 8 条告警的对照实测、四个毛病和五个刻意练习，四版对照台 |
+| 24 | [流式输出：SSE 一边生成一边推](https://study.ainiya.de/agent/api-streaming-sse.html) | Claude 流式事件的顺序和分层、SDK 怎么把事件拼回 Message、流式只让首字早到不省总时间、流到一半的 error 事件（状态码 200 且不自动重试）、首字时间和事件清点和中途出错的实测，首字与超时计算器 |
 
 # Java 后端架构（补给库）
 
