@@ -39,6 +39,7 @@
 | 26 | [出错怎么办：429 限流、过载、超时，退避加抖动](https://study.ainiya.de/agent/api-errors-retry.html) | 429、529、超时各是什么、哪些该重试、退避解决压力而抖动解决同步、优先听 retry-after、只在一层重试和总截止时间、30 个客户端撞限流的五种策略实测和 SDK 自带重试的间隔，重试策略模拟器 |
 | 27 | [省钱：提示词缓存和批处理](https://study.ainiya.de/agent/api-prompt-cache-batch.html) | 缓存的是前缀的 KV、tools → system → messages 的拼接顺序、写入 1.25 倍和命中 5%～10% 的账、5 分钟和 1 小时档、批处理五折和适用场景、命中前后的延迟和成本实测（过关题 2）以及前缀放请求号反而多花 23%，缓存和批处理月成本计算器 |
 | 28 | [换模型只改一层：模型抽象层](https://study.ainiya.de/agent/llm-abstraction-layer.html) | 按任务配置模型和备用、适配器翻译两种接口格式、参数按模型能力过滤并留痕、错误分可重试和不可重试、统一常用的透传独有的、同一行业务代码跑三份配置的实测（含主服务挂了自动切备用），配置切换台 |
+| 29 | [Java 版：用 Spring AI ChatClient 写同一个服务](https://study.ainiya.de/agent/spring-ai-chatclient.html) | Spring Boot 4.2 + Spring AI 2.1：starter 装配 ChatModel、ChatClient 链式调用、entity() 结构化、Flux 流式、spring.ai.model.chat 选提供方、只改配置换家的实测（接口换了，模型行为让 entity() 全部失败），extra-body 类型坑，两次运行对照台 |
 
 # Java 后端架构（补给库）
 
