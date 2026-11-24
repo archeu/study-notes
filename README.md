@@ -54,6 +54,7 @@
 | 41 | [全景：第二天再问同一个服务](https://study.ainiya.de/agent/pano-05-next-day-memory.html) | 新会话从记忆表按团队召回 3 条病历、拼上下文、循环跑工具到 24.6K 时压缩旧工具结果、大日志交给子 agent、结论后抽取去重合并写回记忆、每晚遗忘、20 段回放评测，十站分步演示 |
 | 42 | [上下文工程：放什么、放哪、放多少](https://study.ainiya.de/agent/context-engineering.html) | 五类内容按变化频率分层、预取一点加按需取、缓存只认前缀、每块定预算、工具结果截断，记忆放哪的缓存实测（命中 995 对 20）、拼装分步动画 |
 | 43 | [上下文快满了：压缩、摘要、子任务隔离](https://study.ainiya.de/agent/context-compaction.html) | 滑动窗口为什么不行、清旧工具结果只留工具写的要点、交接摘要会丢细节会编数、子 agent 隔离大材料、清理与缓存的取舍、Claude context editing 参数，三招实测（11,905 → 2,802 / 1,606，子 agent +156）分步动画 |
+| 44 | [记忆分几种：短期和长期，情景、语义、程序性](https://study.ainiya.de/agent/memory-types.html) | 短期记忆就是上下文、长期记忆要自己存取、情景追加 / 语义按 key 覆盖 / 程序性整组生效、记忆和 RAG 的区别、程序性记忆的三个去处，12 条记忆一锅端 vs 按类型取的实测（昨天那条排第 4）分步动画 |
 
 # Java 后端架构（补给库）
 
