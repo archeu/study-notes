@@ -50,6 +50,7 @@
 | 37 | [危险操作先问人](https://study.ainiya.de/agent/human-approval.html) | 站 04 第 8 个知识点：按工具风险分 allow / ask / deny、审批卡片四要素、超时按拒绝、拒绝理由送回模型、审计日志，四个剧本实测，一晚 20 个告警三种策略实验台 |
 | 38 | [工作流还是 Agent：五种常见模式怎么选](https://study.ainiya.de/agent/workflow-vs-agent.html) | 站 04 第 9 个知识点：谁决定下一步、五种工作流模式和 agent、四个问题检查单、路由在前 agent 兜底，同一告警工作流 81 秒对 agent 349 / 681 秒实测，选模式实验台 |
 | 39 | [从需求到设计：拆专家 SOP、定成功指标](https://study.ainiya.de/agent/requirements-to-design.html) | 站 04 第 10 个知识点：问清需求、think aloud 拆专家 SOP、每步交给代码 / 工具 / 模型 / 人、五类成对指标，SOP 核对和全景真实运行打分实测，一步 SOP 变五样东西分步动画 |
+| 40 | [先写 10 条评测用例，后面每站都跑](https://study.ainiya.de/agent/eval-first-cases.html) | 站 04 第 11 个知识点：固定现场加能用代码判的标准答案、边角用例占一半、宽进严出的判分，v1 实测 0 / 10 没看现场、只改工具说明后 2 / 10，评测还抓出判分器和工具的 bug，10 条结果逐条看的实验台 |
 
 # Java 后端架构（补给库）
 
