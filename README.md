@@ -43,6 +43,7 @@
 | 30 | [全景：一次排障提问，agent 来回了几轮](https://study.ainiya.de/agent/pano-04-triage-agent.html) | 站 04 全景：值班助手 v1 不用框架手写 agent，本机实测 5 轮来回、并行工具、heap_dump 被闸门拦下，10 站对应 11 个知识点，分步演示 |
 | 31 | [工具调用的一来一回：模型提议，你的代码执行](https://study.ainiya.de/agent/tool-use-roundtrip.html) | 站 04 第 1 个知识点：tool_use 和 tool_result 两种块、一来一回是两次请求四条消息、掀开盖子看模型原始写出的调用单、六个拼消息的坑，拼消息合规实验台 |
 | 32 | [Agent 循环：调到不再要工具或到上限为止](https://study.ainiya.de/agent/agent-loop.html) | 站 04 第 2 个知识点：由 stop_reason 推动的状态机、messages 每轮整段重发总量随轮数平方增长、六种 stop_reason、实测 10 轮里打转 7 次和空回答，累计 token 与缓存账单实验台 |
+| 33 | [停止条件：步数、预算、超时](https://study.ainiya.de/agent/agent-stop-conditions.html) | 站 04 第 3 个知识点：三种失控各用一道闸、闸在调模型之前查所以会超出一轮、两轮之间打断不了卡住的调用、撞闸后交出证据，假模型四场景 × 三道闸实验台 |
 
 # Java 后端架构（补给库）
 
