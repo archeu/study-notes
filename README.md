@@ -40,6 +40,7 @@
 | 27 | [省钱：提示词缓存和批处理](https://study.ainiya.de/agent/api-prompt-cache-batch.html) | 缓存的是前缀的 KV、tools → system → messages 的拼接顺序、写入 1.25 倍和命中 5%～10% 的账、5 分钟和 1 小时档、批处理五折和适用场景、命中前后的延迟和成本实测（过关题 2）以及前缀放请求号反而多花 23%，缓存和批处理月成本计算器 |
 | 28 | [换模型只改一层：模型抽象层](https://study.ainiya.de/agent/llm-abstraction-layer.html) | 按任务配置模型和备用、适配器翻译两种接口格式、参数按模型能力过滤并留痕、错误分可重试和不可重试、统一常用的透传独有的、同一行业务代码跑三份配置的实测（含主服务挂了自动切备用），配置切换台 |
 | 29 | [Java 版：用 Spring AI ChatClient 写同一个服务](https://study.ainiya.de/agent/spring-ai-chatclient.html) | Spring Boot 4.2 + Spring AI 2.1：starter 装配 ChatModel、ChatClient 链式调用、entity() 结构化、Flux 流式、spring.ai.model.chat 选提供方、只改配置换家的实测（接口换了，模型行为让 entity() 全部失败），extra-body 类型坑，两次运行对照台 |
+| 30 | [全景：一次排障提问，agent 来回了几轮](https://study.ainiya.de/agent/pano-04-triage-agent.html) | 站 04 全景：值班助手 v1 不用框架手写 agent，本机实测 5 轮来回、并行工具、heap_dump 被闸门拦下，10 站对应 11 个知识点，分步演示 |
 
 # Java 后端架构（补给库）
 
