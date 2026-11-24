@@ -44,6 +44,7 @@
 | 31 | [工具调用的一来一回：模型提议，你的代码执行](https://study.ainiya.de/agent/tool-use-roundtrip.html) | 站 04 第 1 个知识点：tool_use 和 tool_result 两种块、一来一回是两次请求四条消息、掀开盖子看模型原始写出的调用单、六个拼消息的坑，拼消息合规实验台 |
 | 32 | [Agent 循环：调到不再要工具或到上限为止](https://study.ainiya.de/agent/agent-loop.html) | 站 04 第 2 个知识点：由 stop_reason 推动的状态机、messages 每轮整段重发总量随轮数平方增长、六种 stop_reason、实测 10 轮里打转 7 次和空回答，累计 token 与缓存账单实验台 |
 | 33 | [停止条件：步数、预算、超时](https://study.ainiya.de/agent/agent-stop-conditions.html) | 站 04 第 3 个知识点：三种失控各用一道闸、闸在调模型之前查所以会超出一轮、两轮之间打断不了卡住的调用、撞闸后交出证据，假模型四场景 × 三道闸实验台 |
+| 34 | [工具怎么设计：名字、描述、参数、精简的返回](https://study.ainiya.de/agent/tool-design.html) | 站 04 第 4 个知识点：工具四件套、给人的接口和给模型的工具约束不同、实测改说明书后时间参数修好而关键字仍对不上、原样 jstack 4.3 万 token 对摘要 152，说明书改法对照实验台 |
 
 # Java 后端架构（补给库）
 
