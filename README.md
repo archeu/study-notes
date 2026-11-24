@@ -46,6 +46,7 @@
 | 33 | [停止条件：步数、预算、超时](https://study.ainiya.de/agent/agent-stop-conditions.html) | 站 04 第 3 个知识点：三种失控各用一道闸、闸在调模型之前查所以会超出一轮、两轮之间打断不了卡住的调用、撞闸后交出证据，假模型四场景 × 三道闸实验台 |
 | 34 | [工具怎么设计：名字、描述、参数、精简的返回](https://study.ainiya.de/agent/tool-design.html) | 站 04 第 4 个知识点：工具四件套、给人的接口和给模型的工具约束不同、实测改说明书后时间参数修好而关键字仍对不上、原样 jstack 4.3 万 token 对摘要 152，说明书改法对照实验台 |
 | 35 | [并行工具调用](https://study.ainiya.de/agent/parallel-tool-calls.html) | 站 04 第 5 个知识点：一轮多张调用单、只读的并发有副作用的串行、所有回执放一条消息、失败也要回，线程池与 asyncio.gather 实测，三种要法总耗时实验台 |
+| 36 | [沙箱：只读优先、命令白名单、隔离执行](https://study.ainiya.de/agent/agent-sandbox.html) | 站 04 第 7 个知识点：参数是不可信输入、按可逆性分级、不过 shell 加命令和选项白名单加路径限定三道关、容器兜底，13 条命令含注入实测，命令停在哪一关实验台 |
 
 # Java 后端架构（补给库）
 
