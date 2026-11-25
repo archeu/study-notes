@@ -64,6 +64,7 @@
 | 51 | [文档解析：PDF、Word、表格、扫描件](https://study.ainiya.de/agent/doc-parsing.html) | PDF 内容流原样拆解、版面分析分步动画、表格两种取字对照、OCR 四步、Word 的 XML 结构、PDF 为什么这样设计、六个实测的坑、扫描分辨率和倾斜实验台 |
 | 52 | [清洗、切块策略和元数据](https://study.ainiya.de/agent/chunking-metadata.html) | 三类噪声和清洗规则、按标题切块分步动画、元数据的三种用途、为什么片要小而完整、7 种做法 × 30 题的本机对比、六个实测的坑、切法对比实验台 |
 | 53 | [向量检索和 HNSW 索引](https://study.ainiya.de/agent/vector-hnsw.html) | 暴力扫描为什么不行、四种少看的思路、HNSW 的近邻图、分层和 ef、三层小图手推分步动画、pgvector 5 万条实测（HNSW、IVFFlat、过滤和 iterative_scan）、六个坑、召回率与延迟实验台 |
+| 54 | [混合检索：关键词 BM25 加向量，再重排](https://study.ainiya.de/agent/hybrid-search.html) | 两路盲区对照、BM25 打分逐词拆解（饱和、IDF、长度打折）、RRF 只看名次的算例、重排漏斗分步动画、6 种办法 × 30 题本机实测、六个坑、RRF 的 k 和权重实验台 |
 
 # Java 后端架构（补给库）
 
