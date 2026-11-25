@@ -59,6 +59,7 @@
 | 46 | [记忆怎么取：按相关性、时间、重要性召回](https://study.ainiya.de/agent/memory-retrieval.html) | 硬条件进 WHERE 不进分数、相关 / 新近 / 重要三个信号、min-max 归一后加权、Generative Agents 的做法、时间指代和取满 K 条的坑，25 条病历五种打分实测（昨天那条按相似度排第 12），调权重实验台 |
 | 47 | [记忆怎么忘：衰减、过期，按用户隔离和隐私](https://study.ainiya.de/agent/memory-forget.html) | 过期 / 衰减归档 / 隐私隔离三件事分开做、记忆不可回源所以降权多于删除、写入脱敏加夜间扫描、行级安全、删除请求要删干净，SQLite 模拟 90 天四套策略实测（统一 TTL 删掉 P0），遗忘策略实验台 |
 | 48 | [记忆好不好：该记的记住了吗，对任务有帮助吗](https://study.ainiya.de/agent/memory-eval.html) | 回放历史的用例写法（must / must_not / once）、记住 / 忘掉 / 冲突 / 隐私四类、记忆层 / 任务层 / 线上三层评测、用变异测试找盲区，21 个用例跑 v1 和 v2 的实测（8/20 vs 20/20）、覆盖矩阵、开关实验台 |
+| 49 | [全景：一份运维手册从上传到被引用](https://study.ainiya.de/agent/pano-06-runbook-to-report.html) | 站 06 场景全景：手册 PDF 经同步、解析（含扫描页 OCR）、清洗切块、Embedding、pgvector 入库，再被 agent 检索、BM25 + 向量混合、重排，写进带引用的复盘报告；本机三次实跑的分段耗时和三种出错方式，11 站分步演示 |
 
 # Java 后端架构（补给库）
 
