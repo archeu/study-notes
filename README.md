@@ -60,6 +60,7 @@
 | 47 | [记忆怎么忘：衰减、过期，按用户隔离和隐私](https://study.ainiya.de/agent/memory-forget.html) | 过期 / 衰减归档 / 隐私隔离三件事分开做、记忆不可回源所以降权多于删除、写入脱敏加夜间扫描、行级安全、删除请求要删干净，SQLite 模拟 90 天四套策略实测（统一 TTL 删掉 P0），遗忘策略实验台 |
 | 48 | [记忆好不好：该记的记住了吗，对任务有帮助吗](https://study.ainiya.de/agent/memory-eval.html) | 回放历史的用例写法（must / must_not / once）、记住 / 忘掉 / 冲突 / 隐私四类、记忆层 / 任务层 / 线上三层评测、用变异测试找盲区，21 个用例跑 v1 和 v2 的实测（8/20 vs 20/20）、覆盖矩阵、开关实验台 |
 | 49 | [全景：一份运维手册从上传到被引用](https://study.ainiya.de/agent/pano-06-runbook-to-report.html) | 站 06 场景全景：手册 PDF 经同步、解析（含扫描页 OCR）、清洗切块、Embedding、pgvector 入库，再被 agent 检索、BM25 + 向量混合、重排，写进带引用的复盘报告；本机三次实跑的分段耗时和三种出错方式，11 站分步演示 |
+| 50 | [RAG 流水线：切块、向量化、检索、重排、生成](https://study.ainiya.de/agent/rag-pipeline.html) | 闭卷和 RAG 的本机对照、两段路（索引和查询）分步动画、检索找的是最像不是最对、双塔粗筛加交叉编码精排、五个实测的坑、30 题命中率随 k 变化的实验台 |
 
 # Java 后端架构（补给库）
 
