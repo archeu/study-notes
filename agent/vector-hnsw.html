@@ -1,0 +1,977 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<!-- 布局：① 规模、② 暴力扫描、③ 四种思路、④ 洞察、⑤ 三层 HNSW 手推、⑥ 坑 + ef_search 实验台。角色色：pd 图 / HNSW，cg IVFFlat，of 参数，bk 过滤，g2 实验台，other 暴力和树。 -->
+<title>向量检索和 HNSW 索引</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* 本页：布局、六个角色色各代表什么、有哪些交互，写在这里 */
+/* learn 六步页的基础样式（固定一份，不要从别的页面抄）。配色：pd bk cg g2 rn of 六个角色色，warn / bad / good / neutral 含义固定。
+   组件写法见 assets/skeleton.html。本页特有的样式写在文件末尾的标记后面，不改上面的规则。 */
+:root{--paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;}
+}
+:root[data-theme="dark"]{--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;}
+*{box-sizing:border-box}
+body{background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){
+  *{transition:none!important;scroll-behavior:auto!important}
+}
+html{scroll-behavior:smooth}
+section[id],.sub[id],.pit[id],figure[id]{scroll-margin-top:64px}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)}
+.f-of{fill:var(--of)}
+.f-cg{fill:var(--cg)}
+.f-g2{fill:var(--g2)}
+.f-bad{fill:var(--bad)}
+.f-pd{fill:var(--pd)}
+.f-bk{fill:var(--bk)}
+.f-good{fill:var(--good)}
+.f-rn{fill:var(--rn)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains li.mid::before{content:"•";color:var(--muted)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mech-h .sn{font-size:20px}
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p,details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+@media (max-width:980px){
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .two,.design,.pits,.rules-list,.next{grid-template-columns:1fr}
+}
+@media (max-width:520px){
+  .presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+table.t td.bad,table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.s{color:var(--of)}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.cap{font-size:13.5px;color:var(--muted)}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){
+  .steps-out li{grid-template-columns:minmax(0,1fr)}
+}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try code{overflow-wrap:anywhere}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){
+  .tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+.x-box{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.x-zone{fill:none;stroke:var(--line-strong);stroke-width:1.3;stroke-dasharray:6 5}
+.x-zl{font-size:12px;fill:var(--muted)}
+.x-r{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.x-rs{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.x-fill{fill:var(--rc)}
+.x-t{font-size:13px;fill:var(--ink)}
+.x-tb{font-size:13.5px;font-weight:700;fill:var(--ink)}
+.x-ts{font-size:11.5px;fill:var(--muted)}
+.x-tc{font-size:12px;font-weight:700;fill:var(--rc)}
+.x-mono{font-family:var(--font-mono);font-size:11px;fill:var(--ink)}
+.x-mono.dim{fill:var(--muted)}
+.x-mono.bad{fill:var(--bad);font-weight:600}
+.x-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.x-ed{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.x-ed.dash{stroke-dasharray:5 4}
+.x-ed.bad{stroke:var(--bad)}
+.x-ed.c{stroke:var(--rc);stroke-width:2}
+.x-mk{fill:var(--line-strong)}
+.x-mkb{fill:var(--bad)}
+.fig-box{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card);padding:10px}
+.fig-box > svg{min-width:760px;width:100%;display:block}
+.swipe{display:none;font-size:13px;color:var(--muted);margin:0 0 4px}
+@media (max-width:800px){
+  .swipe{display:block}
+}
+.ids{font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ids .a{color:var(--cg);font-weight:600}
+.ids .b{color:var(--of);font-weight:600}
+.verdict-box{font-size:14.5px;padding:10px 14px;border-radius:12px;border:2px solid var(--rc);background:var(--rt)}
+.knob-row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end}
+.knob-row label{display:flex;flex-direction:column;gap:4px;font-size:13.5px;color:var(--muted)}
+.knob-row select{font:inherit;font-size:14px;padding:4px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){
+  .ctl-grid{grid-template-columns:1fr!important}
+}
+.codebox pre .bad{color:var(--bad);font-weight:600}
+.codebox pre .ok{color:var(--good);font-weight:600}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.sv .fade{opacity:.25;transition:opacity .25s}
+.sv .lit{opacity:1;transition:opacity .25s}
+.sv .lit .x-rs,.sv .lit .x-r{stroke-width:3}
+/* ===== 本页特有的样式写在这一行下面 ===== */
+/* 本页：⑤ 手推 HNSW 的三层小图（.tn 点、.tl 点名、.tedge 边、.tq 问题），lit 时加粗 */
+.sv .tedge{stroke:var(--line-strong);stroke-width:1.3}
+.sv line.tedge.lit{stroke:var(--ink);stroke-width:2.8}
+.sv .tn{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.sv .lit .tn{stroke-width:3.4}
+.sv .tl{font-size:11px;font-weight:700;fill:var(--ink);font-family:var(--font-mono)}
+.sv .tq{fill:var(--bad)}
+
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>AI Agent 工程师</span><span aria-hidden="true">/</span><span class="tb-here">向量检索和 HNSW</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs><marker id="xa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="x-mk"/></marker></defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">近似最近邻 · HNSW · IVFFlat · pgvector 0.8.7 · 5 万条 × 1024 维本机实测</p>
+  <h1>向量检索和 HNSW 索引</h1>
+  <p class="lead">“找最像的 10 片”就是在几十万个点里找离问题最近的 10 个。挨个比太慢，B+ 树又帮不上忙。HNSW 把点<b>连成一张多层的近邻图</b>：上层点少、跨得远，几步就到附近；底层在附近攥着一池候选慢慢展开，只算几百个点的距离。代价是<b>近似</b>：召回率靠 <code>ef_search</code> 换；带 WHERE 过滤时结果可能凑不满。</p>
+  <nav class="route" aria-label="六步学习路线">
+<a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+<a href="#s2"><b>②</b>朴素做法</a><i aria-hidden="true">→</i>
+<a href="#s3"><b>③</b>几种思路</a><i aria-hidden="true">→</i>
+<a href="#s4"><b>④</b>关键洞察</a><i aria-hidden="true">→</i>
+<a href="#s5"><b>⑤</b>手推一遍</a><i aria-hidden="true">→</i>
+<a href="#s6"><b>⑥</b>边界和变体</a><i aria-hidden="true">→</i>
+<a href="#loop"><b>↺</b>回到⑤</a>
+</nav>
+  <p class="where"><span>全景：<a href="pano-06-runbook-to-report.html#s-5">一份运维手册从上传到被引用 · 第 5 站（第 8 站来这里取候选）</a></span><span>地图：<a href="roadmap.html#st06">站 06 · 向量检索和 HNSW 索引</a></span><span>深度：懂机制</span></p>
+  <p class="scene"><b>这一页的位置</b><span>站 06 第 4 个知识点，也是补给站里那张“向量索引 HNSW”待做页。前三页的库只有 31 片，暴力比远近毫秒级；这一页把库放大到 5 万条，看暴力为什么不行、HNSW 怎么做、在 pgvector 里怎么用。数据库那一侧的选型见 <a href="../database/mysql-vs-pg-pgvector.html">MySQL 还是 PG：选型与 pgvector</a>。</span></p>
+</header>
+
+<section id="s1" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">①</span>要解决的问题：库一大，“比远近”就成了瓶颈</h2></div>
+  <p>在全景第 5 站，片和向量存进了 pgvector；第 8 站每条检索语句都要来这里“取离问题最近的 20 片”。全景的库只有 31 片，怎么做都快；值班助手要接整个交易组的手册、故障单、笔记，再加上其他团队的，片数会到几十万。要解决的问题是：<b>在 N 个 1024 维的点里，找离一个点最近的 k 个，而且不能每次都把 N 个点看一遍</b>。</p>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 190" role="img" aria-label="三种规模：全景 31 片，暴力比远近不到 1 毫秒；本页实测 5 万条，PostgreSQL 顺序扫描每次约 228 毫秒，HNSW 约 2.2 毫秒；一个公司几百万片，暴力扫描是秒级，必须用索引">
+        <g data-role="other"><rect class="x-rs" x="12" y="30" width="280" height="130" rx="12"/><text class="x-tc" x="26" y="54">全景：31 片</text><text class="x-tb" x="26" y="82">暴力也快</text><text class="x-ts" x="26" y="104">31 次点积，微秒级</text><text class="x-ts" x="26" y="124">前三页都是这样做的</text></g>
+        <line class="x-ed" x1="294" y1="95" x2="336" y2="95" marker-end="url(#xa)"/>
+        <g data-role="pd"><rect class="x-r" x="340" y="30" width="300" height="130" rx="12"/><text class="x-tc" x="354" y="54">本页实测：5 万条 × 1024 维</text><text class="x-tb" x="354" y="82">暴力 228 ms，HNSW 2.2 ms</text><text class="x-ts" x="354" y="104">表 268 MB，HNSW 索引 391 MB</text><text class="x-ts" x="354" y="124">召回率 0.99（ef_search 默认 40）</text><text class="x-ts" x="354" y="144">PostgreSQL 17 + pgvector 0.8.7</text></g>
+        <line class="x-ed" x1="642" y1="95" x2="684" y2="95" marker-end="url(#xa)"/>
+        <g data-role="bad"><rect class="x-r" x="688" y="30" width="260" height="130" rx="12"/><text class="x-tc" x="702" y="54">全公司：几百万片</text><text class="x-tb" x="702" y="82">暴力是秒级</text><text class="x-ts" x="702" y="104">和条数成正比：× 60</text><text class="x-ts" x="702" y="124">一节报告查 4 次就是几十秒</text><text class="x-ts" x="702" y="144">（按 5 万条实测外推）</text></g>
+      </svg>
+    </div>
+    <figcaption>检索的其余步骤（Embedding、重排、生成）和库的大小无关，只有“比远近”会跟着库一起变慢。</figcaption>
+  </figure>
+  <div class="tiles4">
+    <div class="tile" data-role="other"><small>暴力扫描（PG 顺序扫）</small><b>228 ms</b><span>每个问题，p50</span></div>
+    <div class="tile" data-role="pd"><small>HNSW，ef_search = 40</small><b>2.2 ms</b><span>召回@10 = 0.99</span></div>
+    <div class="tile" data-role="cg"><small>建 HNSW 索引</small><b>84 秒</b><span>2 核，maintenance_work_mem 1 GB</span></div>
+    <div class="tile" data-role="bk"><small>带过滤（10% 的行满足）</small><b>4.0 条</b><span>LIMIT 10，平均只回来 4 条</span></div>
+  </div>
+  <p class="tip"><span class="tag-real">实测</span> 2026-11-25，本机 2 核 ARM，容器里的 PostgreSQL 17.11 + pgvector 0.8.7，100 个问题。向量是合成的（1000 个话题、每个约 50 条），真实 Embedding 的召回率要用真实数据重测，见 ⑥。</p>
+</section>
+
+<section id="s2" data-role="other">
+  <div class="mech-h"><h2><span class="sn">②</span>朴素做法：挨个比，再排序</h2></div>
+  <p>前三页的 <code>M @ qv</code> 就是这个：问题和每一条都算一次余弦，排序取前 10。在 PostgreSQL 里不建索引，<code>ORDER BY emb &lt;=&gt; $1 LIMIT 10</code> 也是这么执行的：</p>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>没有向量索引时的执行计划</b><span>5 万条 × 1024 维</span></div><pre class="console">Limit
+  -&gt;  Sort                       <span class="c">Sort Method: top-N heapsort</span>
+        Sort Key: (emb &lt;=&gt; '[…]'::vector)
+        -&gt;  Seq Scan on items        <span class="c">5 万行，每行读出 4 KB 的向量，算一次距离</span>
+<span class="r">p50 228 ms，p95 237 ms</span>   召回 1.0（它就是标准答案）</pre></div>
+  <ul class="pains">
+    <li class="ok">结果是精确的，召回率 1.0；不用建任何东西，数据一写进去就能查。</li>
+    <li class="bad">每个问题都要读完全部 5 万行：PostgreSQL 里每行的向量是 4 KB，存在 TOAST 里，要一行行取出来再算，单核 228 ms。</li>
+    <li class="bad">和条数成正比：库涨 10 倍就慢 10 倍，并发时数据库 CPU 先满。</li>
+    <li class="mid">同样的 5 万次点积，numpy 一次矩阵乘法只要 9 ms：暴力本身不一定慢，慢在“逐行从表里取”。小库（几万条以内）放内存里暴力算，是正经的选项。</li>
+    <li class="bad">B+ 树帮不上忙：它靠比大小排成一条线，向量既没有大小，1024 维也排不成一条线。</li>
+  </ul>
+  <div class="verdict" data-role="bad"><b>不懂精华时的典型误用</b>：把向量索引当成 B+ 树：以为建了就“查得准”，以为 WHERE 和 LIMIT 还像普通索引那样工作。HNSW 查的是“大概率是前 10”，而且 WHERE 是在它交出一批近邻<b>之后</b>才过滤的（⑥ 坑 1）。</div>
+</section>
+
+<section id="s3" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">③</span>几种思路：少看一点，怎么少看</h2></div>
+  <p>评判要求：召回率（找回真正的前 10 的比例）、单次查询延迟、内存、建索引时间、能不能一条条加数据、带过滤好不好用。</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>思路</th><th>怎么少看</th><th>本机实测（5 万条）</th><th>增量写入</th><th>短板</th></tr></thead>
+      <tbody>
+        <tr><th>暴力</th><td>不少看</td><td>228 ms，召回 1.0</td><td class="good">能：写进去就能查</td><td class="bad">和条数成正比</td></tr>
+        <tr><th>树（KD 树等）</th><td>按坐标轴一刀刀切</td><td>没测</td><td>能</td><td class="bad">几百维以上每个分支都要进，退化成暴力</td></tr>
+        <tr><th>分桶：IVFFlat</th><td>先聚成 lists 个桶，只看最近的 probes 个桶</td><td>probes 10：5.2 ms，召回 0.92；建索引 11 秒</td><td class="bad">差一点：新数据进旧桶，桶会过时</td><td>召回上不去：probes 40 才 0.96、16 ms</td></tr>
+        <tr class="pick"><th><b>图：HNSW</b></th><td>多层近邻图，从上往下走，只展开附近的点</td><td class="good">ef 40：2.2 ms，召回 0.99；建索引 84 秒</td><td class="good">能：插入就是找邻居、连边</td><td>索引大、建得慢；过滤要另外处理</td></tr>
+        <tr><th>量化（PQ、二值化）</th><td>把向量压短，比远近更便宜</td><td>没测</td><td>看实现</td><td>压缩有损，常和上面两种一起用（pgvector 有 halfvec、二值量化）</td></tr>
+        <tr><th>磁盘上的图（DiskANN）</th><td>图放磁盘，内存里只放压缩向量</td><td>没测</td><td>看实现</td><td>为上亿条、内存放不下时准备的</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">暴力、IVFFlat、HNSW 三行是 <span class="tag-real">实测</span>，同一批数据、同 100 个问题；其余 <span class="tag-doc">按文档</span>。IVFFlat 的 lists 取了 224（√N），pgvector 文档建议 100 万条以内先试 N/1000 = 50。</p>
+  <p class="pick-line"><b>本页学 HNSW</b>：在“召回率 × 延迟”上最好，又支持一条条插入；pgvector、Elasticsearch、Milvus、Redis 都提供它，Elasticsearch 的 kNN 检索就是用它实现的（<span class="tag-doc">按文档</span>）。IVFFlat 当对照，看清“分桶”和“连图”差在哪。</p>
+</section>
+
+<section id="s4" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">④</span>关键洞察：近的点连成图，分层，沿着边贪心走</h2></div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>余弦距离</b>：pgvector 的 <code>&lt;=&gt;</code> 算的是 1 − 余弦相似度，越小越近。向量都归一化过时，它和欧氏距离排出的先后一样，所以下面的图用平面上的远近来画。</li>
+      <li><b>近似最近邻（ANN）</b>：不保证找到真正最近的那几个，换来不用和每一条都比。好坏用<b>召回率@10</b>量：真正的前 10 名里，找回来了几个。</li>
+      <li><b>跳表</b>：一条有序链表上面再架几层“快速通道”，上层节点少、跨得远，查找时从最上层往下走。Redis 的 zset、Java 的 <code>ConcurrentSkipListMap</code> 都是它：<a href="../algo/bplus-skiplist.html">B+ 树与跳表</a>。HNSW 就是“图上的跳表”。</li>
+      <li><b>为什么 B+ 树帮不上忙</b>：B+ 树靠“比大小”把数据排成一条线；向量没有大小可比，1024 维里也排不出一条线。按某一维切分的树（KD 树）到了几百维以上，几乎每个分支都要进去看，退化成暴力扫描。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-graph">洞察 1 · 把每个点和它附近的点连起来，沿着边一步步走近</h3>
+  <p>先不管分层。把每条向量当成一个点，和离它最近的十几个点连上边，得到一张图。查询时从任意一个点出发：看看它的邻居里谁离问题更近，就走过去；走到“没有哪个邻居更近”为止。每一步只算当前这个点的十几个邻居的距离，而不是全部 5 万条。</p>
+  <div class="two">
+    <div class="card" data-role="pd"><h4>为什么走得到</h4><p>邻居之间的边让“局部”很准：已经到了答案附近，下一步总能再近一点。只要图里还有少数连得很远的边，从任何地方出发，跳几步就能到另一头，这叫<b>小世界</b>图（六度分隔说的就是它）。</p></div>
+    <div class="card" data-role="bad"><h4>为什么不保证对</h4><p>贪心会停在“局部最近”：当前点的邻居都比它远，可真正最近的点在别处，中间隔着一个“坑”。这就是近似的来源，召回率 &lt; 1。补救有两招：分层（洞察 2）让起点更好；候选池（洞察 3）让它别太早停下。</p></div>
+  </div>
+
+  <h3 id="m-layer">洞察 2 · 分层：上面几层是快速通道</h3>
+  <p>只有一层时，从远处出发要走很多步。HNSW 给每个点随机抽一个“最高能到第几层”：越高的层点越少。上层点少、边跨得远，几步就能到答案所在的区域；然后下一层，在更密的点里继续走；最后在包含全部点的第 0 层收尾。</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>层</th><th>一个点能到这一层的概率（m = 16）</th><th>5 万个点里大约</th><th>像什么</th></tr></thead>
+      <tbody>
+        <tr><th>第 0 层</th><td>1</td><td>50,000 个，每个最多 2m = 32 条边</td><td>街道：每一户都在</td></tr>
+        <tr><th>第 1 层</th><td>1/16</td><td>约 3,100 个</td><td>主干道</td></tr>
+        <tr><th>第 2 层</th><td>1/256</td><td>约 200 个</td><td>城市快速路</td></tr>
+        <tr><th>第 3 层</th><td>1/4096</td><td>约 12 个</td><td>高速，入口就在这一层</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip">层的分布按论文（Malkov &amp; Yashunin）的规则：层号 = ⌊−ln(随机数) × mL⌋，mL = 1/ln(m)，所以每往上一层，点数大约少到 1/m。pgvector 照这个实现 <span class="tag-doc">按文档</span>。表里的点数是按概率算的，不是从索引里读的。</p>
+
+  <h3 id="m-ef">洞察 3 · ef：手里攥着几个候选，决定会不会走进死胡同</h3>
+  <p>上面几层只留 1 个候选，贪心往下走就行（只是为了找一个好起点）。到了第 0 层，手里同时攥着 <b>ef</b> 个“目前最近的点”，每次从中挑一个还没展开的，把它的邻居都看一遍，更近的换进来；直到“最近的未展开候选”比“池里最远的”还远，才停。ef 越大，看的点越多、越不容易停在局部最近，也越慢。</p>
+  <ul class="pains">
+    <li class="ok"><code>hnsw.ef_search</code>（查询时，pgvector 默认 40）：召回率和延迟的旋钮，可以按会话、按事务调，不用重建索引。</li>
+    <li class="mid"><code>m</code>（建索引时，默认 16）：每个点连几条边。边多，图更“通”、召回更高，索引更大、建得更慢；改它要重建。</li>
+    <li class="mid"><code>ef_construction</code>（建索引时，默认 64）：插入新点时为它找邻居的候选池。大了邻居选得更好，建得更慢。</li>
+    <li class="bad">ef_search 同时是“最多返回几行”：带 WHERE 过滤时，索引先交出 ef_search 个近邻，再被过滤掉一大半，结果可能凑不够 LIMIT（⑥ 坑 1）。</li>
+  </ul>
+
+  <h3 id="m-design">为什么这样设计</h3>
+  <p>逼出 HNSW 的约束有三条：<b>维度高</b>（几百上千维，按维切分的树失效）；<b>不能每次都看全部</b>（库越大，暴力越慢，见 ②）；<b>数据会一条条加进来</b>（知识库在增量同步，不能每加一条就重建）。</p>
+  <div class="design three">
+    <div class="card" data-role="pd"><h3>图：HNSW（选）</h3><ul class="pains"><li class="ok">只看几百个点就能找到前 10，召回和延迟的平衡最好。</li><li class="ok">新点插进来就是“在图里找邻居、连上边”，不用训练，空表也能先建索引。</li><li class="mid">边要占地方：每个点几十条边，索引常常和表一样大；建得慢。</li></ul></div>
+    <div class="card" data-role="cg"><h3>分桶：IVFFlat</h3><ul class="pains"><li class="ok">先把向量聚成 lists 个桶，查询时只看离问题最近的 probes 个桶；建得快、占地小。</li><li class="bad">桶的中心是用建索引那一刻的数据算的，之后大量新数据进来，桶就不准了，要重建；空表上建出来的桶没有意义。</li><li class="mid">召回靠 probes：开多了接近暴力。</li></ul></div>
+    <div class="card" data-role="other"><h3>树：KD 树等</h3><ul class="pains"><li class="ok">低维（二三维的地图坐标）里又快又精确。</li><li class="bad">几百维时，一个问题的“最近邻球”会穿过几乎所有分割面，每个分支都要进去看，退化成暴力。</li></ul></div>
+  </div>
+  <div class="verdict" data-role="pd"><b>决定胜负的约束</b>：高维 + 增量写入。图结构只依赖“谁离谁近”，不依赖坐标轴，维度再高也能走；插入一个点只改它附近的边。代价是内存和建索引的时间，这在知识库这种“读多写少”的场景里划得来。</div>
+
+  <div class="two">
+    <div class="codebox"><div class="code-bar"><b>pgvector 里用到的全部 SQL</b><span>参数细节放到 ⑥</span></div><pre><code>CREATE EXTENSION vector;
+CREATE TABLE chunks (id text PRIMARY KEY, team text, status text,
+                     text text, emb vector(1024));
+<span class="cm">-- 建索引：余弦距离；m、ef_construction 不写就是 16、64</span>
+CREATE INDEX ON chunks USING hnsw (emb vector_cosine_ops)
+       WITH (m = 16, ef_construction = 64);
+<span class="cm">-- 查询：ORDER BY 距离 + LIMIT，才会走索引</span>
+SET hnsw.ef_search = 100;                 <span class="cm">-- 默认 40</span>
+SELECT id, 1 - (emb &lt;=&gt; $1) AS cos
+FROM chunks ORDER BY emb &lt;=&gt; $1 LIMIT 10;
+<span class="cm">-- 带过滤时（pgvector 0.8 起）</span>
+SET hnsw.iterative_scan = relaxed_order;</code></pre></div>
+    <div class="card" data-role="of"><h4>Java 老朋友：向量索引 ≈ 数据库索引</h4><p><b>像</b>：建在列上、对 SQL 透明、能用 <code>EXPLAIN</code> 看走没走索引、要在写入速度和查询速度之间取舍。</p><p><b>不像</b>：B+ 树查出来的就是答案，HNSW 查出来的是“大概率是答案”；而且它的结果数受 ef_search 限制，后面再加 WHERE 会变少。这两点在 B+ 树上都不会发生。</p></div>
+  </div>
+</section>
+
+<section id="s5" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑤</span>手推一遍：18 个点、3 层，一次查询走了哪些点</h2></div>
+  <p>把 1024 维换成平面上的 18 个点，规则不变：第 2 层只有 E、K 两个点，第 1 层 6 个，第 0 层全部 18 个；每层的点连着同层最近的几个点。红色菱形是问题，要找离它最近的 2 个点，第 0 层的候选池 ef = 4。</p>
+  <div class="stepper" id="stp" tabindex="0" aria-label="分步动画：HNSW 一次查询从第 2 层走到第 0 层，左右方向键切换">
+    <div class="st-ctl">
+      <button class="btn" type="button" id="st-prev">← 上一步</button>
+      <button class="btn primary" type="button" id="st-next">下一步 →</button>
+      <button class="btn" type="button" id="st-auto" aria-pressed="false">自动播放</button>
+      <button class="btn" type="button" id="st-reset">从头来</button>
+      <span class="pos" id="st-pos" aria-live="polite"></span>
+    </div>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box"><svg class="sv" viewBox="0 0 960 300" role="img" aria-label="三层 HNSW：第 2 层只有 E、K 两个点，第 1 层 6 个点，第 0 层全部 18 个点；查询从第 2 层的 K 出发，走到 E，下到第 1 层走到 N，再到第 0 层在 N 附近扩展，最后找到最近的 N 和 M">
+<rect class="x-zone" x="10" y="10" width="300" height="286" rx="10"/><text class="x-zl" x="20" y="28">第 2 层：2 个点（快速通道）</text>
+<line id="e2-EK" class="x-ed tedge" x1="267" y1="117" x2="72" y2="208"/>
+<g id="q2" data-role="bad"><path class="tq" d="M208,203 L215,196 L222,203 L215,210 z"/><text class="x-ts" x="224" y="207">问题</text></g>
+<g id="n2-E" data-role="cg"><circle class="tn" cx="267" cy="117" r="9"/><text class="tl" x="267" y="121" text-anchor="middle">E</text></g>
+<g id="n2-K" data-role="cg"><circle class="tn" cx="72" cy="208" r="9"/><text class="tl" x="72" y="212" text-anchor="middle">K</text></g>
+<rect class="x-zone" x="330" y="10" width="300" height="286" rx="10"/><text class="x-zl" x="340" y="28">第 1 层：6 个点</text>
+<line id="e1-BH" class="x-ed tedge" x1="430" y1="70" x2="464" y2="170"/>
+<line id="e1-BK" class="x-ed tedge" x1="430" y1="70" x2="392" y2="208"/>
+<line id="e1-EH" class="x-ed tedge" x1="587" y1="117" x2="464" y2="170"/>
+<line id="e1-EN" class="x-ed tedge" x1="587" y1="117" x2="544" y2="236"/>
+<line id="e1-HK" class="x-ed tedge" x1="464" y1="170" x2="392" y2="208"/>
+<line id="e1-HN" class="x-ed tedge" x1="464" y1="170" x2="544" y2="236"/>
+<line id="e1-HT" class="x-ed tedge" x1="464" y1="170" x2="563" y2="274"/>
+<line id="e1-NT" class="x-ed tedge" x1="544" y1="236" x2="563" y2="274"/>
+<g id="q1" data-role="bad"><path class="tq" d="M528,203 L535,196 L542,203 L535,210 z"/><text class="x-ts" x="544" y="207">问题</text></g>
+<g id="n1-B" data-role="cg"><circle class="tn" cx="430" cy="70" r="9"/><text class="tl" x="430" y="74" text-anchor="middle">B</text></g>
+<g id="n1-E" data-role="cg"><circle class="tn" cx="587" cy="117" r="9"/><text class="tl" x="587" y="121" text-anchor="middle">E</text></g>
+<g id="n1-H" data-role="cg"><circle class="tn" cx="464" cy="170" r="9"/><text class="tl" x="464" y="174" text-anchor="middle">H</text></g>
+<g id="n1-K" data-role="cg"><circle class="tn" cx="392" cy="208" r="9"/><text class="tl" x="392" y="212" text-anchor="middle">K</text></g>
+<g id="n1-N" data-role="cg"><circle class="tn" cx="544" cy="236" r="9"/><text class="tl" x="544" y="240" text-anchor="middle">N</text></g>
+<g id="n1-T" data-role="cg"><circle class="tn" cx="563" cy="274" r="9"/><text class="tl" x="563" y="278" text-anchor="middle">T</text></g>
+<rect class="x-zone" x="650" y="10" width="300" height="286" rx="10"/><text class="x-zl" x="660" y="28">第 0 层：全部 18 个点</text>
+<line id="e0-AB" class="x-ed tedge" x1="698" y1="84" x2="750" y2="70"/>
+<line id="e0-AF" class="x-ed tedge" x1="698" y1="84" x2="688" y2="150"/>
+<line id="e0-AG" class="x-ed tedge" x1="698" y1="84" x2="741" y2="136"/>
+<line id="e0-BC" class="x-ed tedge" x1="750" y1="70" x2="802" y2="103"/>
+<line id="e0-BG" class="x-ed tedge" x1="750" y1="70" x2="741" y2="136"/>
+<line id="e0-CD" class="x-ed tedge" x1="802" y1="103" x2="860" y2="74"/>
+<line id="e0-CI" class="x-ed tedge" x1="802" y1="103" x2="840" y2="146"/>
+<line id="e0-DE" class="x-ed tedge" x1="860" y1="74" x2="907" y2="117"/>
+<line id="e0-DI" class="x-ed tedge" x1="860" y1="74" x2="840" y2="146"/>
+<line id="e0-EI" class="x-ed tedge" x1="907" y1="117" x2="840" y2="146"/>
+<line id="e0-EJ" class="x-ed tedge" x1="907" y1="117" x2="893" y2="179"/>
+<line id="e0-FG" class="x-ed tedge" x1="688" y1="150" x2="741" y2="136"/>
+<line id="e0-FK" class="x-ed tedge" x1="688" y1="150" x2="712" y2="208"/>
+<line id="e0-FR" class="x-ed tedge" x1="688" y1="150" x2="684" y2="250"/>
+<line id="e0-GH" class="x-ed tedge" x1="741" y1="136" x2="784" y2="170"/>
+<line id="e0-HI" class="x-ed tedge" x1="784" y1="170" x2="840" y2="146"/>
+<line id="e0-HL" class="x-ed tedge" x1="784" y1="170" x2="764" y2="226"/>
+<line id="e0-HM" class="x-ed tedge" x1="784" y1="170" x2="817" y2="212"/>
+<line id="e0-IJ" class="x-ed tedge" x1="840" y1="146" x2="893" y2="179"/>
+<line id="e0-JO" class="x-ed tedge" x1="893" y1="179" x2="916" y2="231"/>
+<line id="e0-KL" class="x-ed tedge" x1="712" y1="208" x2="764" y2="226"/>
+<line id="e0-KR" class="x-ed tedge" x1="712" y1="208" x2="684" y2="250"/>
+<line id="e0-LM" class="x-ed tedge" x1="764" y1="226" x2="817" y2="212"/>
+<line id="e0-LR" class="x-ed tedge" x1="764" y1="226" x2="684" y2="250"/>
+<line id="e0-LS" class="x-ed tedge" x1="764" y1="226" x2="793" y2="260"/>
+<line id="e0-MN" class="x-ed tedge" x1="817" y1="212" x2="864" y2="236"/>
+<line id="e0-MS" class="x-ed tedge" x1="817" y1="212" x2="793" y2="260"/>
+<line id="e0-MT" class="x-ed tedge" x1="817" y1="212" x2="883" y2="274"/>
+<line id="e0-NO" class="x-ed tedge" x1="864" y1="236" x2="916" y2="231"/>
+<line id="e0-NS" class="x-ed tedge" x1="864" y1="236" x2="793" y2="260"/>
+<line id="e0-NT" class="x-ed tedge" x1="864" y1="236" x2="883" y2="274"/>
+<line id="e0-OT" class="x-ed tedge" x1="916" y1="231" x2="883" y2="274"/>
+<g id="q0" data-role="bad"><path class="tq" d="M848,203 L855,196 L862,203 L855,210 z"/><text class="x-ts" x="864" y="207">问题</text></g>
+<g id="n0-A" data-role="pd"><circle class="tn" cx="698" cy="84" r="9"/><text class="tl" x="698" y="88" text-anchor="middle">A</text></g>
+<g id="n0-B" data-role="cg"><circle class="tn" cx="750" cy="70" r="9"/><text class="tl" x="750" y="74" text-anchor="middle">B</text></g>
+<g id="n0-C" data-role="pd"><circle class="tn" cx="802" cy="103" r="9"/><text class="tl" x="802" y="107" text-anchor="middle">C</text></g>
+<g id="n0-D" data-role="pd"><circle class="tn" cx="860" cy="74" r="9"/><text class="tl" x="860" y="78" text-anchor="middle">D</text></g>
+<g id="n0-E" data-role="cg"><circle class="tn" cx="907" cy="117" r="9"/><text class="tl" x="907" y="121" text-anchor="middle">E</text></g>
+<g id="n0-F" data-role="pd"><circle class="tn" cx="688" cy="150" r="9"/><text class="tl" x="688" y="154" text-anchor="middle">F</text></g>
+<g id="n0-G" data-role="pd"><circle class="tn" cx="741" cy="136" r="9"/><text class="tl" x="741" y="140" text-anchor="middle">G</text></g>
+<g id="n0-H" data-role="cg"><circle class="tn" cx="784" cy="170" r="9"/><text class="tl" x="784" y="174" text-anchor="middle">H</text></g>
+<g id="n0-I" data-role="pd"><circle class="tn" cx="840" cy="146" r="9"/><text class="tl" x="840" y="150" text-anchor="middle">I</text></g>
+<g id="n0-J" data-role="pd"><circle class="tn" cx="893" cy="179" r="9"/><text class="tl" x="893" y="183" text-anchor="middle">J</text></g>
+<g id="n0-K" data-role="cg"><circle class="tn" cx="712" cy="208" r="9"/><text class="tl" x="712" y="212" text-anchor="middle">K</text></g>
+<g id="n0-L" data-role="pd"><circle class="tn" cx="764" cy="226" r="9"/><text class="tl" x="764" y="230" text-anchor="middle">L</text></g>
+<g id="n0-M" data-role="pd"><circle class="tn" cx="817" cy="212" r="9"/><text class="tl" x="817" y="216" text-anchor="middle">M</text></g>
+<g id="n0-N" data-role="cg"><circle class="tn" cx="864" cy="236" r="9"/><text class="tl" x="864" y="240" text-anchor="middle">N</text></g>
+<g id="n0-O" data-role="pd"><circle class="tn" cx="916" cy="231" r="9"/><text class="tl" x="916" y="235" text-anchor="middle">O</text></g>
+<g id="n0-R" data-role="pd"><circle class="tn" cx="684" cy="250" r="9"/><text class="tl" x="684" y="254" text-anchor="middle">R</text></g>
+<g id="n0-S" data-role="pd"><circle class="tn" cx="793" cy="260" r="9"/><text class="tl" x="793" y="264" text-anchor="middle">S</text></g>
+<g id="n0-T" data-role="cg"><circle class="tn" cx="883" cy="274" r="9"/><text class="tl" x="883" y="278" text-anchor="middle">T</text></g>
+</svg></div>
+    <div class="st-cap" data-role="of" id="st-cap"><b class="h">准备</b>点“下一步”。</div>
+  </div>
+  <p class="tip">紫色圈是能到第 1 层以上的点，蓝色圈只在第 0 层。轨迹由 <a href="https://github.com/archeu/study-labs/tree/main/agent/vector-hnsw">toy_hnsw.py</a> 算出来，和真实 HNSW 的差别写在它开头：层是手工指定的，边是直接连最近的点，没有用插入时的启发式。</p>
+  <div class="two">
+    <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>toy_hnsw.py 的搜索部分</b><a href="https://github.com/archeu/study-labs/tree/main/agent/vector-hnsw">完整代码 →</a></div><pre><code>cur = ENTRY                                   <span class="cm"># 最高层的入口</span>
+for l in (2, 1):                              <span class="cm"># 上层：只留 1 个候选，贪心</span>
+    while True:
+        best = min(g[l][cur], key=lambda x: d(x, q))
+        if d(best, q) &gt;= d(cur, q): break       <span class="cm"># 邻居都更远：下一层</span>
+        cur = best
+visited = {cur}
+cand = [(d(cur, q), cur)]                     <span class="cm"># 小根堆：待展开，近的先展开</span>
+res  = [(-d(cur, q), cur)]                    <span class="cm"># 大根堆：结果池，堆顶是池里最远的</span>
+while cand:
+    dc, c = heapq.heappop(cand)
+    if dc &gt; -res[0][0] and len(res) &gt;= ef: break   <span class="cm"># 最近的候选都比池里最远的远：停</span>
+    for n in g[0][c]:
+        if n in visited: continue
+        visited.add(n)
+        if len(res) &lt; ef or d(n, q) &lt; -res[0][0]:
+            heapq.heappush(cand, (d(n, q), n))
+            heapq.heappush(res, (-d(n, q), n))
+            if len(res) &gt; ef: heapq.heappop(res)   <span class="cm"># 挤掉池里最远的</span>
+top = sorted((-x, n) for x, n in res)[:k]</code></pre></div>
+    <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>python3 vector-hnsw/toy_hnsw.py</b></div><pre class="console">第 2 层：K → E                      <span class="c">E 105.5 比 K 150.1 近</span>
+第 1 层：E → N                      <span class="c">N 只差 36.4</span>
+第 0 层：展开 N  看了 M O S T     池 N M O T
+         展开 M  看了 H L         <span class="c">都比池里最远的 T 远</span>
+         展开 O  看了 J           池 N M J O
+         展开 J  看了 E I         池 N M J I
+         展开 I  看了 C D
+         下一个候选 T 80.8 &gt; 池里最远 I 61.8：停
+结果 [N, M]，暴力算的也是 [N, M]
+<span class="hi">一共算了 12 个点的距离（全部 18 个）</span></pre></div>
+  </div>
+  <div class="lab-res" data-role="pd"><b>手推出来的结论</b><ul>
+    <li>上两层一共只走了 2 步，就从左上角的 K 到了问题附近的 N：快速通道的作用是<b>找一个好起点</b>。</li>
+    <li>第 0 层在 N 附近展开了 5 个点，看了 12 个点的距离就停了；左上角的 A、B、F、G、K、R 一个都没算。18 个点里省 6 个不算什么，5 万个点里，ef_search = 40 时也只算几百到一两千个（② 的实测）。</li>
+    <li>停下的条件是“最近的未展开候选，比池里最远的还远”：再展开下去，也不可能找到能进池子的点了，前提是图是连通的、近的点之间有边。这个前提不总成立，所以是近似。</li>
+  </ul></div>
+  <div class="verdict" data-role="done"><b>到这里已经能交差了</b>：知道 HNSW 怎么建、怎么查，pgvector 里一条 <code>CREATE INDEX … USING hnsw</code>、一条 <code>ORDER BY emb &lt;=&gt; $1 LIMIT 10</code> 就能用。<br><b>已知还没处理的细节</b>：带过滤时结果不够（<a href="#p-filter">坑 1</a>）；过滤很狠时规划器放弃索引（<a href="#p-select">坑 2</a>）；ef_search 小于 LIMIT（<a href="#p-limit">坑 3</a>）；索引的大小和建索引时间（<a href="#p-mem">坑 4</a>）；IVFFlat 的桶会过时（<a href="#p-ivf">坑 5</a>）；写法不对不走索引（<a href="#p-noidx">坑 6</a>）。</div>
+</section>
+
+<section id="s6" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑥</span>边界和变体</h2></div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-filter"><b><em>1</em>带 WHERE 过滤，结果凑不满 LIMIT<span class="seen">实测</span><a class="rootmark" href="#m-ef">← ④ 洞察 3</a></b>
+      <dl><dt>现象</dt><dd>5 万条里 10% 属于 risk 团队，<code>WHERE team = 'risk' ORDER BY emb &lt;=&gt; $1 LIMIT 10</code>：平均只返回 4.0 条，有的问题一条都没有，召回 0.40。不报错。</dd><dt>根源</dt><dd>HNSW 先按 ef_search 交出 40 个最近的，再逐行过滤；40 × 10% ≈ 4。<code>EXPLAIN ANALYZE</code> 里看得到：Index Scan，Rows Removed by Filter: 38。</dd><dt>做法</dt><dd class="fix">pgvector 0.8 起 <code>SET hnsw.iterative_scan = relaxed_order</code>：凑不满就接着往下扫，实测返回满 10 条、召回 0.68、5.2 ms；再把 ef_search 调大，召回还能往上走。过滤条件固定的（团队、状态），用部分索引（<code>CREATE INDEX … WHERE team = 'trade'</code>）或按团队分区，让索引里只有能被查到的行。</dd></dl>
+    </div>
+    <div class="pit" id="p-select"><b><em>2</em>过滤很狠时，规划器自己会放弃 HNSW<span class="seen">实测</span><a class="rootmark" href="#m-design">← ④ 为什么这样设计</a></b>
+      <dl><dt>现象</dt><dd>只有 2% 的行满足（trade 团队 1017 行）时，规划器选了 Seq Scan + Sort：返回满 10 条，召回 1.0，11 ms。强制走 HNSW（<code>enable_seqscan = off</code>）反而平均只回来 0.9 条。</dd><dt>根源</dt><dd>满足条件的行少到排序它们比走图还便宜，规划器按代价选了精确的路；10% 时它估计走索引更便宜，于是掉进了坑 1。</dd><dt>做法</dt><dd class="fix">别为了“用上索引”强制走 HNSW；有向量查询的表要 <code>ANALYZE</code>，让规划器知道每个 team 有多少行。上线前用 <code>EXPLAIN ANALYZE</code> 按几种典型的过滤条件各看一次计划。</dd></dl>
+    </div>
+    <div class="pit" id="p-limit"><b><em>3</em>LIMIT 比 ef_search 大，最多只回来 ef_search 条<a class="rootmark" href="#m-ef">← ④ 洞察 3</a></b>
+      <dl><dt>现象</dt><dd>想一次取 100 个候选给重排，<code>LIMIT 100</code>，默认 ef_search = 40 时最多只回来 40 条。</dd><dt>根源</dt><dd>第 0 层的候选池就 ef_search 那么大，池子装满了，搜索就结束了。<span class="tag-doc">按文档</span></dd><dt>做法</dt><dd class="fix">ef_search 至少设成 LIMIT；或者打开 iterative_scan。</dd></dl>
+    </div>
+    <div class="pit" id="p-mem"><b><em>4</em>索引比表还大，建得也慢<span class="seen">实测</span><a class="rootmark" href="#m-design">← ④ 为什么这样设计</a></b>
+      <dl><dt>现象</dt><dd>表 268 MB，HNSW 索引 391 MB；2 核建了 84 秒（m = 8 时 46 秒，索引一样 391 MB）。IVFFlat 只要 11 秒，但索引也是 392 MB。</dd><dt>根源</dt><dd>索引里每个点都存一份完整的向量（1024 × 4 字节 = 4 KB），再加上邻居列表；两个 m 一样大，说明大小主要由向量本身决定（推测：一个 8 KB 的页大约只放得下一个点，没有逐页核对）。建图要为每个点搜一遍邻居，所以慢。</dd><dt>做法</dt><dd class="fix">建索引前把 <code>maintenance_work_mem</code> 调到放得下整张图（不够时 pgvector 会提示图放不进内存，建得更慢 <span class="tag-doc">按文档</span>），<code>max_parallel_maintenance_workers</code> 按核数开；向量换成 <code>halfvec</code>（2 字节一维）能把表和索引都砍一半，召回通常只掉一点点，要用评测集量。</dd></dl>
+    </div>
+    <div class="pit" id="p-ivf"><b><em>5</em>IVFFlat 的桶会过时<a class="rootmark" href="#m-design">← ④ 为什么这样设计</a></b>
+      <dl><dt>现象</dt><dd>建索引时库里只有一部分数据，之后大量新片进来，召回率慢慢往下掉；空表上建的 IVFFlat 基本没用。</dd><dt>根源</dt><dd>桶的中心是建索引那一刻用 k-means 算的，新数据只是被分到最近的旧桶里，桶不会重新划分。<span class="tag-doc">按文档</span></dd><dt>做法</dt><dd class="fix">用 IVFFlat 就定期重建（<code>REINDEX</code>）；知识库这种持续增量写入的场景，默认用 HNSW。</dd></dl>
+    </div>
+    <div class="pit" id="p-noidx"><b><em>6</em>写法不对，不走索引<span class="seen">实测</span><a class="rootmark" href="#m-design">← ④ 为什么这样设计</a></b>
+      <dl><dt>现象</dt><dd><code>ORDER BY 1 - (emb &lt;=&gt; $1) DESC</code>（按相似度从大到小）走了 Seq Scan；索引是 <code>vector_cosine_ops</code>，查询却用了 <code>&lt;-&gt;</code>（欧氏距离），也走 Seq Scan。</dd><dt>根源</dt><dd>索引只认“按某个距离运算符升序取前几个”这一种形状；运算符要和建索引时的操作符类对应（余弦 <code>&lt;=&gt;</code>、欧氏 <code>&lt;-&gt;</code>、内积 <code>&lt;#&gt;</code>）。</dd><dt>做法</dt><dd class="fix">固定写成 <code>ORDER BY emb &lt;=&gt; $1 LIMIT k</code>，相似度在 SELECT 里另算；上线前 <code>EXPLAIN</code> 确认是 Index Scan。</dd></dl>
+    </div>
+  </div>
+
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>过滤条件（5 万条里满足的比例）</th><th>规划器选的路</th><th>iterative_scan = off</th><th>iterative_scan = relaxed_order</th></tr></thead>
+      <tbody>
+        <tr><th>team = 'trade'（2%）</th><td>Seq Scan + Sort（精确）</td><td class="good">10 条，召回 1.00，11 ms</td><td class="good">同左</td></tr>
+        <tr><th>同上，强制走 HNSW</th><td>Index Scan</td><td class="bad">平均 0.9 条，召回 0.09</td><td>10 条，召回 0.65，18 ms</td></tr>
+        <tr><th>team = 'risk'（10%）</th><td>Index Scan</td><td class="bad">平均 4.0 条（最少 0），召回 0.40</td><td>10 条，召回 0.68，5.2 ms</td></tr>
+        <tr><th>team = 'ops'（30%）</th><td>Index Scan</td><td>平均 9.5 条（最少 5），召回 0.93</td><td class="good">10 条，召回 0.98，2.6 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tip"><span class="tag-real">实测</span> 100 个问题，ef_search = 40。召回是和“先过滤、再精确排序”的结果比。测这张表时踩了一个坑：psycopg 3 会把同一条 SQL 执行 5 次后自动改成服务端预编译，计划被缓存，之后 <code>SET enable_seqscan = off</code> 不起作用；改成 <code>prepare=False</code> 才测准。pgjdbc 的 <code>prepareThreshold</code> 默认也是 5，Java 里一样会遇到。</p>
+
+  <h3>第二圈 · 使用规范</h3>
+  <ul class="rules-list">
+    <li><b>查询固定写成 <code>ORDER BY emb &lt;=&gt; $1 LIMIT k</code></b>，并用 <code>EXPLAIN ANALYZE</code> 留一份典型计划。防的是改了一个排序表达式就退回暴力扫描。</li>
+    <li><b>ef_search 按场景在会话或事务里设</b>：给重排取 20～50 个候选时，ef_search 至少等于 LIMIT。防的是结果条数被悄悄截断。</li>
+    <li><b>有过滤就打开 iterative_scan</b>，固定的过滤维度用部分索引或分区。防的是坑 1 那种“返回 4 条不报错”。</li>
+    <li><b>召回率要用自己的数据量</b>：从库里抽几百个问题，用暴力扫描的结果当标准答案，算 HNSW 的召回@k。防的是拿别人的基准数字当自己的。</li>
+    <li><b>建索引放在批量导入之后</b>，并调好 maintenance_work_mem。防的是边导边建，每插一条都要在图里找邻居，导入慢好几倍。</li>
+  </ul>
+
+  <h3>第三圈 · 优化和深处</h3>
+  <div class="two">
+    <div class="card" data-role="pd"><h4>m 和 ef_search 怎么一起调</h4><p>m 定了图有多“通”：m = 8 时 ef_search 要到 160 才有 0.99，m = 16 时 40 就到了。所以 m 小省的是建索引时间（46 秒对 84 秒），查询时要拿更大的 ef 补回来。知识库读多写少，m 用默认 16，按召回目标调 ef_search。</p></div>
+    <div class="card" data-role="cg"><h4>插入时的“邻居启发式”</h4><p>真实的 HNSW 给新点挑邻居时，不是简单取最近的 m 个，而是跳过“已经能通过别的邻居到达”的点，让边朝不同方向伸出去。这样图里少了冗余的短边，多了能跨过空白区域的边，贪心不容易困在局部。⑤ 的小图没有这一步。<span class="tag-doc">按文档</span>（Malkov &amp; Yashunin）</p></div>
+    <div class="card" data-role="of"><h4>删除和更新</h4><p>pgvector 里删一行，索引里的点要等 VACUUM 才真正清理；图里的边会绕开它。知识库按版本整批下线时（第 8 个知识点），大量删除后的 VACUUM 会比较重，可以考虑按版本分区直接删分区。</p></div>
+    <div class="card" data-role="bk"><h4>合成数据和真实数据</h4><p>本页的点是“1000 个话题中心加噪声”，问题和第 1 近的余弦平均只有 0.38，比真实 Embedding 散。真实的文本向量更挤（全景的 31 片里前几名余弦都在 0.6 附近），同样的 ef_search，召回可能更高也可能更低，只能用真实的问题量。</p></div>
+  </div>
+
+  <div class="lab" data-role="g2" id="lab">
+    <h3 style="margin:0">实验台：召回率和延迟的旋钮</h3>
+    <div class="guess" id="lab-guess">
+      <p>先猜：m = 16，把 ef_search 从默认 40 调到 160，会怎样？</p>
+      <div class="opts">
+        <button type="button" data-g="a">召回 0.99 → 1.00，延迟变成近 3 倍</button>
+        <button type="button" data-g="b">召回涨 10 个点，延迟几乎不变</button>
+        <button type="button" data-g="c">召回和延迟都不变：要重建索引才生效</button>
+      </div>
+      <p class="res" id="lab-guess-res" hidden></p>
+    </div>
+    <div class="knob-row">
+      <label for="k-idx">索引<select id="k-idx"><option value="hnsw_m16" selected>HNSW m = 16（默认）</option><option value="hnsw_m8">HNSW m = 8</option><option value="ivfflat">IVFFlat lists = 224</option></select></label>
+      <label for="k-n">ef_search / probes<select id="k-n"><option value="0">第 1 档</option><option value="1">第 2 档</option><option value="2" selected>第 3 档</option><option value="3">第 4 档</option><option value="4">第 5 档</option><option value="5">第 6 档</option></select></label>
+    </div>
+    <div class="tiles4" id="lab-tiles"></div>
+    <p class="verdict-box" data-role="g2" id="lab-sum"></p>
+    <p class="tip"><span class="tag-real">实测</span> 全部来自 <code>vector-hnsw/main.py</code>（<code>hnsw.json</code>）：5 万条 × 1024 维，100 个问题，单连接串行，延迟是客户端测的 p50（含一次本机网络往返）。IVFFlat 只有 5 档（probes 1、5、10、20、40）。</p>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li><b>真实向量上的召回</b>：用站 06 的 Embedding 模型给几千条真实笔记算向量，重测 ef_search 和召回的关系。</li>
+    <li><b>halfvec 和二值量化</b>：pgvector 里把向量压成 2 字节或 1 位，再用原向量重排，省多少、掉多少。</li>
+    <li><b>DiskANN / pgvectorscale</b>：数据大到内存放不下时，图放在磁盘上怎么查。</li>
+    <li><b>专门的向量库</b>：Milvus、Qdrant 和 pgvector 在过滤、分片、多租户上的差别。</li>
+    <li><b>Elasticsearch 的 kNN</b>：同一个 HNSW 放在 Lucene 段里，段合并时图怎么办（接 <a href="../search/es-inverted-index-shards.html">ES 倒排索引与分片</a>）。</li>
+  </ul>
+</section>
+
+<section id="loop" data-role="other">
+  <div class="mech-h"><h2><span class="sn">↺</span>回到⑤：改一改</h2></div>
+  <ol class="rules-list">
+    <li><b>把 ef 改成 1</b>：<code>toy_hnsw.py</code> 里 <code>EF = 1</code>，第 0 层就退化成和上层一样的贪心。它还能找到 N、M 吗？换几个问题的位置（<code>QUERY</code>），找一个它会停在“局部最近”的例子。（④ 洞察 3）</li>
+    <li><b>拆掉快速通道</b>：把所有点的最高层都改成 0，入口放在左上角的 A。数一数第 0 层要展开几个点才到 N 附近，和分层时比。（④ 洞察 2）</li>
+    <li><b>补上过滤</b>：在 <code>vector-hnsw/main.py</code> 的过滤实验里，把 <code>hnsw.ef_search</code> 调到 1000（不开 iterative_scan），看平均返回条数和延迟，和打开 <code>relaxed_order</code> 比。（坑 1）</li>
+    <li><b>算一笔内存账</b>：按本页实测的“每条向量约 5.4 KB 表 + 7.8 KB 索引”，估算 300 万片的知识库要多少内存才能让 HNSW 常驻；换成 <code>halfvec</code> 能省多少。（坑 4）</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>HNSW 把向量连成多层的近邻图：上层点少、跨得远，用来快速找到起点；第 0 层攥着 ef 个候选在附近展开，只算几百上千个点的距离就找到前 10。它是近似的：召回率靠 ef 换，带过滤时结果会变少。</p></details>
+    <details><summary>2. 朴素做法（暴力扫描）疼在哪？</summary><p>每个问题都要和全部向量算一次距离：本页 5 万条时 PostgreSQL 顺序扫描要几百毫秒（见 ②），而且和条数成正比，库涨 10 倍就慢 10 倍；B+ 树这类按大小排序的索引帮不上忙。</p></details>
+    <details><summary>3. 为什么 HNSW 的结果不保证是真正的前 10？</summary><p>它沿着边贪心地走，停下的条件是“最近的未展开候选比池里最远的还远”。如果真正最近的点和当前区域之间没有边相连（图在那里“断开”了），就会停在局部最近。ef 越大，池子越大，越不容易早停。</p><p class="from">从 ④ 洞察 1、3 推出。</p></details>
+    <details><summary>4. 预测：把 ef_search 从 40 调到 400，召回率和延迟各会怎样？要重建索引吗？</summary><p>召回率会更接近 1（本页 160 和 320 时已经很高），延迟大致跟着 ef 涨，但远到不了暴力扫描那么慢。不用重建：ef_search 是查询时的参数，<code>SET</code> 一下就生效。要重建的是 m 和 ef_construction。</p><p class="from">从 ④ 洞察 3 推出。</p></details>
+    <details><summary>5. 预测：知识库里 98% 是别的团队的片，交易组的人查“本地缓存规范”，带着 <code>WHERE team = 'trade'</code> 走 HNSW，会怎样？</summary><p>如果走 HNSW：索引先交出 ef_search = 40 个最近的，再按 team 过滤，平均剩不到 1 条，LIMIT 10 拿不满，还不报错（实测强制走索引时平均 0.9 条）。实际上规划器看到只有 2% 的行满足，会改走顺序扫描再排序，结果反而是精确的（坑 2）。最危险的是 10% 上下那种“规划器觉得走索引划算”的过滤（坑 1）：要打开 <code>hnsw.iterative_scan</code>，或者用部分索引、按团队分区。</p><p class="from">从 ④ 洞察 3（ef_search 同时是“最多返回几行”）推出。</p></details>
+    <details><summary>6. 放回全景：第 5 站前后各发生什么？如果第 5 站没建 HNSW、只靠暴力扫描，整条链路会怎样？</summary><p>第 4 站把每片变成向量交给第 5 站存起来；第 8 站检索时来第 5 站取最近的 20 片。全景只有 31 片，暴力扫描毫秒级，看不出差别；库涨到几十万片，第 8 站每条检索语句要几百毫秒到几秒，一节报告查 4 次就是几秒的额外等待，并发一上来数据库 CPU 先满。反过来，建了 HNSW 却带着过滤查，第 8 站可能拿到不足 20 片的候选。</p><p class="from">从全景第 4、5、8 站和本页 ② 推出。</p></details>
+  </div>
+</section>
+</main>
+
+<footer>
+  <p>档位：标准。<span class="tag-real">实测</span> 2026-11-25，本机 2 核 ARM：PostgreSQL 17.11 + pgvector 0.8.7（容器，maintenance_work_mem 1 GB），5 万条合成的 1024 维向量、100 个问题：暴力扫描、HNSW（m 16 / 8，ef_search 10～320）、IVFFlat（lists 224，probes 1～40）、三种选择率的过滤和 iterative_scan；排序写法和运算符走不走索引；⑤ 的小图由 toy_hnsw.py 算出。按文档（已核对）：pgvector README 的参数默认值、过滤和 iterative scan、IVFFlat 的 lists 建议；Malkov &amp; Yashunin 的 HNSW 论文（分层概率、邻居启发式）。推测、没有逐页核对的：索引大小主要由向量本身决定。几百万片的延迟是按 5 万条实测线性外推的。</p>
+  <p>完整代码：<a href="https://github.com/archeu/study-labs/tree/main/agent/vector-hnsw">study-labs/agent/vector-hnsw</a>（<code>main.py</code> pgvector 实测，<code>toy_hnsw.py</code> 手推，<code>hnsw.json</code> 实验台数据）。</p>
+  <p>相关：<a href="pano-06-runbook-to-report.html">全景：一份运维手册从上传到被引用</a> · <a href="rag-pipeline.html">RAG 流水线</a> · <a href="../database/mysql-vs-pg-pgvector.html">MySQL 还是 PG：选型与 pgvector</a> · <a href="../algo/bplus-skiplist.html">B+ 树与跳表</a> · <a href="../database/mysql-index-bplustree.html">索引与 B+ 树</a></p>
+</footer>
+<script>
+/*SIM-START*/
+// 纯函数，不碰 DOM。发布前截出这一段在 node 里跑。
+const STEPS = [{"h": "从最高层的入口 K 出发", "cap": "第 2 层只有 K、E 两个点。入口固定是 K（建索引时第一个到达最高层的点），它离问题 150.1。", "lit": ["n2-K", "q2"]}, {"h": "第 2 层：走到更近的 E", "cap": "K 只有一个邻居 E，E 离问题 105.5，比 K 近，走过去。E 的邻居只有 K，更远：这一层到头了。", "lit": ["n2-K", "n2-E", "e2-EK", "q2"]}, {"h": "带着 E 下到第 1 层", "cap": "E 在第 1 层也有，从它接着走。上面几层的目的只有一个：给下一层找一个尽量近的起点。", "lit": ["n1-E", "q1"]}, {"h": "第 1 层：E 的邻居里 N 最近", "cap": "E 在这一层连着 H（82.8）和 N（36.4）。N 近得多，走过去。", "lit": ["n1-E", "n1-H", "n1-N", "e1-EH", "e1-EN", "q1"]}, {"h": "N 的邻居都更远：下到第 0 层", "cap": "N 连着 E、H、T（80.8），没有比 36.4 更近的。带着 N 下到第 0 层。到这里一共只看了 4 个点。", "lit": ["n1-N", "n1-T", "n1-H", "e1-NT", "e1-HN", "q1", "n0-N", "q0"]}, {"h": "第 0 层：展开 N", "cap": "从这一层开始手里攥着最多 ef = 4 个候选。N 的邻居 M（41.2）、O（71.6）、S（88.5）、T（80.8）都看一遍；池子留最近的 4 个：N、M、O、T，S 被挤掉。", "lit": ["n0-N", "n0-M", "n0-O", "n0-S", "n0-T", "e0-MN", "e0-NO", "e0-NS", "e0-NT", "q0"]}, {"h": "展开 M：H、L 都太远", "cap": "池里还没展开的最近的是 M。它的新邻居 H（82.8）、L（98.2）都比池里最远的 T（80.8）远，进不了池。", "lit": ["n0-M", "n0-H", "n0-L", "e0-HM", "e0-LM", "q0"]}, {"h": "展开 O：J 换掉 T", "cap": "O 的新邻居 J 离问题 47.2，比 T 近：J 进池，T 出池。池子：N、M、J、O。", "lit": ["n0-O", "n0-J", "e0-JO", "q0"]}, {"h": "展开 J：I 换掉 O", "cap": "J 的新邻居 E（105.5）进不来，I（61.8）比 O 近：池子变成 N、M、J、I。", "lit": ["n0-J", "n0-E", "n0-I", "e0-EJ", "e0-IJ", "q0"]}, {"h": "展开 I，然后停下", "cap": "I 的新邻居 C、D 都太远。下一个待展开的是 T（80.8），比池里最远的 I（61.8）还远：再展开也找不到能进池的点，停。", "lit": ["n0-I", "n0-C", "n0-D", "n0-T", "e0-CI", "e0-DI", "q0"]}, {"h": "结果：N、M，和暴力算的一样", "cap": "从池里取最近的 2 个：N、M。一共算了 12 个点的距离，左上角的 A、B、F、G、K、R 一个都没碰。", "lit": ["n0-N", "n0-M", "e0-MN", "q0"]}];
+function stateAt(i) {
+  const step = Math.min(STEPS.length, Math.max(0, i | 0)), cur = STEPS[step - 1];
+  return { step, total: STEPS.length, lit: cur ? cur.lit : [], h: cur ? cur.h : "准备", cap: cur ? cur.cap : "点“下一步”。" };
+}
+// 实验台：pgvector 实测（vector-hnsw/hnsw.json），5 万条 × 1024 维，100 个问题
+const IDX = {"hnsw_m16": {"name": "HNSW m = 16", "knob": "ef_search", "build_s": 83.7, "mb": 390.6, "rows": [[10, 0.837, 1.62], [20, 0.939, 1.8], [40, 0.99, 2.2], [80, 1.0, 3.48], [160, 1.0, 6.17], [320, 1.0, 11.2]]}, "hnsw_m8": {"name": "HNSW m = 8", "knob": "ef_search", "build_s": 45.5, "mb": 390.6, "rows": [[10, 0.553, 1.37], [20, 0.776, 1.6], [40, 0.89, 1.74], [80, 0.96, 2.51], [160, 0.99, 3.89], [320, 0.993, 6.62]]}, "ivfflat": {"name": "IVFFlat lists = 224", "knob": "probes", "build_s": 11.4, "mb": 392.4, "rows": [[1, 0.869, 1.53], [5, 0.911, 3.19], [10, 0.922, 5.21], [20, 0.936, 8.62], [40, 0.956, 16.17]]}};
+const EXACT_MS = 227.75;
+function simulate(key, i) {
+  const x = IDX[key] || IDX.hnsw_m16;
+  const k = Math.min(x.rows.length - 1, Math.max(0, i | 0));
+  const [v, recall, ms] = x.rows[k];
+  const base = IDX.hnsw_m16.rows[2];
+  return { name: x.name, knob: x.knob, v, recall, ms, speedup: EXACT_MS / ms, missed: Math.round((1 - recall) * 10 * 10) / 10,
+           build: x.build_s, mb: x.mb, clamped: k !== (i | 0), vsDefault: ms / base[2] };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  // 分步动画：按钮 + 左右方向键 + 自动播放
+  const ids = [...new Set(STEPS.flatMap(s => s.lit))];
+  let cur = 0, timer = null;
+  function render(i) {
+    const st = stateAt(i); cur = st.step;
+    ids.forEach(id => { const el = document.getElementById(id); if (!el) return; const on = st.lit.includes(id); el.classList.toggle("lit", st.step > 0 && on); el.classList.toggle("fade", st.step > 0 && !on); });
+    $("#st-cap").innerHTML = '<b class="h">' + esc(st.h) + "</b>" + esc(st.cap);
+    $("#st-pos").textContent = st.step + " / " + st.total;
+    $("#st-prev").disabled = st.step === 0;
+    $("#st-next").disabled = st.step === st.total;
+  }
+  function stopAuto() { if (timer) { clearInterval(timer); timer = null; } $("#st-auto").setAttribute("aria-pressed", "false"); $("#st-auto").textContent = "自动播放"; }
+  $("#st-prev").addEventListener("click", () => { stopAuto(); render(cur - 1); });
+  $("#st-next").addEventListener("click", () => { stopAuto(); render(cur + 1); });
+  $("#st-reset").addEventListener("click", () => { stopAuto(); render(0); });
+  $("#st-auto").addEventListener("click", () => {
+    if (timer) { stopAuto(); return; }
+    if (cur === STEPS.length) render(0);
+    $("#st-auto").setAttribute("aria-pressed", "true"); $("#st-auto").textContent = "暂停";
+    timer = setInterval(() => { if (cur >= STEPS.length) stopAuto(); else render(cur + 1); }, 3200);
+  });
+  $("#stp").addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") { stopAuto(); render(cur + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { stopAuto(); render(cur - 1); e.preventDefault(); }
+  });
+  render(0);
+
+  // 实验台：参数变了就重画；结论文字由 simulate() 的结果拼出来，不写死
+  function draw() {
+    const key = $("#k-idx").value, r = simulate(key, +$("#k-n").value);
+    const opts = IDX[key].rows.map((row, j) => '<option value="' + j + '">' + IDX[key].knob + " = " + row[0] + "</option>").join("");
+    const sel = $("#k-n"), keep = Math.min(+sel.value, IDX[key].rows.length - 1);
+    if (sel.dataset.idx !== key) { sel.innerHTML = opts; sel.dataset.idx = key; sel.value = String(keep); }
+    $("#lab-tiles").innerHTML =
+      '<div class="tile" data-role="pd"><small>召回@10</small><b>' + r.recall.toFixed(3) + "</b><span>前 10 里平均漏 " + r.missed + " 个</span></div>" +
+      '<div class="tile" data-role="of"><small>延迟 p50</small><b>' + r.ms + " ms</b><span>暴力扫描的 1/" + Math.round(r.speedup) + "</span></div>" +
+      '<div class="tile" data-role="cg"><small>建索引</small><b>' + r.build + " 秒</b><span>2 核</span></div>" +
+      '<div class="tile" data-role="bk"><small>索引大小</small><b>' + r.mb + " MB</b><span>表是 268 MB</span></div>";
+    $("#lab-sum").textContent = r.name + "，" + r.knob + " = " + r.v + "：召回 " + r.recall.toFixed(3) + "，" + r.ms + " ms。" +
+      (r.recall >= 0.99 ? "已经几乎找全了，再往上调只是更慢。" : r.recall >= 0.9 ? "每 10 个里还会漏 " + r.missed + " 个，重排之前的候选够用，但精确查找不够。" : "漏得太多：前 10 名里有 " + r.missed + " 个是错的，这一档只适合对延迟极敏感、对召回不敏感的场景。") +
+      (key === "ivfflat" ? " IVFFlat 的召回涨得慢：要开到 40 个桶才 0.956，延迟已经是 HNSW 默认档的 " + (r.ms / IDX.hnsw_m16.rows[2][2]).toFixed(1) + " 倍。" : "");
+  }
+  $("#k-idx").addEventListener("change", draw);
+  $("#k-n").addEventListener("change", draw);
+  // 先猜再跑：ANSWER 是正确选项的 data-g
+  const ANSWER = "a";
+  $$("#lab-guess .opts button").forEach(btn => btn.addEventListener("click", () => {
+    $$("#lab-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", "false"); });
+    btn.setAttribute("aria-pressed", "true");
+    const ok = btn.dataset.g === ANSWER;
+    btn.classList.add(ok ? "right" : "wrong");
+    if (!ok) $('#lab-guess [data-g="' + ANSWER + '"]').classList.add("right");
+    const g = $("#lab-guess-res"); g.hidden = false;
+    const a = simulate("hnsw_m16", 2), z = simulate("hnsw_m16", 4);
+    g.textContent = (ok ? "猜对了。" : "不是这个。") + "ef_search 40 → 160：召回 " + a.recall.toFixed(3) + " → " + z.recall.toFixed(3) + "，延迟 " + a.ms + " → " + z.ms + " ms（" + (z.ms / a.ms).toFixed(1) + " 倍）。ef_search 是查询时的参数，SET 一下就生效，不用重建；池子大了 4 倍，要展开、要算距离的点也多了。";
+    $("#k-idx").value = "hnsw_m16"; $("#k-n").dataset.idx = ""; $("#k-n").value = "4";
+    draw();
+  }));
+  draw();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>

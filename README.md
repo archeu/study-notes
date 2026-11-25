@@ -63,6 +63,7 @@
 | 50 | [RAG 流水线：切块、向量化、检索、重排、生成](https://study.ainiya.de/agent/rag-pipeline.html) | 闭卷和 RAG 的本机对照、两段路（索引和查询）分步动画、检索找的是最像不是最对、双塔粗筛加交叉编码精排、五个实测的坑、30 题命中率随 k 变化的实验台 |
 | 51 | [文档解析：PDF、Word、表格、扫描件](https://study.ainiya.de/agent/doc-parsing.html) | PDF 内容流原样拆解、版面分析分步动画、表格两种取字对照、OCR 四步、Word 的 XML 结构、PDF 为什么这样设计、六个实测的坑、扫描分辨率和倾斜实验台 |
 | 52 | [清洗、切块策略和元数据](https://study.ainiya.de/agent/chunking-metadata.html) | 三类噪声和清洗规则、按标题切块分步动画、元数据的三种用途、为什么片要小而完整、7 种做法 × 30 题的本机对比、六个实测的坑、切法对比实验台 |
+| 53 | [向量检索和 HNSW 索引](https://study.ainiya.de/agent/vector-hnsw.html) | 暴力扫描为什么不行、四种少看的思路、HNSW 的近邻图、分层和 ef、三层小图手推分步动画、pgvector 5 万条实测（HNSW、IVFFlat、过滤和 iterative_scan）、六个坑、召回率与延迟实验台 |
 
 # Java 后端架构（补给库）
 
