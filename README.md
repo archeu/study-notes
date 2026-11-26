@@ -76,6 +76,7 @@
 | 63 | [两种传输：stdio 和 Streamable HTTP](https://study.ainiya.de/agent/mcp-transports.html) | stdio 一行一条走管道、stdout 只许走协议，Streamable HTTP 一个 POST 端点、必带请求头、JSON 或 SSE；2024 年 HTTP+SSE 为什么被换掉、请求头为什么要把 body 再写一遍；curl 实测 403 / 400 -32020 / -32022 / 202，stdio 和 HTTP 各 100 次调用的计时，一次 tools/call 过关的分步图 |
 | 64 | [写 MCP 服务端：Python 和 Java 各一个](https://study.ainiya.de/agent/mcp-server-build.html) | Python 用 MCPServer + 装饰器写 oncall（lifespan、Context、ToolError、内存测试），Java 用 Spring AI 2.1.0 的 @McpTool 写 tickets；签名和注释怎么变成工具定义、一次调用在 SDK 里的六步；实测 -parameters、异常透出、协议年代只能选一个、多实例密钥四个坑，两个服务端被 Python SDK 和 Claude Code 连通 |
 | 65 | [远程 MCP 的鉴权（OAuth）](https://study.ainiya.de/agent/mcp-oauth.html) | MCP 服务端当 OAuth 资源服务器：401 指路、RFC 9728 / 8414 发现授权服务器、注册、授权码 + PKCE + resource、令牌绑定受众、scope 按需升级、禁止透传；本机用 SDK 搭授权服务器走完 13 个 HTTP 来回，实测 issuer 斜杠、注册 scope、受众校验等五个坑，分步时序图 |
+| 66 | [MCP 的安全：不可信服务端、工具描述投毒、最小权限](https://study.ainiya.de/agent/mcp-security.html) | 代码层、文字层、权限层三层风险，2025 年三次公开演示（工具描述投毒、rug pull、公开 issue 间接注入），审 / 钉住 / 扫描 / 隔离 / 权限闸 / 拆三件套各挡什么，本机实测体检脚本抓住 rug pull，Claude Code 的最小权限配置，“致命三件套”检查器 |
 
 # Java 后端架构（补给库）
 
