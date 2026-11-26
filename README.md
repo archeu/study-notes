@@ -78,6 +78,7 @@
 | 65 | [远程 MCP 的鉴权（OAuth）](https://study.ainiya.de/agent/mcp-oauth.html) | MCP 服务端当 OAuth 资源服务器：401 指路、RFC 9728 / 8414 发现授权服务器、注册、授权码 + PKCE + resource、令牌绑定受众、scope 按需升级、禁止透传；本机用 SDK 搭授权服务器走完 13 个 HTTP 来回，实测 issuer 斜杠、注册 scope、受众校验等五个坑，分步时序图 |
 | 66 | [MCP 的安全：不可信服务端、工具描述投毒、最小权限](https://study.ainiya.de/agent/mcp-security.html) | 代码层、文字层、权限层三层风险，2025 年三次公开演示（工具描述投毒、rug pull、公开 issue 间接注入），审 / 钉住 / 扫描 / 隔离 / 权限闸 / 拆三件套各挡什么，本机实测体检脚本抓住 rug pull，Claude Code 的最小权限配置，“致命三件套”检查器 |
 | 67 | [Agent Skills：按需加载的说明书](https://study.ainiya.de/agent/agent-skills.html) | 说明书放哪：CLAUDE.md、提示词模板、RAG、MCP 工具各缺什么；SKILL.md 格式、描述就是触发条件、三层按需加载、Skill 和 MCP 的分工；把值班 SOP 写成 oncall-triage（带脚本和参考文件），本机实测每层进上下文的字数和官方校验工具，三层分步图 |
+| 68 | [全景：一个告警进来以后](https://study.ainiya.de/agent/pano-08-alert-to-ticket.html) | 站 08 全景：n8n 接告警、LangGraph 起图、主 agent 分诊、Send 并行派三个子 agent、检查点、interrupt 等人批准、幂等键建工单、审计，11 站分步演示和时间尺 |
 
 # Java 后端架构（补给库）
 
