@@ -97,6 +97,7 @@
 | 84 | [提示词和 Skill 的版本管理](https://study.ainiya.de/agent/prompt-versioning.html) | 版本不可变加内容指纹、标签是指针（上线灰度回滚只移标签）、发布包把工具说明和模型参数也算进去、span 上的 gen_ai.prompt.version 和 Skill 的来源地址，本机演示原地修改被 check 抓住，发布包实验台 |
 | 85 | [评测进 CI：改提示词要过门禁](https://study.ainiya.de/agent/eval-ci-gate.html) | 按路径触发、基线按指纹缓存、安全项不许新增、分项逐条配对扣噪声、成本门槛，GitHub Actions 示例和 PR 报告，@4 红、同一版自比和 @5 绿的三次真实判决，改规则看红绿的实验台 |
 | 86 | [线上指标：成功率、成本、P95 延迟、转人工率](https://study.ainiya.de/agent/online-metrics.html) | 四个线上指标的定义和来源、按提示词版本拆开、直方图估 P95 的误差、先动的和后动的，用真实运行回放灰度：@5 一天看不出、假如 @4 上线先露馅的是延迟，灰度要多大看几天的实验台 |
+| 87 | [换模型、升级模型怎么回归](https://study.ainiya.de/agent/model-regression.html) | 换模型是全量改动：翻面多、质量成本延迟一起动、先写能换的规则、提示词跟着模型、版本钉死，本机 1.7B 和 0.6B 乘两版提示词的 2×2 实测，按规则判能不能换的实验台 |
 
 # Java 后端架构（补给库）
 
