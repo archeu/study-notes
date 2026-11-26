@@ -88,6 +88,7 @@
 | 75 | [Java 框架：Spring AI、Spring AI Alibaba、LangChain4j](https://study.ainiya.de/agent/java-agent-frameworks.html) | 站 08 下钻 7：三家和 LangGraph 的对照表、Spring AI 的工具循环在 Advisor 链里转、LangChain4j 的 AiServices、Spring AI Alibaba Graph 搭全景那张图，JDK 17 本机实测和五个坑（arg0 参数名、token 口径、线程池），一次请求的分步动画 |
 | 76 | [低代码平台：Dify、Coze、n8n](https://study.ainiya.de/agent/lowcode-platforms.html) | 站 08 下钻 8：节点连线表达式和执行记录、三个平台 2026-11 的版本和许可证、本机 n8n 搭出全景第 1 站（告警去重转发）、只按指纹去重会丢掉下周同一告警的实测和修正，n8n 一次次执行的分步动画 |
 | 77 | [什么时候用低代码，什么时候写代码](https://study.ainiya.de/agent/lowcode-vs-code.html) | 站 08 下钻 9：五个问题、改动频率 × 出错代价四象限、全景各站的切法、什么时候从画布毕业成代码、本站四种实现的对比表（实测数据），划线器实验台 |
+| 78 | [全景：改了一句提示词之后](https://study.ainiya.de/agent/pano-09-prompt-change.html) | 站 09 全景：提示词改一行，CI 跑 50 条评测、打分、看轨迹、和基线逐条比、门禁拦下，trace 定位到第 1 轮，灰度看线上指标；10 站分步演示和 trace 瀑布图 |
 
 # Java 后端架构（补给库）
 
