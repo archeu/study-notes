@@ -73,6 +73,7 @@
 | 60 | [全景：Claude Code 调用你的 MCP 工具](https://study.ainiya.de/agent/pano-07-mcp-call.html) | 站 07 场景全景：Claude Code 读配置、用 stdio 拉起 Python 服务端、用 HTTP + OAuth 连远程服务端，server/discover 协商（新协议无握手，老服务端回退 initialize），tools/list、工具说明进上下文、按需加载 Skill、权限把关、tools/call 执行、tool_result 回模型；本机抓的真实报文和对数时间尺，10 站分步演示 |
 | 61 | [MCP 的三方：主机、客户端、服务端](https://study.ainiya.de/agent/mcp-architecture.html) | M×N 变 M+N、站 04 内嵌工具的痛点、主机 / 客户端 / 服务端各管什么、JSON-RPC 三种消息按 id 配对、2026-07-28 去掉握手改成每个请求自带版本（老服务端探测回退 initialize）、四个坑，一次连接的分步时序图 |
 | 62 | [三种能力：工具、资源、提示词模板](https://study.ainiya.de/agent/mcp-primitives.html) | 按“谁决定什么时候用”分三种：模型控制的工具、应用控制的资源、用户控制的提示词模板；全做成工具的代价、工具定义五件套和三种出错、资源模板、模板展开、annotations 只是提示、SDK 与规范对不上的两处，“该做成哪一种”实验台 |
+| 63 | [两种传输：stdio 和 Streamable HTTP](https://study.ainiya.de/agent/mcp-transports.html) | stdio 一行一条走管道、stdout 只许走协议，Streamable HTTP 一个 POST 端点、必带请求头、JSON 或 SSE；2024 年 HTTP+SSE 为什么被换掉、请求头为什么要把 body 再写一遍；curl 实测 403 / 400 -32020 / -32022 / 202，stdio 和 HTTP 各 100 次调用的计时，一次 tools/call 过关的分步图 |
 
 # Java 后端架构（补给库）
 
