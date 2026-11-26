@@ -74,6 +74,7 @@
 | 61 | [MCP 的三方：主机、客户端、服务端](https://study.ainiya.de/agent/mcp-architecture.html) | M×N 变 M+N、站 04 内嵌工具的痛点、主机 / 客户端 / 服务端各管什么、JSON-RPC 三种消息按 id 配对、2026-07-28 去掉握手改成每个请求自带版本（老服务端探测回退 initialize）、四个坑，一次连接的分步时序图 |
 | 62 | [三种能力：工具、资源、提示词模板](https://study.ainiya.de/agent/mcp-primitives.html) | 按“谁决定什么时候用”分三种：模型控制的工具、应用控制的资源、用户控制的提示词模板；全做成工具的代价、工具定义五件套和三种出错、资源模板、模板展开、annotations 只是提示、SDK 与规范对不上的两处，“该做成哪一种”实验台 |
 | 63 | [两种传输：stdio 和 Streamable HTTP](https://study.ainiya.de/agent/mcp-transports.html) | stdio 一行一条走管道、stdout 只许走协议，Streamable HTTP 一个 POST 端点、必带请求头、JSON 或 SSE；2024 年 HTTP+SSE 为什么被换掉、请求头为什么要把 body 再写一遍；curl 实测 403 / 400 -32020 / -32022 / 202，stdio 和 HTTP 各 100 次调用的计时，一次 tools/call 过关的分步图 |
+| 64 | [写 MCP 服务端：Python 和 Java 各一个](https://study.ainiya.de/agent/mcp-server-build.html) | Python 用 MCPServer + 装饰器写 oncall（lifespan、Context、ToolError、内存测试），Java 用 Spring AI 2.1.0 的 @McpTool 写 tickets；签名和注释怎么变成工具定义、一次调用在 SDK 里的六步；实测 -parameters、异常透出、协议年代只能选一个、多实例密钥四个坑，两个服务端被 Python SDK 和 Claude Code 连通 |
 
 # Java 后端架构（补给库）
 
