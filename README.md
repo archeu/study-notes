@@ -70,6 +70,7 @@
 | 57 | [知识库运维：增量同步、权限、版本](https://study.ainiya.de/agent/kb-ops.html) | 一天 8 次变更的时间轴、全量重建的代价、五种同步方式、三层身份（文件、文档、片）、三种状态、权限一列、pgvector 实测加新手册 1.9 秒可查、六个坑、增量和全量对比实验台 |
 | 58 | [让 agent 自己决定查什么（Agentic RAG）](https://study.ainiya.de/agent/agentic-rag.html) | 多跳问题、原话查一次的实测、六种流派和控制权光谱、推演与 1.7B 实测对照的分步动画、代码兜底和工具说明书、4 题 × 6 种做法本机实测、五个误用、逐题对照实验台 |
 | 59 | [内容生成：带引用的长文报告](https://study.ainiya.de/agent/report-generation.html) | 点回原文是什么样、一次写完的实测、五种写法、提纲到渲染的六步分步动画、全局编号、代码算事实和规则、逐句回查的边界、三份报告逐句人工核对、六个坑、点开编号看原文的报告查看器 |
+| 60 | [全景：Claude Code 调用你的 MCP 工具](https://study.ainiya.de/agent/pano-07-mcp-call.html) | 站 07 场景全景：Claude Code 读配置、用 stdio 拉起 Python 服务端、用 HTTP + OAuth 连远程服务端，server/discover 协商（新协议无握手，老服务端回退 initialize），tools/list、工具说明进上下文、按需加载 Skill、权限把关、tools/call 执行、tool_result 回模型；本机抓的真实报文和对数时间尺，10 站分步演示 |
 
 # Java 后端架构（补给库）
 
