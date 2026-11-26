@@ -93,6 +93,7 @@
 | 80 | [评测集：从真实问题里收，扩到 50 条](https://study.ainiya.de/agent/eval-dataset.html) | 10 条扩到 50 条、13 类故障，问题 + 现场 + 判据的用例结构、判据区分度体检、分层和难度饱和，基线 @3 跑 50 条只过 2 条的逐层解读，判据体检实验台 |
 | 81 | [怎么打分：规则断言、参考答案、LLM 当评委](https://study.ainiya.de/agent/eval-scoring.html) | 三层判分（规则、参考答案、评委）各判得了什么，评委提示词的四个讲究和几种偏差，本机让 Qwen3-1.7B 当评委判 50 条并和人工标注逐条对，换判法看对照的实验台 |
 | 82 | [Tracing：每次模型和工具调用的耗时、token](https://study.ainiya.de/agent/agent-tracing.html) | OpenTelemetry 给 agent 埋点：一次排障一棵 span 树，GenAI 语义约定的名字和属性、输入 token 要加回缓存，本机真跑和存档转换，@3 和 @4 的瀑布对比、改提示词让缓存全失效，真实 trace 查看器 |
+| 83 | [不只看结果，也看过程（轨迹评测）](https://study.ainiya.de/agent/eval-trajectory.html) | 轨迹从 span 来，关键证据从现场自动算，结果和过程交叉成四格（没查到、没认出来、碰巧对），agentevals 四种匹配模式对比，@3 和 @4 两版 50 条的轨迹对比，五种判法的实验台 |
 
 # Java 后端架构（补给库）
 
