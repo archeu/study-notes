@@ -94,6 +94,7 @@
 | 81 | [怎么打分：规则断言、参考答案、LLM 当评委](https://study.ainiya.de/agent/eval-scoring.html) | 三层判分（规则、参考答案、评委）各判得了什么，评委提示词的四个讲究和几种偏差，本机让 Qwen3-1.7B 当评委判 50 条并和人工标注逐条对，换判法看对照的实验台 |
 | 82 | [Tracing：每次模型和工具调用的耗时、token](https://study.ainiya.de/agent/agent-tracing.html) | OpenTelemetry 给 agent 埋点：一次排障一棵 span 树，GenAI 语义约定的名字和属性、输入 token 要加回缓存，本机真跑和存档转换，@3 和 @4 的瀑布对比、改提示词让缓存全失效，真实 trace 查看器 |
 | 83 | [不只看结果，也看过程（轨迹评测）](https://study.ainiya.de/agent/eval-trajectory.html) | 轨迹从 span 来，关键证据从现场自动算，结果和过程交叉成四格（没查到、没认出来、碰巧对），agentevals 四种匹配模式对比，@3 和 @4 两版 50 条的轨迹对比，五种判法的实验台 |
+| 84 | [提示词和 Skill 的版本管理](https://study.ainiya.de/agent/prompt-versioning.html) | 版本不可变加内容指纹、标签是指针（上线灰度回滚只移标签）、发布包把工具说明和模型参数也算进去、span 上的 gen_ai.prompt.version 和 Skill 的来源地址，本机演示原地修改被 check 抓住，发布包实验台 |
 
 # Java 后端架构（补给库）
 
