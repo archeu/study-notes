@@ -85,6 +85,7 @@
 | 72 | [多 agent：主从编排、并行子 agent、交接](https://study.ainiya.de/agent/multi-agent-orchestration.html) | 站 08 下钻 4：上下文隔离、三种拓扑（主从并行、子 agent 当工具、交接）、任务书和结论两张纸、本机实测单 agent 与主从三种跑法的调用和 token 账本、交接演示，一次真实主从运行的分步动画 |
 | 73 | [什么时候不该拆多 agent](https://study.ainiya.de/agent/multi-agent-when-not.html) | 站 08 下钻 5：拆换来什么付出什么、一个 agent 每轮重读原文的 token 账、开缓存和裁工具以后账怎么变、三个问题的决策顺序、Anthropic 与 Cognition 两派、真实规模 jstack 的 token 实测，拆不拆计算器 |
 | 74 | [业务流程自动化：写操作、审批、幂等、审计](https://study.ainiya.de/agent/business-write-ops.html) | 站 08 下钻 6：写操作四道关、至少一次加下游去重、幂等键怎么定、为什么不能靠 state 标记、审批的 response_schema 校验、只追加的审计表，崩溃重放和重复投递的本机实测，一笔写操作的分步动画 |
+| 75 | [Java 框架：Spring AI、Spring AI Alibaba、LangChain4j](https://study.ainiya.de/agent/java-agent-frameworks.html) | 站 08 下钻 7：三家和 LangGraph 的对照表、Spring AI 的工具循环在 Advisor 链里转、LangChain4j 的 AiServices、Spring AI Alibaba Graph 搭全景那张图，JDK 17 本机实测和五个坑（arg0 参数名、token 口径、线程池），一次请求的分步动画 |
 
 # Java 后端架构（补给库）
 
