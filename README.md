@@ -99,6 +99,7 @@
 | 86 | [线上指标：成功率、成本、P95 延迟、转人工率](https://study.ainiya.de/agent/online-metrics.html) | 四个线上指标的定义和来源、按提示词版本拆开、直方图估 P95 的误差、先动的和后动的，用真实运行回放灰度：@5 一天看不出、假如 @4 上线先露馅的是延迟，灰度要多大看几天的实验台 |
 | 87 | [换模型、升级模型怎么回归](https://study.ainiya.de/agent/model-regression.html) | 换模型是全量改动：翻面多、质量成本延迟一起动、先写能换的规则、提示词跟着模型、版本钉死，本机 1.7B 和 0.6B 乘两版提示词的 2×2 实测，按规则判能不能换的实验台 |
 | 88 | [全景：大促夜里 1000 个告警同时涌进来](https://study.ainiya.de/agent/pano-10-promo-night.html) | 站 10 场景全景：接入去重、Redis Stream 排队、worker、租户令牌桶、AI 网关、可靠性层、供应商限速与前缀缓存、工具护栏、值班网页、成本看板、K8s 平台 11 站，这一夜的时间线，分步演示 |
+| 89 | [长任务架构：队列、工作者、状态存储、进度推送](https://study.ainiya.de/agent/long-task-queue.html) | 同步做和 @Async 缺什么、四种流派、一个任务的一生（PEL、XAUTOCLAIM）、崩溃窗口、至少一次加幂等、进度流加 Last-Event-ID，87 个事件 4 个 worker 和被杀接手的实测，任务一生分步动画 |
 
 # Java 后端架构（补给库）
 
