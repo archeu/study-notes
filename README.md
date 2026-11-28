@@ -106,6 +106,7 @@
 | 93 | [成本和延迟：缓存、模型路由、流式、并行](https://study.ainiya.de/agent/prod-cost-latency.html) | 一次调查的账本（每轮重发历史）、历史也缓存、工具结果瘦身、小模型先分诊、并行和流式只省时间、瓶颈从 ITPM 挪到 OTPM，五刀叠加的计算，一刀一刀叠上去实验台 |
 | 94 | [提示注入：直接注入和间接注入](https://study.ainiya.de/agent/prompt-injection.html) | 指令和数据在同一条通道里、直接和间接注入、危险三件套、分层防御（检测、叮嘱标记、权限、审批、输出核对），本地 Qwen3-1.7B 对一条注入日志跑 12 种组合的实测，分层分步动画 |
 | 95 | [多租户、权限、审计、脱敏](https://study.ainiya.de/agent/multi-tenant-audit.html) | 租户标签一路带下去、糊涂的代理人、检索时按租户过滤、哈希链审计、工具侧按字段脱敏（Luhn）、线程池丢上下文，同一个工具提议两种执行器的六个实测，租户标签分步动画 |
+| 96 | [最小交互界面：流式输出、反馈按钮、转人工](https://study.ainiya.de/agent/minimal-ui.html) | SSE 加 Last-Event-ID 断线续读、开始调查要幂等（实测撞出的重复调查）、反馈连同理由进评测集、转人工带证据、模型输出只当文字，FastAPI 加原生 JS 的实测，断线以后实验台 |
 
 # Java 后端架构（补给库）
 
