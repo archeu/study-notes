@@ -101,6 +101,7 @@
 | 88 | [全景：大促夜里 1000 个告警同时涌进来](https://study.ainiya.de/agent/pano-10-promo-night.html) | 站 10 场景全景：接入去重、Redis Stream 排队、worker、租户令牌桶、AI 网关、可靠性层、供应商限速与前缀缓存、工具护栏、值班网页、成本看板、K8s 平台 11 站，这一夜的时间线，分步演示 |
 | 89 | [长任务架构：队列、工作者、状态存储、进度推送](https://study.ainiya.de/agent/long-task-queue.html) | 同步做和 @Async 缺什么、四种流派、一个任务的一生（PEL、XAUTOCLAIM）、崩溃窗口、至少一次加幂等、进度流加 Last-Event-ID，87 个事件 4 个 worker 和被杀接手的实测，任务一生分步动画 |
 | 90 | [限流和配额：供应商的速率上限、自己的令牌桶](https://study.ainiya.de/agent/prod-rate-limit.html) | 供应商的 RPM、ITPM、OTPM 三个桶（缓存读不算）、预扣加补差和欠账、份额是保底不是天花板、并发上限等于额度除以用量，假供应商加官方 SDK 30 倍速重演五种做法的实测，额度计算器 |
+| 91 | [可靠性：超时、重试、熔断、降级到备用模型](https://study.ainiya.de/agent/prod-reliability.html) | 截止时间往下传、重试只放一层（27 倍放大）、熔断器关开半开、降级菜单和备用模型评测，20:03 故障 30 倍速重演四种做法的实测，熔断器一生分步动画 |
 
 # Java 后端架构（补给库）
 

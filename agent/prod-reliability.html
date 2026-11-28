@@ -1,0 +1,871 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>可靠性：超时、重试、熔断、降级到备用模型</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* 本页：可靠性（设计思想型六步）。角色色：pd 主模型和主线、cg 备用模型、done 关上、bad 打开和故障、of 半开和卡住。交互只有 ④ 机制 3 的熔断器分步动画（时刻来自 ⑤ 实测）。 */
+/* learn 六步页的基础样式（固定一份，不要从别的页面抄）。配色：pd bk cg g2 rn of 六个角色色，warn / bad / good / neutral 含义固定。
+   组件写法见 assets/skeleton.html。本页特有的样式写在文件末尾的标记后面，不改上面的规则。 */
+:root{--paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;}
+}
+:root[data-theme="dark"]{--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;}
+*{box-sizing:border-box}
+body{background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){
+  *{transition:none!important;scroll-behavior:auto!important}
+}
+html{scroll-behavior:smooth}
+section[id],.sub[id],.pit[id],figure[id]{scroll-margin-top:64px}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)}
+.f-of{fill:var(--of)}
+.f-cg{fill:var(--cg)}
+.f-g2{fill:var(--g2)}
+.f-bad{fill:var(--bad)}
+.f-pd{fill:var(--pd)}
+.f-bk{fill:var(--bk)}
+.f-good{fill:var(--good)}
+.f-rn{fill:var(--rn)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains li.mid::before{content:"•";color:var(--muted)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mech-h .sn{font-size:20px}
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p,details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+@media (max-width:980px){
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .two,.design,.pits,.rules-list,.next{grid-template-columns:1fr}
+}
+@media (max-width:520px){
+  .presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+table.t td.bad,table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.s{color:var(--of)}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.cap{font-size:13.5px;color:var(--muted)}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){
+  .steps-out li{grid-template-columns:minmax(0,1fr)}
+}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try code{overflow-wrap:anywhere}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){
+  .tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+.x-box{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.x-zone{fill:none;stroke:var(--line-strong);stroke-width:1.3;stroke-dasharray:6 5}
+.x-zl{font-size:12px;fill:var(--muted)}
+.x-r{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.x-rs{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.x-fill{fill:var(--rc)}
+.x-t{font-size:13px;fill:var(--ink)}
+.x-tb{font-size:13.5px;font-weight:700;fill:var(--ink)}
+.x-ts{font-size:11.5px;fill:var(--muted)}
+.x-tc{font-size:12px;font-weight:700;fill:var(--rc)}
+.x-mono{font-family:var(--font-mono);font-size:11px;fill:var(--ink)}
+.x-mono.dim{fill:var(--muted)}
+.x-mono.bad{fill:var(--bad);font-weight:600}
+.x-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.x-ed{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.x-ed.dash{stroke-dasharray:5 4}
+.x-ed.bad{stroke:var(--bad)}
+.x-ed.c{stroke:var(--rc);stroke-width:2}
+.x-mk{fill:var(--line-strong)}
+.x-mkb{fill:var(--bad)}
+.fig-box{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card);padding:10px}
+.fig-box > svg{min-width:760px;width:100%;display:block}
+.swipe{display:none;font-size:13px;color:var(--muted);margin:0 0 4px}
+@media (max-width:800px){
+  .swipe{display:block}
+}
+.ids{font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ids .a{color:var(--cg);font-weight:600}
+.ids .b{color:var(--of);font-weight:600}
+.verdict-box{font-size:14.5px;padding:10px 14px;border-radius:12px;border:2px solid var(--rc);background:var(--rt)}
+.knob-row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end}
+.knob-row label{display:flex;flex-direction:column;gap:4px;font-size:13.5px;color:var(--muted)}
+.knob-row select{font:inherit;font-size:14px;padding:4px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){
+  .ctl-grid{grid-template-columns:1fr!important}
+}
+.codebox pre .bad{color:var(--bad);font-weight:600}
+.codebox pre .ok{color:var(--good);font-weight:600}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.sv .fade{opacity:.25;transition:opacity .25s}
+.sv .lit{opacity:1;transition:opacity .25s}
+.sv .lit .x-rs,.sv .lit .x-r{stroke-width:3}
+/* ===== 本页特有的样式写在这一行下面 ===== */
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>AI Agent 工程师</span><span aria-hidden="true">/</span><span class="tb-here">可靠性</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs><marker id="xa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="x-mk"/></marker></defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">截止时间 · 一层重试 · 熔断器状态机 · 备用模型 · 降级菜单 · anthropic SDK 2.12 · 30 倍速重演实测</p>
+  <h1>可靠性：超时、重试、熔断、降级到备用模型</h1>
+  <p class="lead">供应商一定会出事：过载回 529、连接卡住、越等越慢。精华是四件事：<b>每个调用都有往下传的截止时间</b>（SDK 默认要等 10 分钟）；<b>重试只放一层</b>（三层叠起来一次故障放大到 27 倍）；<b>熔断</b>：明知它坏了就别再去撞，直接走备用；<b>降级是事先排好、评测过的菜单</b>：主模型 → 备用模型 → 只分诊 → 转人工。</p>
+  <nav class="route" aria-label="六步学习路线">
+<a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+<a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+<a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+<a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+<a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+<a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+<a href="#loop"><b>↺</b>回到⑤</a>
+</nav>
+  <p class="where"><span>全景：<a href="pano-10-promo-night.html#s-6">大促夜里 1000 个告警同时涌进来 · 第 ⑥ 站</a></span><span>地图：<a href="roadmap.html#st10">站 10 · 可靠性</a></span><span>深度：懂设计</span></p>
+  <p class="scene"><b>这一页的位置</b><span>站 10 第 3 个下钻知识点。站 03 的 <a href="api-errors-retry.html">429、529 和超时怎么重试</a> 讲一次调用失败后怎么等；这一页把镜头拉远：87 个调查一起撞上 20:03 的故障时，整条链路怎么不跟着倒。<a href="prod-rate-limit.html">上一页</a>管“别把供应商打满”，这一页管“供应商自己坏了”。</span></p>
+</header>
+
+<section id="s1" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">①</span>要解决的问题：20:03，主模型开始回 529</h2></div>
+  <p>在全景第 ⑥ 站，这一步要解决：20:03 到 20:06:20，主模型七成的请求回 529（过载）；整夜还有 3% 的请求连接卡住，5 分钟才回。这时第 ② 站还压着几十个事件，P0 要在 3 分钟内出报告。</p>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 196" role="img" aria-label="20:00 到 20:10 的时间线：20:03 到 20:06:20 主模型 70% 回 529；全程 3% 的请求卡住 5 分钟。要的是五件事：不卡住、不添乱、不停摆、先保 P0、恢复后自动回来">
+        <line class="x-ed" x1="60" y1="60" x2="900" y2="60"/>
+        <text class="x-ts" x="60" y="80" text-anchor="middle">20:00</text><text class="x-ts" x="312" y="80" text-anchor="middle">20:03</text><text class="x-ts" x="592" y="80" text-anchor="middle">20:06:20</text><text class="x-ts" x="900" y="80" text-anchor="middle">20:10</text>
+        <g data-role="bad"><rect class="x-r" x="312" y="34" width="280" height="22" rx="4"/><text class="x-bad" x="324" y="50">主模型 70% 回 529 overloaded_error</text></g>
+        <g data-role="of"><rect class="x-r" x="60" y="92" width="840" height="16" rx="4"/><text class="x-ts" x="72" y="104">全程：3% 的请求卡住 5 分钟才回（连接半死不活）</text></g>
+        <g data-role="pd"><rect class="x-rs" x="20" y="126" width="172" height="56" rx="10"/><text class="x-tb" x="32" y="150">不卡住</text><text class="x-ts" x="32" y="169">到点就放手</text></g>
+        <g data-role="pd"><rect class="x-rs" x="208" y="126" width="172" height="56" rx="10"/><text class="x-tb" x="220" y="150">不添乱</text><text class="x-ts" x="220" y="169">少去撞坏掉的模型</text></g>
+        <g data-role="pd"><rect class="x-rs" x="396" y="126" width="172" height="56" rx="10"/><text class="x-tb" x="408" y="150">不停摆</text><text class="x-ts" x="408" y="169">换条路继续出报告</text></g>
+        <g data-role="pd"><rect class="x-rs" x="584" y="126" width="172" height="56" rx="10"/><text class="x-tb" x="596" y="150">先保 P0</text><text class="x-ts" x="596" y="169">额度紧时先砍 P2</text></g>
+        <g data-role="pd"><rect class="x-rs" x="772" y="126" width="172" height="56" rx="10"/><text class="x-tb" x="784" y="150">自动回来</text><text class="x-ts" x="784" y="169">好了就切回主模型</text></g>
+      </svg>
+    </div>
+    <figcaption>故障时段和比例是全景的场景设定，⑤ 的假供应商照这个注入。</figcaption>
+  </figure>
+  <div class="tiles4">
+    <div class="tile" data-role="bad"><small>故障持续</small><b>3 分 20 秒</b><span>主模型 70% 回 529</span></div>
+    <div class="tile" data-role="of"><small>卡住的请求</small><b>3%</b><span>5 分钟才回</span></div>
+    <div class="tile" data-role="other"><small>SDK 默认超时</small><b>10 分钟</b><span>连接 5 秒</span></div>
+    <div class="tile" data-role="pd"><small>P0 的预算</small><b>3 分钟</b><span>从进来到出报告</span></div>
+  </div>
+</section>
+
+<section id="s2" data-role="other">
+  <div class="mech-h"><h2><span class="sn">②</span>不用它会怎样：用默认值，或者多加几层重试</h2></div>
+  <p>两种最常见的做法，⑤ 都按 30 倍速重演过：一是全用 SDK 默认值（超时 10 分钟、重试 2 次）；二是“为了稳”，SDK、网关、worker 每层都加重试。</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>故障期打到主模型的请求</th><th>转人工的事件</th><th>P0 最长要多久</th><th>P95</th></tr></thead>
+      <tbody>
+        <tr><th>A SDK 默认</th><td>63～69</td><td class="bad">7～10 个，其中 P0 3 个</td><td class="bad">6.1 分钟</td><td class="bad">12.2～12.7 分钟</td></tr>
+        <tr><th>B 三层重试，超时 60 秒</th><td class="bad">224～229，是单层的 9 倍</td><td class="good">0</td><td>4.7～4.9 分钟</td><td>7.1～7.2 分钟</td></tr>
+        <tr class="pick"><th><b>D 截止时间 + 一层重试 + 熔断 + 降级</b></th><td class="good">24</td><td>3 个，其中 P0 1～2 个：到 3 分钟截止时间，带着证据主动转的</td><td class="good">3.1～3.2 分钟</td><td class="good">4.0～4.4 分钟</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul class="pains">
+    <li class="bad">默认超时 10 分钟：23 个卡住的请求每个都干等 5 分钟才回，P95 被拖到 12 分钟以上；三次都失败的那一轮直接让事件转人工，3 个 P0 就这么丢了。</li>
+    <li class="bad">三层重试：一个事件都没丢，可故障期间打到主模型的请求是单层的 9 倍。假供应商的故障不会因为负载变重而加重，真实的过载会：站 03 实测过，重试风暴能把刚恢复的服务再打趴下。</li>
+    <li class="bad">两种做法都只有一条路：主模型坏了，就只能在它身上反复试，P0 也得和 P2 一起排在重试后面。</li>
+    <li class="ok">D 熔断以后不再去撞主模型，调用走备用；P2 降级成只分诊，把额度让给 P0；P0 最长 3.1～3.2 分钟出报告，超过 3 分钟还没结论的那 1～2 个，到点带着证据转给值班的人，而不是让人干等。</li>
+  </ul>
+  <div class="verdict" data-role="bad"><b>不懂精华时的典型误用</b>：把“可靠性”理解成“多重试几次”。重试只救得了一两秒就过去的错；故障持续几分钟时，它让每个调用都失败得更慢，还把坏掉的服务压得更死。</div>
+</section>
+
+<section id="s3" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">③</span>几种流派：出了错，除了重试还能做什么</h2></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>手段</th><th>解决什么</th><th>解决不了什么</th><th>代价</th></tr></thead>
+      <tbody>
+        <tr><th>重试（退避 + 抖动）</th><td>偶发的、一两秒就过去的错</td><td class="bad">持续几分钟的故障：重试只是把失败往后推，还给坏掉的服务加压</td><td>多等几秒</td></tr>
+        <tr class="pick"><th><b>截止时间</b></th><td>卡住的连接、越等越晚的任务：到点就停，把剩下的时间留给别的办法</td><td>本身不让任何调用成功</td><td>要定每类任务的时间预算</td></tr>
+        <tr class="pick"><th><b>熔断</b></th><td>持续故障：明知它坏了就别再去撞，失败从“等 60 秒才失败”变成“立刻知道”</td><td>没有备用时，只是失败得快一点</td><td>阈值要调，调不好会来回开关</td></tr>
+        <tr class="pick"><th><b>备用模型</b></th><td>主模型不可用时照样出结果</td><td>两个模型一起坏（同一家供应商整体过载）</td><td>要提前评测；备用的额度通常小得多</td></tr>
+        <tr class="pick"><th><b>降级</b>（功能变少）</th><td>额度和时间都不够时，先保要紧的：P2 只分诊、不深查</td><td>—</td><td>报告变粗，要在页面上标出来</td></tr>
+        <tr><th>对冲请求</th><td>尾延迟：一个请求慢了就再发一个，谁先回用谁</td><td>故障：两个一起失败</td><td>花双份钱，还吃双份额度</td></tr>
+        <tr><th>舱壁（隔离并发）</th><td>一个慢依赖占满所有 worker</td><td>依赖本身的故障</td><td>池子分开，总利用率低一点</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页学四件套：截止时间 + 一层重试 + 熔断 + 降级菜单</b>。重试只管“一两秒就过去的错”，持续几分钟的故障交给熔断和备用模型；时间和额度都不够时，按事先排好的菜单降级，最后一道是转人工。对冲和舱壁放进 ⑥ 第三圈。</p>
+</section>
+
+<section id="s4" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">④</span>核心取舍：失败要快，退路要事先排好</h2></div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>退避、抖动、retry-after</b>：站 03 讲过一次调用失败后怎么等：<a href="api-errors-retry.html">429、529 和超时怎么重试</a>。这一页不重讲。</li>
+      <li><b>429 和 529 不是一回事</b>：429 是“你的额度用完了”，等一等就好，归限流管（<a href="prod-rate-limit.html">上一页</a>）；529 是“供应商自己过载了”，和你用多少无关。</li>
+      <li><b>熔断器</b>：像电路里的保险丝，故障多到一定程度就“断开”，一段时间内不再把请求送过去。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-deadline">机制 1 · 截止时间：每个调用都要有，而且往下传</h3>
+  <p>官方 SDK 默认的超时是 <b>10 分钟</b>（连接 5 秒），这是为了不误杀生成很长回答的请求。对值班助手来说，一个 P0 等 10 分钟等于没等：报告早就该出了。所以超时分两级：<b>每个事件一个截止时间</b>（P0 3 分钟、P1 6 分钟、P2 15 分钟），<b>每次调用的超时 = min(单次上限 60 秒, 离截止还剩多少)</b>。剩下的时间不够跑完一轮，就别再发了，带着已经查到的证据转人工。</p>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 150" role="img" aria-label="一个 P0 事件的 3 分钟预算：第 1 轮 10 秒，第 2 轮卡住，60 秒超时后重试成功，第 3 到 5 轮各 10 秒，剩下的时间不够第 6 轮时转人工">
+        <text class="x-zl" x="12" y="18">一个 P0 事件的 180 秒预算</text>
+        <g data-role="pd"><rect class="x-r" x="20" y="30" width="44" height="34" rx="5"/><text class="x-ts" x="42" y="52" text-anchor="middle">1</text></g>
+        <g data-role="bad"><rect class="x-r" x="64" y="30" width="264" height="34" rx="5"/><text class="x-t" x="76" y="52">2：卡住，60 秒到了就断开</text></g>
+        <g data-role="pd"><rect class="x-r" x="328" y="30" width="44" height="34" rx="5"/><text class="x-ts" x="350" y="52" text-anchor="middle">2′</text></g>
+        <g data-role="pd"><rect class="x-r" x="372" y="30" width="44" height="34" rx="5"/><text class="x-ts" x="394" y="52" text-anchor="middle">3</text></g>
+        <g data-role="pd"><rect class="x-r" x="416" y="30" width="44" height="34" rx="5"/><text class="x-ts" x="438" y="52" text-anchor="middle">4</text></g>
+        <g data-role="pd"><rect class="x-r" x="460" y="30" width="44" height="34" rx="5"/><text class="x-ts" x="482" y="52" text-anchor="middle">5</text></g>
+        <g data-role="pd"><rect class="x-r" x="504" y="30" width="44" height="34" rx="5"/><text class="x-ts" x="526" y="52" text-anchor="middle">6</text></g>
+        <line class="x-ed bad" x1="812" y1="22" x2="812" y2="74"/><text class="x-bad" x="820" y="40">180 秒：截止</text>
+        <text class="x-ts" x="820" y="58">还没完就转人工</text>
+        <line class="x-ed" x1="20" y1="90" x2="812" y2="90"/><line class="x-ed" x1="20" y1="84" x2="20" y2="96"/><line class="x-ed" x1="812" y1="84" x2="812" y2="96"/>
+        <text class="x-ts" x="20" y="112">每轮约 10 秒（模型 8 秒 + 工具 2 秒）。超时 60 秒救回了这一轮；换成 SDK 默认的 10 分钟，这一个卡住的连接就把整个预算吃光了。</text>
+        <text class="x-ts" x="20" y="134">截止时间要往下传：网关算出“这次调用最多等几秒”，再交给 SDK；上游已经放弃了，下游就别再花 token。</text>
+      </svg>
+    </div>
+    <figcaption>比例按 180 秒画。流式调用还要再管一样：两段输出之间隔太久也算卡住（站 03 的 <a href="api-streaming-sse.html">SSE 流式</a>）。</figcaption>
+  </figure>
+
+  <h3 id="m-layer">机制 2 · 重试只放一层</h3>
+  <p>每一层都觉得“我多试两次更稳”：SDK 默认重试 2 次（一共 3 次），网关再包 3 次，worker 发现这一轮失败又重跑 3 次。一次调用最多变成 <b>3 × 3 × 3 = 27</b> 个请求，而且全打在那个已经过载的模型上。规矩是<b>只在一层重试，选知道最多的那一层</b>：网关知道熔断器的状态、额度桶的余额、事件的截止时间，所以重试放在网关；网关里的 SDK 设 <code>max_retries=0</code>，worker 不重跑这一轮。</p>
+  <div class="tiles4">
+    <div class="tile" data-role="bad"><small>三层叠起来</small><b>27 倍</b><span>一次调用最多 27 个请求</span></div>
+    <div class="tile" data-role="pd"><small>只在网关重试</small><b>3 倍</b><span>而且熔断打开后就不再试主模型</span></div>
+    <div class="tile" data-role="of"><small>重试只管</small><b>几秒</b><span>的抖动；几分钟的故障交给熔断</span></div>
+    <div class="tile" data-role="done"><small>429 和 529</small><b>分开</b><span>429 等 retry-after，529 算熔断</span></div>
+  </div>
+
+  <h3 id="m-breaker">机制 3 · 熔断器：关、开、半开</h3>
+  <p>熔断器给主模型记一个滑动窗口：最近 20 次调用里，至少有 10 次、失败过半，就<b>打开</b>；打开的 30 秒里一律不放行，调用直接走备用模型；30 秒到了进<b>半开</b>，只放 3 个试探请求去主模型，全成功才<b>关上</b>，有一个失败就再打开 30 秒。下面是 ⑤ 实测里熔断器真实的一生。</p>
+  <div class="stepper" id="stp" tabindex="0" aria-label="分步动画：20:03 那次故障里熔断器的状态变化，左右方向键切换">
+    <div class="st-ctl">
+      <button class="btn" type="button" id="st-prev">← 上一步</button>
+      <button class="btn primary" type="button" id="st-next">下一步 →</button>
+      <button class="btn" type="button" id="st-auto" aria-pressed="false">自动播放</button>
+      <button class="btn" type="button" id="st-reset">从头来</button>
+      <span class="pos" id="st-pos" aria-live="polite"></span>
+    </div>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box"><svg class="sv" viewBox="0 0 960 250" role="img" aria-label="熔断器三个状态：关上时调用走主模型；失败过半就打开，调用走备用模型；30 秒后半开，放 3 个试探；全成功关上，有一个失败再打开">
+      <g id="s-closed" data-role="done"><rect class="x-rs" x="20" y="40" width="200" height="70" rx="35"/><text class="x-tb" x="120" y="70" text-anchor="middle">CLOSED 关上</text><text class="x-ts" x="120" y="90" text-anchor="middle">记最近 20 次的成败</text></g>
+      <g id="s-open" data-role="bad"><rect class="x-rs" x="500" y="40" width="200" height="70" rx="35"/><text class="x-tb" x="600" y="70" text-anchor="middle">OPEN 打开</text><text class="x-ts" x="600" y="90" text-anchor="middle">30 秒内一律不放行</text></g>
+      <g id="s-half" data-role="of"><rect class="x-rs" x="260" y="168" width="200" height="70" rx="35"/><text class="x-tb" x="360" y="198" text-anchor="middle">HALF_OPEN 半开</text><text class="x-ts" x="360" y="218" text-anchor="middle">只放 3 个试探</text></g>
+      <g id="e-c2o" data-role="bad"><line class="x-ed c" x1="222" y1="62" x2="496" y2="62" marker-end="url(#xa)"/><text class="x-ts" x="360" y="54" text-anchor="middle">至少 10 次、失败 ≥ 50%</text></g>
+      <g id="e-o2h" data-role="of"><line class="x-ed c" x1="556" y1="112" x2="436" y2="166" marker-end="url(#xa)"/><text class="x-ts" x="470" y="124" text-anchor="end">30 秒到了</text></g>
+      <g id="e-h2o" data-role="bad"><line class="x-ed c" x1="462" y1="182" x2="590" y2="114" marker-end="url(#xa)"/><text class="x-ts" x="600" y="150">试探有一个失败</text></g>
+      <g id="e-h2c" data-role="done"><line class="x-ed c" x1="268" y1="176" x2="160" y2="114" marker-end="url(#xa)"/><text class="x-ts" x="80" y="150">3 个试探都成功</text></g>
+      <g id="r-main" data-role="pd"><rect class="x-rs" x="760" y="40" width="186" height="56" rx="10"/><text class="x-tb" x="772" y="64">调用 → 主模型</text><text class="x-ts" x="772" y="83">36 万/分钟，12 个调查</text></g>
+      <g id="r-backup" data-role="cg"><rect class="x-rs" x="760" y="120" width="186" height="56" rx="10"/><text class="x-tb" x="772" y="144">调用 → 备用模型</text><text class="x-ts" x="772" y="163">13.5 万/分钟，约 4 个</text></g>
+      <text id="clock" class="x-mono" x="760" y="214">20:00:00</text>
+    </svg></div>
+    <div class="st-cap" data-role="of" id="st-cap"><b class="h">准备</b>点“下一步”。</div>
+  </div>
+  <p>两个细节决定它好不好用。第一，<b>什么算失败</b>：只算“供应商那边坏了”，即 529、5xx、超时、连不上。429 是自己额度的问题，算进来的话，自己的限流就能把熔断器打开，白白切到备用；400 是请求写错了，换谁都一样错。第二，<b>窗口不能太小</b>：最近 3 次里 2 次超时就打开，熔断器会在偶发抖动下来回开关。Resilience4j 的默认值偏保守：窗口 100 次、至少 100 次才判断、打开 60 秒、半开放 10 个试探；值班助手一分钟只调七十来次，照搬默认值，故障开始一分多钟以后它才会动。</p>
+
+  <h3 id="m-fallback">机制 4 · 降级是一张事先排好的菜单</h3>
+  <p>熔断器只负责“别去撞”，撞不了以后去哪，要事先排好。值班助手的菜单从上往下：</p>
+  <ol class="steps-out">
+    <li><b>1 主模型</b><span>正常情况，6 轮深查。</span></li>
+    <li><b>2 备用模型</b><span>熔断打开时。有自己的令牌桶，额度只有主模型的三分之一多一点，所以同时只够跑 4 个左右的调查。</span></li>
+    <li><b>3 只分诊</b><span>备用也挤不下、或者事件优先级低时：P2 只跑一轮，给出“像什么问题、该找谁”，页面上标明“降级报告”。</span></li>
+    <li><b>4 转人工</b><span>截止时间到了还没结论：把已经查到的证据（第几轮、调了哪些工具、结果是什么）推给值班的人。</span></li>
+  </ol>
+  <p>备用模型不是随便找一个。<b>同一家的另一个型号</b>接入最省事，但供应商整体过载时可能一起不可用（文档说 529 可能出现在“所有用户流量都高”的时候）；<b>另一家供应商</b>更独立，代价是接口、提示词、工具调用格式都要再适配一遍；<b>本地小模型</b>最独立，质量最低。不管选哪个，都要先过一遍评测（站 09 的 <a href="model-regression.html">换模型怎么回归</a>），知道降级以后报告会差多少。</p>
+
+  <h3 id="m-design">为什么这样设计</h3>
+  <div class="design">
+    <div class="card" data-role="pd"><h3>截止时间 + 一层重试 + 熔断 + 降级菜单</h3><ul class="pains">
+      <li class="ok">失败要快：熔断打开后，调用不再等 60 秒超时或几次退避才失败，立刻走备用。</li>
+      <li class="ok">不给坏掉的服务添乱：⑤ 里故障期打到主模型的请求从 229 个降到 24 个。</li>
+      <li class="ok">时间花在有用的地方：截止时间到了就转人工，不在一个注定失败的调用上耗光 P0 的预算。</li>
+      <li class="mid">代价：多一个要调的状态机、一个要评测的备用模型、一张要维护的降级菜单。</li>
+    </ul></div>
+    <div class="card" data-role="other"><h3>每一层多加几次重试</h3><ul class="pains">
+      <li class="bad">故障持续几分钟时，重试只是把失败往后推；每一次重试都在吃截止时间和额度。</li>
+      <li class="bad">三层叠起来放大到 27 倍，全打在已经过载的服务上；供应商恢复的那一刻，又被积攒的重试压回去。</li>
+      <li class="ok">好处是代码最简单，偶发错误也确实能救回来。</li>
+    </ul></div>
+  </div>
+  <div class="verdict" data-role="pd"><b>决定胜负的约束</b>：一次模型调用要几秒到几十秒，而故障往往持续几分钟。在这个时间尺度上，“再试一次”很贵、也很少成功；手里有一个评测过的备用模型时，换路比等待划算得多。</div>
+
+  <div class="two">
+    <div class="codebox"><div class="code-bar"><b>网关里的一次调用（节选）</b><span>细节放到 ⑥</span></div><pre><code>client = anthropic.AsyncAnthropic(max_retries=0)   <span class="cm"># SDK 不重试</span>
+for attempt in range(3):                         <span class="cm"># 只在这一层重试</span>
+    if now() &gt; inc.deadline:
+        raise Escalate(inc.evidence)             <span class="cm"># 到点转人工</span>
+    model = "main" if breaker.allow() else "backup"
+    timeout = min(60, inc.deadline - now())
+    try:
+        await buckets[model].acquire(est)
+        return await client.with_options(timeout=timeout).messages.create(model=model, ...)
+    except anthropic.RateLimitError as e:          <span class="cm"># 429：额度，不算熔断</span>
+        await sleep_retry_after(e)
+    except (anthropic.APIConnectionError, anthropic.InternalServerError):
+        if model == "main": breaker.record(False)  <span class="cm"># 529 / 5xx / 超时</span>
+        await sleep(backoff(attempt))</code></pre></div>
+    <div class="card" data-role="of"><h4>Java 老朋友：Resilience4j</h4><p><b>像</b>：<code>@CircuitBreaker(name = "main", fallbackMethod = "useBackup")</code> 就是同一个状态机，CLOSED / OPEN / HALF_OPEN、按次数或按时间的滑动窗口、半开试探都一样；<code>@TimeLimiter</code> 对应截止时间，<code>@Bulkhead</code> 对应舱壁。它还有一个这里很有用的参数：慢调用比例（<code>slowCallDurationThreshold</code>），把“没失败但慢得离谱”也算进去。</p><p><b>不像</b>：Java 里的 fallback 多半返回缓存或默认值，结果是确定的；这里的 fallback 是另一个模型，<b>给出的答案不一样</b>，要先评测；而且备用模型有自己的额度，熔断一开，全部流量挤过去，它也会被打满。</p></div>
+  </div>
+</section>
+
+<section id="s5" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑤</span>套进场景：把 20:03 那次故障重演 4 遍</h2></div>
+  <p>假供应商有两个模型：<code>main</code> 在 20:03～20:06:20 有 70% 的请求回 529，全程 3% 的请求卡住 5 分钟；<code>backup</code> 不出故障，但额度只有 15 万/分钟、生成也慢一点。调用方用官方 <code>anthropic</code> SDK。87 个事件按全景的节奏到达，16 个 worker，每个调查 6 轮。时间压缩 30 倍（场景 1 分钟 = 墙上 2 秒）。</p>
+  <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>breaker.py · 熔断器（节选）</b><a href="https://github.com/archeu/study-labs/tree/main/agent/prod-reliability">完整代码 →</a></div><pre><code>class CircuitBreaker:
+    def __init__(self, window=20, min_calls=10, threshold=0.5, open_sec=30.0, probes=3): ...
+
+    def allow(self) -&gt; bool:
+        if self.state == "OPEN" and now() - self.opened_at &gt;= self.open_sec:
+            self._to("HALF_OPEN"); self.probe_sent = self.probe_ok = 0
+        if self.state == "CLOSED":
+            return True
+        if self.state == "HALF_OPEN" and self.probe_sent &lt; self.probes:
+            self.probe_sent += 1                    <span class="cm"># 只放几个试探</span>
+            return True
+        return False                                <span class="cm"># 调用方改走备用</span>
+
+    def record(self, ok: bool) -&gt; None:
+        if self.state == "HALF_OPEN":               <span class="cm"># 试探：一个失败就再打开，全成功才关上</span>
+            ...
+        self.calls.append(ok)                       <span class="cm"># 最近 20 次</span>
+        fails = self.calls.count(False)
+        if len(self.calls) &gt;= self.min_calls and fails / len(self.calls) &gt;= self.threshold:
+            self._to("OPEN"); self.opened_at = now()</code></pre></div>
+  <ol class="steps-out">
+    <li><b>1 装依赖</b><span>在 study-labs 的 <code>agent/</code> 下 <code>uv sync</code>。不需要 API key。</span></li>
+    <li><b>2 跑</b><span><code>uv run python prod-reliability/night.py</code>：它自己起假供应商，A～D 四种做法各重演一遍，约 3 分钟。</span></li>
+  </ol>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>night.py 的输出（第 2 遍）</b><span>2026-11-28 · 2 核 ARM · Python 3.13.18 · anthropic 2.12.0 · 时间为场景分钟</span></div><pre class="console">做法                   故障期打主模型  529  卡住 转人工 其中P0 全部做完  P0最长   P95  备用 只分诊
+<span class="r">✗</span> A SDK 默认                    69   46   23    10     3  18.3分   6.1分 12.2分     0     0
+<span class="r">✗</span> B 三层重试                    224  158   22     0     0  11.8分   4.9分  7.2分     0     0
+  C 一层重试+熔断+备用             24   13   19     1     0  10.0分   4.0分  6.8分   108     0
+    熔断器：OPEN@20:03:05 → HALF_OPEN@20:03:36 → OPEN@20:03:40 → HALF_OPEN@20:04:12 → OPEN@20:04:14
+          → HALF_OPEN@20:04:45 → OPEN@20:04:45 → HALF_OPEN@20:05:16 → OPEN@20:05:20
+          → HALF_OPEN@20:05:52 → OPEN@20:05:52 → HALF_OPEN@20:06:23 → CLOSED@20:06:35
+<span class="hi">✓</span> D C+截止时间+P2只分诊            24   13   16     3     1   8.8分   3.2分  4.4分   108    32
+<span class="c">跑了三遍：A 的转人工 7～10、P95 12.2～12.7；B 打主模型 224～229；C、D 打主模型每遍都是 24、熔断器开关的时刻前后差 1 秒；D 转人工 3 个，其中 P0 1～2 个</span></pre></div>
+  <div class="lab-res" data-role="pd"><b>读出来的结论</b><ul>
+    <li>熔断器在故障开始 5 秒后打开（20:03:05），之后每 30 秒试探一次，失败 5 次，20:06:35 关上：故障 20:06:20 结束，15 秒后就切回了主模型。整个故障期，打到主模型的请求只有 24 个，其中 13 个是 529。</li>
+    <li>A 和 C 只差在“超时 60 秒 + 熔断 + 备用”：转人工从 7～10 个降到 1～2 个，P95 从 12 分钟降到 6.8 分钟。默认超时下，23 个卡住的请求是 P95 的主要来源。</li>
+    <li>B 不丢事件，代价是故障期打到主模型 224 个请求，是 C 的 9 倍。这个假供应商的故障不随负载加重，真实的过载会，所以 B 在这里的“零转人工”是偏乐观的。</li>
+    <li>D 比 C 多了截止时间和“P2 只分诊”：32 个 P2 只跑一轮，让出来的额度给了 P0 和 P1，全部做完从 10.0 分钟缩到 8.8 分钟，P95 从 6.8 降到 4.4；代价是那 1～2 个超过 3 分钟的 P0 被主动转了人工。</li>
+  </ul></div>
+  <div class="verdict" data-role="done"><b>到这里已经能交差了</b>：主模型坏了 3 分钟，值班助手 5 秒内切到备用，P0 最长 3.2 分钟出报告，故障结束 15 秒后自动切回。<br><b>已知还没处理的细节</b>：429 别算进熔断（<a href="#p-429">坑 3</a>）；窗口别太小（<a href="#p-flap">坑 4</a>）；备用模型要评测、要有自己的桶（<a href="#p-noeval">坑 5</a>、<a href="#p-backupquota">坑 6</a>）；半开别一下子全放（<a href="#p-probe">坑 8</a>）。</div>
+</section>
+
+<section id="s6" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑥</span>反例和误用</h2></div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-timeout"><b><em>1</em>用 SDK 默认的 10 分钟超时<span class="seen">实测</span><a class="rootmark" href="#m-deadline">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>大部分调查正常，少数几个一卡就是好几分钟；⑤ 里 A 的 P95 被拖到 12.2～12.7 分钟。</dd><dt>根源</dt><dd>默认超时是给“可能生成很长回答”的通用场景定的，不知道你的 P0 只有 3 分钟。</dd><dt>做法</dt><dd class="fix">每个事件一个截止时间，每次调用 <code>timeout = min(60, 剩余时间)</code>，用 <code>client.with_options(timeout=…)</code> 传下去。</dd></dl>
+    </div>
+    <div class="pit" id="p-layers"><b><em>2</em>每一层都加重试<span class="seen">实测</span><a class="rootmark" href="#m-layer">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>故障期间打到主模型的请求是单层的好几倍（⑤ 里 B 是 224～229 个，C 是 24 个）；供应商恢复后又被一波积攒的重试打回去。</dd><dt>根源</dt><dd>3 × 3 × 3 = 27，每一层都看不见别的层也在重试。</dd><dt>做法</dt><dd class="fix">只在网关重试；网关里的 SDK 设 <code>max_retries=0</code>，worker 不重跑整轮。</dd></dl>
+    </div>
+    <div class="pit" id="p-429"><b><em>3</em>429 也算进熔断<a class="rootmark" href="#m-breaker">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>主模型明明好好的，熔断器却在流量高峰打开，调用全切到了又小又慢的备用模型。</dd><dt>根源</dt><dd>429 是自己的额度用满了，不是供应商坏了；把它算成失败，自己的限流就能把熔断器打开。</dd><dt>做法</dt><dd class="fix">熔断只数 529、5xx、超时、连接错误；429 照 <code>retry-after</code> 等，交给限流那一层。</dd></dl>
+    </div>
+    <div class="pit" id="p-flap"><b><em>4</em>窗口太小，熔断器来回开关<a class="rootmark" href="#m-breaker">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>看板上熔断器一会儿开一会儿关，报告一会儿来自主模型、一会儿来自备用。</dd><dt>根源</dt><dd>最近 3 次里 2 次超时就打开，偶发抖动也够条件。</dd><dt>做法</dt><dd class="fix">窗口和最少调用数按调用量定（一分钟七十来次，窗口 20、至少 10 次）；超时比例单独设阈值（慢调用比例）。</dd></dl>
+    </div>
+    <div class="pit" id="p-noeval"><b><em>5</em>备用模型没评测过<a class="rootmark" href="#m-fallback">← ④ 机制 4</a></b>
+      <dl><dt>现象</dt><dd>熔断打开的那 3 分钟，报告“看起来正常”，第二天复盘才发现结论错了一大半。</dd><dt>根源</dt><dd>降级换的是另一个模型，答案不一样；提示词是为主模型调的。</dd><dt>做法</dt><dd class="fix">备用模型也进评测集，评测分数写进降级菜单；降级报告在页面上标出来（站 09 的 <a href="model-regression.html">换模型怎么回归</a>）。</dd></dl>
+    </div>
+    <div class="pit" id="p-backupquota"><b><em>6</em>备用模型没有自己的桶<a class="rootmark" href="#m-fallback">← ④ 机制 4</a></b>
+      <dl><dt>现象</dt><dd>熔断一开，16 个 worker 全部涌向备用模型，备用模型立刻 429，降级也降不下去。</dd><dt>根源</dt><dd>额度按模型给，备用的额度通常小得多：全景里只够每分钟 4～5 个调查。</dd><dt>做法</dt><dd class="fix">备用模型单独一个令牌桶；挤不下的按菜单继续往下降：P2 只分诊，再不行转人工。</dd></dl>
+    </div>
+    <div class="pit" id="p-propagate"><b><em>7</em>截止时间不往下传<a class="rootmark" href="#m-deadline">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>值班的人已经点了“转人工”、事件早就超时，后台还在为它一轮一轮地调模型、花 token。</dd><dt>根源</dt><dd>每一层只知道自己的超时，不知道上游已经放弃了。</dd><dt>做法</dt><dd class="fix">截止时间跟着任务走（写进任务和检查点），每一层调用前先看还剩多少；取消也走同一条路。</dd></dl>
+    </div>
+    <div class="pit" id="p-probe"><b><em>8</em>半开时一下子全放<a class="rootmark" href="#m-breaker">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>熔断器一进半开，几十个排队的调用一起涌向刚恢复的主模型，它又倒了。</dd><dt>根源</dt><dd>半开的意思是“试探”，放多少要有上限。</dd><dt>做法</dt><dd class="fix">半开只放几个试探（⑤ 用 3 个），关上以后再借限流慢慢放量（上一页坑 7：ramp limit）。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <ul class="rules-list">
+    <li><b>每个事件都有截止时间，按优先级定</b>：防一个卡住的连接吃光 P0 的预算。</li>
+    <li><b>重试只在网关一层，SDK 设 0，最多 2～3 次</b>：防 27 倍放大。</li>
+    <li><b>熔断按模型分，只数供应商的错</b>：防自己的限流把它打开。</li>
+    <li><b>降级菜单写进配置并评测过</b>：防临时拍脑袋换模型。</li>
+    <li><b>降级报告在页面上打标</b>：防值班的人把粗报告当深查报告用。</li>
+    <li><b>熔断状态、降级次数、转人工次数进看板并告警</b>：防故障期间悄悄降级，没人知道。</li>
+  </ul>
+
+  <h3>第三圈 · 优化和深处</h3>
+  <div class="two">
+    <div class="card" data-role="of"><h4>对冲请求：用钱换尾延迟</h4><p>一个调用超过 P95 还没回，就向另一个模型（或同一个模型）再发一份，谁先回用谁，另一个取消。它治的是“偶尔慢”，不治故障；代价是双份的钱和额度，所以只给 P0 开，而且要从额度桶里扣。</p></div>
+    <div class="card" data-role="bk"><h4>舱壁：按优先级分 worker</h4><p>16 个 worker 共用时，一个慢依赖能把它们全占住。给 P0 留 4 个专用 worker，其余共用：哪怕 P2 全卡在备用模型上，P0 也有人做。Resilience4j 的 <code>Bulkhead</code> 就是这个意思。</p></div>
+    <div class="card" data-role="pd"><h4>熔断器按“模型 × 地域”分</h4><p>供应商的故障常常只影响一个模型或一个地域。一个模型一个熔断器，比“整个供应商一个开关”切得更细：主模型坏了，同一家的备用型号可能还好。</p></div>
+    <div class="card" data-role="g2"><h4>最便宜的降级：已有的答案</h4><p>同一个服务、同一种告警，知识库里有一周前的排查结论。模型全挂时，先把它和“这次的原始指标”一起推给值班的人，比一句“服务不可用”有用得多。</p></div>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>Resilience4j 版：Spring AI 调用外面套 <code>@CircuitBreaker</code> + <code>@TimeLimiter</code> + <code>@Bulkhead</code>，对照这一页的 Python 版。</li>
+    <li>慢调用熔断：不报错但每次 50 秒的模型，怎么让熔断器也认出来。</li>
+    <li>跨供应商降级：工具调用格式不同，适配层怎么写（站 03 的 <a href="llm-abstraction-layer.html">模型抽象层</a>）。</li>
+    <li>故障演练：把这三种故障做成开关，每周演一次（站 10 最后一页）。</li>
+  </ul>
+</section>
+
+<section id="loop" data-role="other">
+  <div class="mech-h"><h2><span class="sn">↺</span>回到⑤：改一改</h2></div>
+  <ol class="rules-list">
+    <li><b>把 429 也算进熔断</b>：把主模型的令牌桶从 36 万调到 50 万（超过供应商的 40 万），再让 <code>provider_down()</code> 把 429 也算失败。做对了会看到：没有故障的 20:00～20:03 熔断器也会打开。（坑 3）</li>
+    <li><b>窗口改小</b>：<code>CircuitBreaker(window=3, min_calls=2)</code>，把 <code>HANG_RATE</code> 调到 0.1，看熔断器在故障之外开关了几次。（坑 4）</li>
+    <li><b>备用模型不设桶</b>：去掉 backup 的令牌桶，看熔断打开的 3 分钟里备用模型吃了多少 429。（坑 6）</li>
+    <li><b>舱壁</b>：给 P0 留 4 个专用 worker，看 D 里那个因为截止时间转人工的 P0 还在不在。</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>每个调用都有往下传的截止时间；重试只放一层、只管几秒的抖动；持续故障交给熔断，打开了就走评测过的备用模型；再不行按菜单降级，最后转人工。</p></details>
+    <details><summary>2. 为什么“多重试几次”在这里是坏主意？</summary><p>故障持续几分钟，重试只是把失败往后推，每次都在吃截止时间和额度；三层叠起来放大 27 倍，全压在已经过载的服务上，恢复时还会被积攒的重试再压回去。</p></details>
+    <details><summary>3. 熔断器为什么不能把 429 算成失败？</summary><p>429 说的是“你的额度用完了”，主模型本身是好的；算进去的话，流量一高自己的限流就把熔断器打开，调用被白白切到小得多的备用模型。</p><p class="from">从 ④ 机制 3 推出。</p></details>
+    <details><summary>4. 预测：把熔断器的打开时长从 30 秒改成 5 分钟，⑤ 里 C 会怎样？</summary><p>20:03 打开后要到 20:08 才第一次试探，而故障 20:06:20 就结束了：多用了将近 2 分钟的备用模型，备用每分钟只能做 4 个左右，积压和 P95 都会变差。打开时长短一点、试探少一点，恢复得快又不添乱。</p><p class="from">从 ④ 机制 3、4 推出。</p></details>
+    <details><summary>5. 预测：主模型和备用模型是同一家供应商，这次是整个供应商过载，C 会怎样？</summary><p>两个模型一起回 529，熔断器打开后走备用也失败，备用也该有自己的熔断器；菜单要继续往下走：P2 只分诊也调不了，就按知识库里已有的结论和原始指标转人工。“备用”要尽量和主模型不共享故障。</p><p class="from">从 ④ 机制 4 推出。</p></details>
+    <details><summary>6. 放回全景：第 ⑥ 站前后是什么？如果第 ⑥ 站没有熔断、只有三层重试，20:03 那次故障时整条链路会怎样？</summary><p>前面是第 ⑤ 站网关选好模型，后面是第 ⑦ 站供应商。三层重试时，故障期间打到主模型的请求是单层熔断的好几倍，worker 全卡在等重试上，第 ② 站的积压越堆越高；P0 也要排到重试后面；故障一结束，积攒的重试又一起涌向第 ⑦ 站。看板上 529 和请求数一起飙高，P95 拉长。</p><p class="from">从全景第 ②⑥⑦ 站和 ④ 机制 2、3 推出。</p></details>
+  </div>
+</section>
+</main>
+
+<footer>
+  <p>档位：标准。本机跑过（2026-11-28，2 核 ARM，Python 3.13.18，anthropic 2.12.0，FastAPI 0.165.0）：⑤ 的 4 种做法各三遍；假供应商的故障是按全景设定注入的，不随负载加重，数字只用来比较几种做法。看过源码：anthropic SDK 2.12.0 的 <code>_constants.py</code>（默认超时 10 分钟、连接 5 秒、默认重试 2 次）和 <code>_exceptions.py</code>（529 是 <code>OverloadedError</code>，继承 <code>InternalServerError</code>）；Resilience4j master 的 <code>CircuitBreakerConfig.java</code>（失败率 50%、窗口 100、至少 100 次、打开 60 秒、半开 10 个试探、慢调用 60 秒、默认按次数计）。按文档：Claude API errors 页（529 <code>overloaded_error</code>，可能出现在所有用户流量都高的时候），2026-11-28 查。</p>
+  <p>相关：<a href="pano-10-promo-night.html">全景：大促夜里 1000 个告警同时涌进来</a> · <a href="prod-rate-limit.html">限流和配额</a> · <a href="api-errors-retry.html">429、529 和超时怎么重试</a> · <a href="model-regression.html">换模型怎么回归</a> · <a href="long-task-queue.html">长任务架构</a></p>
+</footer>
+<script>
+/*SIM-START*/
+// 纯函数，不碰 DOM。时刻来自 ⑤ 实测第 2 遍里 C 的熔断器日志。
+const STEPS = [
+  { h: "20:00～20:03 关上", t: "20:00:00", cap: "CLOSED：所有调用走主模型，熔断器记着最近 20 次的成败，几乎全是成功。", lit: ["s-closed", "r-main"] },
+  { h: "20:03:00 故障开始", t: "20:03:00", cap: "主模型七成的请求回 529。窗口里的失败一个个多起来，但还没到“至少 10 次、失败过半”。这几秒里的调用还在撞主模型。", lit: ["s-closed", "r-main", "e-c2o"] },
+  { h: "20:03:05 打开", t: "20:03:05", cap: "OPEN：最近 20 次里失败过半。从这一刻起，调用不再去撞主模型，直接走备用模型；备用的额度小，同时只够 4 个左右的调查。", lit: ["s-open", "e-c2o", "r-backup"] },
+  { h: "20:03:36 半开，放 3 个试探", t: "20:03:36", cap: "HALF_OPEN：打开满 30 秒。只放 3 个试探请求去主模型，其余的照样走备用。", lit: ["s-half", "e-o2h", "r-main", "r-backup"] },
+  { h: "20:03:40 试探失败，再打开", t: "20:03:40", cap: "3 个试探里有一个 529：主模型还没好，回到 OPEN，再等 30 秒。整个故障期，打到主模型的请求就是这些试探，一共只有 24 个。", lit: ["s-open", "e-h2o", "r-backup"] },
+  { h: "20:04～20:06 每 30 秒试一次", t: "20:05:52", cap: "同样的事又发生了 4 次：20:04:12、20:04:45、20:05:16、20:05:52 进半开，试探失败又打开。主模型没被重试压着，备用模型一直在出报告。", lit: ["s-open", "s-half", "e-o2h", "e-h2o", "r-backup"] },
+  { h: "20:06:23 半开：故障已经结束", t: "20:06:23", cap: "故障在 20:06:20 结束。3 秒后熔断器第 6 次进半开，这次 3 个试探都回来了。", lit: ["s-half", "e-o2h", "r-main"] },
+  { h: "20:06:35 关上，切回主模型", t: "20:06:35", cap: "CLOSED：试探全成功，熔断器关上、窗口清空，调用回到主模型。从故障结束到切回只用了 15 秒，没有人工干预。", lit: ["s-closed", "e-h2c", "r-main"] }
+];
+function stateAt(i) {
+  const step = Math.min(STEPS.length, Math.max(0, i | 0)), cur = STEPS[step - 1];
+  return { step, total: STEPS.length, lit: cur ? cur.lit : [], h: cur ? cur.h : "准备", cap: cur ? cur.cap : "点“下一步”。", t: cur ? cur.t : "20:00:00" };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const ids = [...new Set(STEPS.flatMap(s => s.lit))];
+  let cur = 0, timer = null;
+  function render(i) {
+    const st = stateAt(i); cur = st.step;
+    ids.forEach(id => { const el = document.getElementById(id); if (!el) return; const on = st.lit.includes(id); el.classList.toggle("lit", st.step > 0 && on); el.classList.toggle("fade", st.step > 0 && !on); });
+    $("#clock").textContent = st.t;
+    $("#st-cap").innerHTML = '<b class="h">' + esc(st.h) + "</b>" + esc(st.cap);
+    $("#st-pos").textContent = st.step + " / " + st.total;
+    $("#st-prev").disabled = st.step === 0;
+    $("#st-next").disabled = st.step === st.total;
+  }
+  function stopAuto() { if (timer) { clearInterval(timer); timer = null; } $("#st-auto").setAttribute("aria-pressed", "false"); $("#st-auto").textContent = "自动播放"; }
+  $("#st-prev").addEventListener("click", () => { stopAuto(); render(cur - 1); });
+  $("#st-next").addEventListener("click", () => { stopAuto(); render(cur + 1); });
+  $("#st-reset").addEventListener("click", () => { stopAuto(); render(0); });
+  $("#st-auto").addEventListener("click", () => {
+    if (timer) { stopAuto(); return; }
+    if (cur === STEPS.length) render(0);
+    $("#st-auto").setAttribute("aria-pressed", "true"); $("#st-auto").textContent = "暂停";
+    timer = setInterval(() => { if (cur >= STEPS.length) stopAuto(); else render(cur + 1); }, 3600);
+  });
+  $("#stp").addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") { stopAuto(); render(cur + 1); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { stopAuto(); render(cur - 1); e.preventDefault(); }
+  });
+  render(0);
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
