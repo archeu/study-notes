@@ -104,6 +104,7 @@
 | 91 | [可靠性：超时、重试、熔断、降级到备用模型](https://study.ainiya.de/agent/prod-reliability.html) | 截止时间往下传、重试只放一层（27 倍放大）、熔断器关开半开、降级菜单和备用模型评测，20:03 故障 30 倍速重演四种做法的实测，熔断器一生分步动画 |
 | 92 | [AI 网关：模型管理、token 限流、工具过滤](https://study.ainiya.de/agent/ai-gateway.html) | 普通 API 网关缺什么、LiteLLM / Envoy AI Gateway / Higress 怎么选（含 LiteLLM 投毒事件）、九层过滤链、读懂请求体和流式 usage、虚拟 key、工具过滤做两次，200 行最小网关加官方 SDK 的实测，九层分步动画 |
 | 93 | [成本和延迟：缓存、模型路由、流式、并行](https://study.ainiya.de/agent/prod-cost-latency.html) | 一次调查的账本（每轮重发历史）、历史也缓存、工具结果瘦身、小模型先分诊、并行和流式只省时间、瓶颈从 ITPM 挪到 OTPM，五刀叠加的计算，一刀一刀叠上去实验台 |
+| 94 | [提示注入：直接注入和间接注入](https://study.ainiya.de/agent/prompt-injection.html) | 指令和数据在同一条通道里、直接和间接注入、危险三件套、分层防御（检测、叮嘱标记、权限、审批、输出核对），本地 Qwen3-1.7B 对一条注入日志跑 12 种组合的实测，分层分步动画 |
 
 # Java 后端架构（补给库）
 
