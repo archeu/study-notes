@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>限流和配额：供应商的速率上限、自己的令牌桶</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* 本页：限流和配额（机制型六步）。角色色：pd 供应商的桶和全局桶、bk 支付、cg 搜索、of 卡片补充、g2 实验台、bad 需求和 429。交互只有 ④ 机制 4 的额度计算器。 */
+/* learn 六步页的基础样式（固定一份，不要从别的页面抄）。配色：pd bk cg g2 rn of 六个角色色，warn / bad / good / neutral 含义固定。
+   组件写法见 assets/skeleton.html。本页特有的样式写在文件末尾的标记后面，不改上面的规则。 */
+:root{--paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;}
+}
+:root[data-theme="dark"]{--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;}
+*{box-sizing:border-box}
+body{background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){
+  *{transition:none!important;scroll-behavior:auto!important}
+}
+html{scroll-behavior:smooth}
+section[id],.sub[id],.pit[id],figure[id]{scroll-margin-top:64px}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)}
+.f-of{fill:var(--of)}
+.f-cg{fill:var(--cg)}
+.f-g2{fill:var(--g2)}
+.f-bad{fill:var(--bad)}
+.f-pd{fill:var(--pd)}
+.f-bk{fill:var(--bk)}
+.f-good{fill:var(--good)}
+.f-rn{fill:var(--rn)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains li.mid::before{content:"•";color:var(--muted)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mech-h .sn{font-size:20px}
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p,details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+@media (max-width:980px){
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .two,.design,.pits,.rules-list,.next{grid-template-columns:1fr}
+}
+@media (max-width:520px){
+  .presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+table.t td.bad,table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.s{color:var(--of)}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.cap{font-size:13.5px;color:var(--muted)}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){
+  .steps-out li{grid-template-columns:minmax(0,1fr)}
+}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try code{overflow-wrap:anywhere}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){
+  .tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+.x-box{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.x-zone{fill:none;stroke:var(--line-strong);stroke-width:1.3;stroke-dasharray:6 5}
+.x-zl{font-size:12px;fill:var(--muted)}
+.x-r{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.x-rs{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.x-fill{fill:var(--rc)}
+.x-t{font-size:13px;fill:var(--ink)}
+.x-tb{font-size:13.5px;font-weight:700;fill:var(--ink)}
+.x-ts{font-size:11.5px;fill:var(--muted)}
+.x-tc{font-size:12px;font-weight:700;fill:var(--rc)}
+.x-mono{font-family:var(--font-mono);font-size:11px;fill:var(--ink)}
+.x-mono.dim{fill:var(--muted)}
+.x-mono.bad{fill:var(--bad);font-weight:600}
+.x-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.x-ed{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.x-ed.dash{stroke-dasharray:5 4}
+.x-ed.bad{stroke:var(--bad)}
+.x-ed.c{stroke:var(--rc);stroke-width:2}
+.x-mk{fill:var(--line-strong)}
+.x-mkb{fill:var(--bad)}
+.fig-box{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card);padding:10px}
+.fig-box > svg{min-width:760px;width:100%;display:block}
+.swipe{display:none;font-size:13px;color:var(--muted);margin:0 0 4px}
+@media (max-width:800px){
+  .swipe{display:block}
+}
+.ids{font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ids .a{color:var(--cg);font-weight:600}
+.ids .b{color:var(--of);font-weight:600}
+.verdict-box{font-size:14.5px;padding:10px 14px;border-radius:12px;border:2px solid var(--rc);background:var(--rt)}
+.knob-row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end}
+.knob-row label{display:flex;flex-direction:column;gap:4px;font-size:13.5px;color:var(--muted)}
+.knob-row select{font:inherit;font-size:14px;padding:4px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){
+  .ctl-grid{grid-template-columns:1fr!important}
+}
+.codebox pre .bad{color:var(--bad);font-weight:600}
+.codebox pre .ok{color:var(--good);font-weight:600}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.sv .fade{opacity:.25;transition:opacity .25s}
+.sv .lit{opacity:1;transition:opacity .25s}
+.sv .lit .x-rs,.sv .lit .x-r{stroke-width:3}
+/* ===== 本页特有的样式写在这一行下面 ===== */
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>AI Agent 工程师</span><span aria-hidden="true">/</span><span class="tb-here">限流和配额</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs><marker id="xa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="x-mk"/></marker></defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">RPM · ITPM · OTPM · 令牌桶 · 加权公平排队 · anthropic SDK 2.12 · 30 倍速重演实测</p>
+  <h1>限流和配额：供应商的速率上限、自己的令牌桶</h1>
+  <p class="lead">供应商用三个连续补充的令牌桶限你：每分钟请求数、输入 token、输出 token，从缓存读的输入不算。精华是三句话：<b>按 token 限，不按请求数限</b>；<b>自己的桶要比供应商更早说“等一下”</b>（留一成余量，也不攒太多）；<b>份额是保底，不是天花板</b>，闲着的让给别人。能同时跑几个调查，是额度除以每个调查的用量算出来的。</p>
+  <nav class="route" aria-label="六步学习路线">
+<a href="#s1"><b>①</b>为什么需要</a><i aria-hidden="true">→</i>
+<a href="#s2"><b>②</b>没有它会怎样</a><i aria-hidden="true">→</i>
+<a href="#s3"><b>③</b>相邻方案</a><i aria-hidden="true">→</i>
+<a href="#s4"><b>④</b>原理</a><i aria-hidden="true">→</i>
+<a href="#s5"><b>⑤</b>亲眼看到</a><i aria-hidden="true">→</i>
+<a href="#s6"><b>⑥</b>细节</a><i aria-hidden="true">→</i>
+<a href="#loop"><b>↺</b>回到⑤</a>
+</nav>
+  <p class="where"><span>全景：<a href="pano-10-promo-night.html#s-4">大促夜里 1000 个告警同时涌进来 · 第 ④、⑦ 站</a></span><span>地图：<a href="roadmap.html#st10">站 10 · 限流和配额</a></span><span>深度：懂机制</span></p>
+  <p class="scene"><b>这一页的位置</b><span>站 10 第 2 个下钻知识点。站 03 的 <a href="api-errors-retry.html">429、529 和超时怎么重试</a> 讲的是“被拒了以后怎么等”；这一页讲“怎么别被拒”，以及额度不够分时谁先用。上一页的 <a href="long-task-queue.html">长任务架构</a> 管排队，这一页管放行。</span></p>
+</header>
+
+<section id="s1" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">①</span>为什么需要：三个团队抢一份额度</h2></div>
+  <p>在全景第 ④、⑦ 站，这一步要解决：交易、支付、搜索三个团队共用一个组织的额度。供应商只认总数，不管是谁用的。20:00 一开闸，16 个 worker 同时开跑，每个调查每分钟要 3 万未缓存输入 token，合起来 48 万，比额度多出两成；搜索团队的调查还有一轮要带 4 万 token 的日志。</p>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 220" role="img" aria-label="三个团队的需求合起来每分钟 48 万未缓存输入 token，供应商给 40 万，自己的桶只放 36 万；按 5 比 3 比 2 保底分给交易、支付、搜索">
+        <text class="x-zl" x="12" y="20">每分钟未缓存输入 token</text>
+        <g data-role="bad"><rect class="x-r" x="140" y="34" width="720" height="34" rx="6"/><text class="x-tb" x="152" y="56">高峰需求：16 个 worker × 3 万 = 48 万</text></g>
+        <text class="x-ts" x="12" y="56">要多少</text>
+        <g data-role="other"><rect class="x-r" x="140" y="86" width="600" height="34" rx="6"/><text class="x-tb" x="152" y="108">供应商给的额度：40 万（本页假设）</text></g>
+        <text class="x-ts" x="12" y="108">给多少</text>
+        <g data-role="pd"><rect class="x-r" x="140" y="138" width="270" height="34" rx="6"/><text class="x-tb" x="152" y="160">交易 18 万</text></g>
+        <g data-role="bk"><rect class="x-r" x="410" y="138" width="162" height="34" rx="6"/><text class="x-tb" x="422" y="160">支付 10.8 万</text></g>
+        <g data-role="cg"><rect class="x-r" x="572" y="138" width="108" height="34" rx="6"/><text class="x-tb" x="582" y="160">搜索 7.2 万</text></g>
+        <text class="x-ts" x="12" y="160">自己放多少</text>
+        <text class="x-ts" x="690" y="160">← 合计 36 万，留一成</text>
+        <text class="x-ts" x="140" y="200">交易 : 支付 : 搜索 = 5 : 3 : 2 是“额度紧时的保底”。谁闲着，它的那份让给别人用（④ 机制 3）。</text>
+      </svg>
+    </div>
+    <figcaption>柱子长度按比例画：48 万的需求压在 40 万的额度上，多出来的要么在自己这边排队，要么在供应商那边吃 429。</figcaption>
+  </figure>
+  <div class="tiles4">
+    <div class="tile" data-role="pd"><small>一个调查每分钟</small><b>3 万</b><span>未缓存输入（6 轮 × 5k）</span></div>
+    <div class="tile" data-role="other"><small>供应商额度</small><b>40 万</b><span>ITPM，本页假设</span></div>
+    <div class="tile" data-role="done"><small>同时能跑</small><b>12</b><span>个调查 = 36 万 ÷ 3 万</span></div>
+    <div class="tile" data-role="bad"><small>worker 有</small><b>16</b><span>个，多的 4 个要等</span></div>
+  </div>
+  <p>要的是四件事：<b>不撞供应商的墙</b>（少吃 429）；<b>一个团队吃不光</b>别人的份；<b>闲着的份额不浪费</b>；<b>P0 先拿</b>。</p>
+</section>
+
+<section id="s2" data-role="other">
+  <div class="mech-h"><h2><span class="sn">②</span>没有它会怎样：只靠 429 和 SDK 自带的重试</h2></div>
+  <p>最省事的做法：什么都不限，让供应商回 429，官方 SDK 自己会重试（默认 2 次，照 <code>retry-after</code> 等）。⑤ 把那一夜按 30 倍速重演，87 个事件、16 个 worker，结果是这样：</p>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>发出的请求</th><th>吃到 429</th><th>重试用完还失败、转人工的事件</th><th>其中 P0</th></tr></thead>
+      <tbody>
+        <tr><th>A 只靠 429 + SDK 重试</th><td>605（多发 83 个）</td><td class="bad">223 次，交易团队吃了 180 次</td><td class="bad">32 个</td><td class="bad">3 个</td></tr>
+        <tr><th>B 自己限请求数（每分钟 72 个）</th><td>523</td><td class="bad">29 次，搜索团队吃了 26 次</td><td class="bad">7 个</td><td>0</td></tr>
+        <tr class="pick"><th><b>E 全局 token 桶 + 公平排队</b></th><td>522（一次没多发）</td><td class="good">0</td><td class="good">0</td><td class="good">0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul class="pains">
+    <li class="bad">只靠 429：供应商的桶空了，16 个 worker 一起撞墙、一起等 <code>retry-after</code>、再一起撞，重试 2 次用完的那一轮就失败；32 个事件没查完，其中 3 个是 P0。</li>
+    <li class="bad">谁流量大谁吃 429 最多：交易团队请求最多，180 次 429 落在它头上，最要紧的 P0 恰恰在交易里。</li>
+    <li class="bad">只限请求数：每分钟 72 个请求按平均 5k 算是 36 万，可搜索团队那一轮一个请求就是 4.5 万 token。请求数没超，token 照样把供应商的桶打空。</li>
+    <li class="ok">按 token 限、在自己这边排队：522 个请求一个没被拒，P0 3.5 分钟内全部做完（⑤ 实测）。</li>
+  </ul>
+  <div class="verdict" data-role="bad"><b>不懂精华时的典型误用</b>：照搬 Java 里限 QPS 的习惯，在网关上配“每秒 N 个请求”。对模型供应商来说一个请求可以差 10 倍大，限请求数等于没限。</div>
+</section>
+
+<section id="s3" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">③</span>相邻方案：限什么、在哪限、怎么分</h2></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>做法</th><th>不撞供应商的墙</th><th>请求大小不一样</th><th>一个团队吃不光</th><th>闲着的份额能借</th></tr></thead>
+      <tbody>
+        <tr><th>只靠 429 + 重试</th><td class="bad">不能：撞了才知道</td><td class="bad">不管</td><td class="bad">不能：流量大的吃得多，也被拒得多</td><td>—</td></tr>
+        <tr><th>限并发（信号量 12 个）</th><td>差一点：请求大小平均时能</td><td class="bad">不能：12 个里碰上几个 4.5 万的就超</td><td class="bad">不能</td><td class="good">能</td></tr>
+        <tr><th>限请求数（每分钟 72 个）</th><td>差一点：⑤ 实测 29 次 429</td><td class="bad">不能：大请求和小请求算一样</td><td class="bad">不能</td><td class="good">能</td></tr>
+        <tr><th>按 token、按团队死分三个桶</th><td class="good">能：⑤ 实测 0 次 429</td><td class="good">能</td><td class="good">能</td><td class="bad">不能：交易排长队时，搜索那份空着也借不走，⑤ 里做完要 20.3 分钟</td></tr>
+        <tr class="pick"><th><b>按 token 的全局桶 + 加权公平排队</b></th><td class="good">能：0 次 429</td><td class="good">能</td><td class="good">能：额度紧时按 5 : 3 : 2 分</td><td class="good">能：只有一家在排队时它能用满，9.1 分钟做完</td></tr>
+        <tr><th>在供应商那边给每个团队开工作区、设额度</th><td class="good">能：硬隔离</td><td class="good">能</td><td class="good">能</td><td class="bad">不能：各自的上限是死的；而且组织总额度照样管着它们</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页学按 token 的全局桶 + 加权公平排队</b>：供应商按 token 限你，你就按 token 限自己；桶只开一个，额度紧时按权重分，不紧时谁要谁用。供应商那边的工作区限额适合当最后一道硬保险（比如给实验性的团队封顶），不适合当日常的分配手段。</p>
+</section>
+
+<section id="s4" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">④</span>原理：供应商的三个桶，和自己的那一个</h2></div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>令牌桶</b>：桶里攒令牌，按固定速率往里补，补满为止；请求拿走令牌才放行，拿不到就等或被拒。补给页：<a href="../arch/rate-limit-algorithms.html">限流算法：令牌桶、漏桶、滑动窗口</a>。</li>
+      <li><b>token</b>：模型计费和限速的单位，中文和英文折算的比例不一样。站 02：<a href="llm-tokens-billing.html">token 和计费</a>。</li>
+      <li><b>前缀缓存</b>：请求开头一字不差的那一段，供应商算过一次就存着，下次直接读，按一成的价收钱。站 03：<a href="api-prompt-cache-batch.html">提示词缓存</a>。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-provider">机制 1 · 供应商的三个桶：什么算、什么不算</h3>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 232" role="img" aria-label="一次请求要过三个桶：每分钟请求数 RPM 扣 1；每分钟输入 token ITPM 扣没命中缓存的输入和写缓存的部分，缓存读不扣；每分钟输出 token OTPM 按实际生成的扣，和 max_tokens 无关。任何一个桶空了都回 429 并带 retry-after">
+        <g data-role="other"><rect class="x-rs" x="12" y="78" width="170" height="76" rx="10"/><text class="x-tb" x="24" y="102">一次 messages 请求</text><text class="x-ts" x="24" y="122">输入 9k = 前缀 4k + 新的 5k</text><text class="x-ts" x="24" y="140">输出 400</text></g>
+        <line class="x-ed" x1="184" y1="116" x2="236" y2="116" marker-end="url(#xa)"/>
+        <g data-role="pd"><rect class="x-r" x="240" y="16" width="300" height="56" rx="10"/><text class="x-tb" x="252" y="40">RPM：每分钟请求数</text><text class="x-ts" x="252" y="60">每个请求扣 1，不管大小</text></g>
+        <g data-role="pd"><rect class="x-r" x="240" y="88" width="300" height="56" rx="10"/><text class="x-tb" x="252" y="112">ITPM：每分钟输入 token</text><text class="x-ts" x="252" y="132">扣 新的 5k + 写缓存的；读缓存的 4k 不扣</text></g>
+        <g data-role="pd"><rect class="x-r" x="240" y="160" width="300" height="56" rx="10"/><text class="x-tb" x="252" y="184">OTPM：每分钟输出 token</text><text class="x-ts" x="252" y="204">边生成边扣，只算真生成的 400</text></g>
+        <g data-role="bad"><rect class="x-rs" x="600" y="40" width="348" height="68" rx="10"/><text class="x-bad" x="612" y="64">任何一个桶不够 → 429 rate_limit_error</text><text class="x-ts" x="612" y="84">带 retry-after：等几秒再来</text><text class="x-ts" x="612" y="100">错误信息说明是哪一种额度超了</text></g>
+        <g data-role="done"><rect class="x-rs" x="600" y="124" width="348" height="92" rx="10"/><text class="x-tb" x="612" y="148">都够 → 放行，响应头里报余额</text><text class="x-mono" x="612" y="170">anthropic-ratelimit-input-tokens-remaining</text><text class="x-mono" x="612" y="188">anthropic-ratelimit-input-tokens-reset</text><text class="x-ts" x="612" y="206">reset 是 RFC 3339 时间：到那时补满</text></g>
+        <line class="x-ed" x1="542" y1="74" x2="596" y2="74" marker-end="url(#xa)"/>
+        <line class="x-ed" x1="542" y1="170" x2="596" y2="170" marker-end="url(#xa)"/>
+      </svg>
+    </div>
+    <figcaption>按 Claude API 文档的 rate-limits 页（2026-11-28 查）。额度按“模型类别”给，同一家族的几个型号可能共用一份；整个组织一份，工作区可以再设更低的上限。</figcaption>
+  </figure>
+  <p>三条容易想错的地方，文档里都写了：</p>
+  <ul class="pains">
+    <li class="mid"><b>桶是连续补的</b>，不是每到整分钟清零；而且可能按比一分钟更短的间隔卡：文档举的例子是“每分钟 60 个可能按每秒 1 个来执行”。所以一分钟的额度不能在第一秒全用掉。</li>
+    <li class="mid"><b>缓存读不算 ITPM</b>：4k 前缀命中缓存，这一轮只扣 5k。缓存不光省钱，也直接把能同时跑的调查数从 6 个抬到 12 个。写缓存的那一次照算。</li>
+    <li class="mid"><b>OTPM 只看真生成的</b>：<code>max_tokens</code> 设大设小不影响额度，设小了只会把回答截断。另外，用量突然猛涨时，没超额度也可能先收到 429（文档叫 ramp limit），建议每分钟最多加一档地放量。</li>
+  </ul>
+
+  <h3 id="m-ours">机制 2 · 自己的桶：预扣、多退少补、可以欠账</h3>
+  <p>调用之前，自己并不知道这次会扣多少输入：前缀命中没有，要等响应里的 <code>usage</code> 才知道。所以分两步：<b>先按估算预扣</b>（这一轮新增的字数 ÷ 4，假定前缀命中），<b>回来再按真实数字补差</b>（<code>input_tokens + cache_creation_input_tokens</code>）。桶容量只放 10 秒的量，比供应商的短窗口还小；单个请求比桶还大时（搜索那 4.5 万），等桶满了就放行，余额变成负数，后面的请求替它还账。</p>
+  <div class="two">
+    <div class="codebox"><div class="code-bar"><b>bucket.py：预扣和补差</b><span>细节放到 ⑥</span></div><pre><code>est = len(new_text) / 4                 <span class="cm"># 预估：假定前缀命中</span>
+await bucket.acquire(tenant, est, prio)  <span class="cm"># 不够就在这里等</span>
+resp = await client.messages.create(...)
+u = resp.usage
+actual = u.input_tokens + u.cache_creation_input_tokens
+bucket.settle(tenant, est, actual)       <span class="cm"># 多退少补</span>
+
+<span class="cm"># acquire 里：大请求等桶满就放行，余额可以成负数</span>
+need = min(n, self.cap)
+while self.tokens &lt; need:
+    await sleep((need - self.tokens) / self.rate)
+self.tokens -= n</code></pre></div>
+    <div class="card" data-role="of"><h4>Java 老朋友：Guava RateLimiter</h4><p><b>像</b>：<code>acquire(permits)</code> 一次可以拿多个令牌；拿得比桶里多时，Guava 的做法也是“先放行，让下一个请求替它等”，和这里的欠账一样。</p><p><b>不像</b>：Java 里一个请求值几个 permit 是事先知道的；这里要先估、回来再补，估错了（比如缓存没命中）就会多放出去，⑥ 坑 5 就是这么来的。另外 Guava 只管一个进程，多副本要共享一个桶（⑥ 坑 6）。</p></div>
+  </div>
+
+  <h3 id="m-fair">机制 3 · 份额是保底，不是天花板：一个桶 + 公平排队</h3>
+  <p>最直觉的分法是按 5 : 3 : 2 开三个桶。问题在于 worker 是共用的：交易的 52 个事件在自己的 18 万里排长队时，搜索的 7.2 万可能正空着，却借不过来。⑤ 实测这样做完要 <b>20.3 分钟</b>。改成<b>一个 36 万的全局桶</b>，排队的请求先按优先级（P0 最先），同一优先级里挑“已用量 ÷ 权重”最小的那个团队：额度紧时就是 5 : 3 : 2，只有一家在排队时它能用满。同样的流量 <b>9.1 分钟</b>做完，429 依然是 0。</p>
+  <div class="design">
+    <div class="card" data-role="pd"><h3>一个全局桶 + 加权公平排队</h3><ul class="pains">
+      <li class="ok">总量只在一个地方卡，永远不超过 36 万，也就不撞供应商的墙。</li>
+      <li class="ok">额度紧时按权重分，交易吃不光支付和搜索的份；不紧时谁要谁用，一点不浪费。</li>
+      <li class="ok">优先级是排队顺序的第一键，P0 不管属于谁都先拿。</li>
+      <li class="mid">代价：要一个“发令牌的人”（一个协程或 Redis 里的一段脚本），排队逻辑比三个独立的桶复杂。</li>
+    </ul></div>
+    <div class="card" data-role="other"><h3>按团队死分三个桶</h3><ul class="pains">
+      <li class="ok">实现最简单，每个团队互不影响，也不撞墙。</li>
+      <li class="bad">闲着的份额借不走：搜索没活时那 20% 白白空着，交易的 P1、P2 却在排队。</li>
+      <li class="bad">共用 worker 池时更糟：worker 拿着交易的事件在等交易的桶，搜索的事件连 worker 都分不到。</li>
+    </ul></div>
+  </div>
+  <div class="verdict" data-role="pd"><b>决定胜负的约束</b>：额度是整个组织共用的一份、按 token 计，而三个团队的流量此起彼伏。要同时做到“不超总数”和“不浪费”，只能在一个地方数总数，再按权重决定排队顺序。</div>
+
+  <h3 id="m-cap">机制 4 · 能同时跑几个：额度 ÷ 每个调查的用量</h3>
+  <p>把上面几条合起来，就得到全景里那个数：<b>并发上限 = 自己的桶 ÷ 一个调查每分钟的未缓存输入</b> = 36 万 ÷ (6 轮 × 5k) = 12。worker 再多，也只是多几个人在桶前面排队。下面的计算器用的是全景那一夜的到达节奏（不算 20:03 那次 529），改一个数看看 87 个事件要多久做完。</p>
+  <div class="lab" data-role="g2" id="lab">
+    <h3 style="margin:0">实验台：额度、余量、缓存，决定这一夜多久做完</h3>
+    <div class="guess" id="lab-guess">
+      <p>先猜：账号降了一档，额度从 40 万变成 20 万，其他不变。87 个事件全部做完要多久（原来 8 分钟）？</p>
+      <div class="opts">
+        <button type="button" data-g="a">还是 8 分钟左右：worker 没变</button>
+        <button type="button" data-g="b">15 分钟左右</button>
+        <button type="button" data-g="c">30 分钟以上</button>
+      </div>
+      <p class="res" id="lab-guess-res" hidden></p>
+    </div>
+    <div class="knob-row">
+      <label for="k-itpm">供应商额度 ITPM<select id="k-itpm"><option value="200000">20 万</option><option value="400000" selected>40 万</option><option value="800000">80 万</option></select></label>
+      <label for="k-res">自己留的余量<select id="k-res"><option value="0">不留</option><option value="0.1" selected>一成</option><option value="0.2">两成</option></select></label>
+      <label for="k-hit">前缀缓存<select id="k-hit"><option value="1" selected>命中（4k 不算额度）</option><option value="0">不命中（系统提示里有时间）</option></select></label>
+    </div>
+    <div class="tiles4" id="lab-tiles"></div>
+    <p class="verdict-box" data-role="g2" id="lab-sum"></p>
+    <p class="tip">按全景的设定逐分钟推算（估算，不是实测）：每个调查 6 轮、每轮 9k 输入（前缀 4k）、输出 400，调查本身 1 分钟；每分钟能开工的个数 = 并发上限，P0 先、P1 次、P2 最后。单价按全景页的假设：输入每百万 $3、缓存读 $0.30、输出 $15。“不留余量”在这里看起来更快，代价是估算一有偏差或别的服务也在用同一份额度，就开始吃 429（⑥ 坑 4）。</p>
+  </div>
+</section>
+
+<section id="s5" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑤</span>亲眼看到：把那一夜按 30 倍速重演 5 遍</h2></div>
+  <p>假供应商（FastAPI）照文档的规则实现三个桶：容量各放 10 秒的量，ITPM 只收没命中缓存的输入，带 <code>cache_control</code> 的前缀 5 分钟内命中缓存，超了回 429 和 <code>retry-after</code>。调用方用官方 <code>anthropic</code> SDK（<code>max_retries=2</code>）。87 个事件按全景的节奏到达，16 个 worker，每个调查 6 轮；搜索团队的调查第 3 轮多带 4 万 token 的日志。时间压缩 30 倍：场景里的 1 分钟，墙上 2 秒。</p>
+  <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>night.py · 一轮调用（节选）</b><a href="https://github.com/archeu/study-labs/tree/main/agent/prod-rate-limit">完整代码 →</a></div><pre><code>client = anthropic.AsyncAnthropic(base_url="http://127.0.0.1:18720",
+                                  api_key="sk-fake", max_retries=2)
+fb = FairBucket(360_000, {"trade": 5, "pay": 3, "search": 2})   <span class="cm"># 做法 E</span>
+
+async def call(inc, rnd):
+    system = [{"type": "text", "text": PREFIX,                  <span class="cm"># 4k 固定前缀</span>
+               "cache_control": {"type": "ephemeral"}}]
+    content = ROUND + (BIGLOG if inc["tenant"] == "search" and rnd == 3 else "")
+    est = len(content) / 4
+    await fb.acquire(inc["tenant"], est, PRIO[inc["prio"]])     <span class="cm"># 在自己这边排队</span>
+    resp = await client.messages.create(model="main", max_tokens=1024, system=system,
+                                        messages=[{"role": "user", "content": content}])
+    u = resp.usage
+    fb.settle(inc["tenant"], est, u.input_tokens + u.cache_creation_input_tokens)</code></pre></div>
+  <ol class="steps-out">
+    <li><b>1 装依赖</b><span>在 study-labs 的 <code>agent/</code> 下 <code>uv sync</code>。不需要 API key，也不需要 Redis。</span></li>
+    <li><b>2 跑</b><span><code>uv run python prod-rate-limit/night.py</code>：它自己起假供应商，A～E 五种做法各重演一遍，约 2 分钟。</span></li>
+  </ol>
+  <div class="codebox"><div class="code-bar"><span class="tag-real">实测</span><b>night.py 的输出</b><span>2026-11-28 · 2 核 ARM · Python 3.13.18 · anthropic 2.12.0 · FastAPI 0.165.0 · 时间为场景分钟</span></div><pre class="console">做法                  请求   429  失败事件 其中P0  全部做完  P0做完   P95  交易429 搜索429  计入ITPM  缓存读
+<span class="r">✗</span> A 只靠 429 + SDK 重试  605   223     32     3    7.1分   3.4分  1.1分    180      6    2.33M   1.51M
+<span class="r">✗</span> B 自己限请求数          523    29      7     0    7.7分   3.7分  4.0分      0     26    2.69M   1.96M
+<span class="r">✗</span> C 租户桶死分           522     0      0     0   20.3分   4.8分 14.8分      0      0    3.11M   2.07M
+<span class="hi">✓</span> E 全局桶+公平排队       522     0      0     0    9.1分   3.5分  4.6分      0      0    3.11M   2.07M
+<span class="r">✗</span> D E + 缓存坏了         550    29      1     0   14.5分   3.6分 12.4分     15     13    5.17M   0.00M
+<span class="c">A、B、C 跑了三遍，E、D 跑了两遍：C、E 每遍一样；A 的 429 在 223～275 之间、失败 32～35 个；D 的 429 在 27～29 之间、失败 1～3 个（SDK 退避有随机抖动）</span></pre></div>
+  <div class="lab-res" data-role="pd"><b>读出来的结论</b><ul>
+    <li>A 看起来“全部做完”只要 7.1 分钟、P95 才 1.1 分钟，那是因为 32 个事件早早失败出局了；失败的 3 个 P0 都要转人工。快是假象。</li>
+    <li>B 和 E 发出的请求数几乎一样（523 对 522），差别全在“一个请求值多少”：B 不看大小，被搜索那几个 4.5 万的大请求打穿了 29 次。</li>
+    <li>C 和 E 计入额度的 token 一模一样（3.11M），C 却慢了一倍多：同样多的额度，死分就浪费在了闲着的团队上。</li>
+    <li>D 只是前缀缓存不中：计入 ITPM 的 token 从 3.11M 涨到 5.17M，做完从 9.1 分钟拖到 14.5 分钟；预估还假定命中，估少了，又漏出 29 次 429。</li>
+    <li>E 的 9.1 分钟比计算器里的 8 分钟多一点，多出来的是搜索团队那 12 段大日志（计入 ITPM 的 3.11M 里有 0.48M 是它们）。</li>
+  </ul></div>
+  <div class="verdict" data-role="done"><b>到这里已经能交差了</b>：一个按 token 的全局桶，额度紧时按团队权重分、P0 先拿，一夜下来 0 次 429。<br><b>已知还没处理的细节</b>：桶攒得太满（<a href="#p-burst">坑 3</a>）；不留余量（<a href="#p-reserve">坑 4</a>）；预估假定命中缓存（<a href="#p-estimate">坑 5</a>）；多副本各开一个桶（<a href="#p-replicas">坑 6</a>）；开闸时猛涨（<a href="#p-ramp">坑 7</a>）。</div>
+</section>
+
+<section id="s6" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑥</span>细节</h2></div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-rpm"><b><em>1</em>只限请求数<span class="seen">实测</span><a class="rootmark" href="#m-provider">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>请求数一直在配额内，供应商照样回 429，错误信息说超的是输入 token。⑤ 里 B 吃了 29 次。</dd><dt>根源</dt><dd>供应商三个桶里最先空的往往是 ITPM，而一个请求的输入可以从 5k 到 4.5 万。</dd><dt>做法</dt><dd class="fix">按 token 限；请求数只当一个次要的上限。</dd></dl>
+    </div>
+    <div class="pit" id="p-split"><b><em>2</em>按团队死分额度<span class="seen">实测</span><a class="rootmark" href="#m-fair">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>没有一次 429，可这一夜要 20 分钟才做完，P95 14.8 分钟；看板上搜索团队的额度用了不到一半。</dd><dt>根源</dt><dd>份额被当成了天花板：闲着的份额借不走；共用 worker 池时，worker 还会被拿着等桶的事件占住。</dd><dt>做法</dt><dd class="fix">一个全局桶，权重只决定额度紧时的排队顺序。</dd></dl>
+    </div>
+    <div class="pit" id="p-burst"><b><em>3</em>自己的桶攒满一分钟<a class="rootmark" href="#m-provider">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>平时没事，每次放量的头几秒一串 429，之后又好了。</dd><dt>根源</dt><dd>容量等于一分钟额度的桶，允许第一秒就放出整分钟的量；供应商可能按更短的间隔卡，这一波突发会撞墙。</dd><dt>做法</dt><dd class="fix">桶容量只放几秒的量（⑤ 用 10 秒），速率不变。</dd></dl>
+    </div>
+    <div class="pit" id="p-reserve"><b><em>4</em>把额度用到 100%<a class="rootmark" href="#m-cap">← ④ 机制 4</a></b>
+      <dl><dt>现象</dt><dd>大部分时间正常，偶尔一阵 429，查不出是谁。</dd><dt>根源</dt><dd>组织额度不只这一个服务在用（评测任务、别的团队的脚本也算），自己的预估也有误差。</dd><dt>做法</dt><dd class="fix">留一成余量；把响应头里的 <code>anthropic-ratelimit-input-tokens-remaining</code> 记进看板，余额长期贴底就该申请提额。</dd></dl>
+    </div>
+    <div class="pit" id="p-estimate"><b><em>5</em>预估假定缓存一定命中<span class="seen">实测</span><a class="rootmark" href="#m-ours">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>有人在系统提示里加了当前时间，429 突然冒出来（⑤ 的 D：29 次），做完的时间也长了一半。</dd><dt>根源</dt><dd>预扣只扣了新增的 5k，实际每次要扣 9k；补差发生在调用之后，这期间多放出去的请求已经打到供应商了。</dd><dt>做法</dt><dd class="fix">看板盯着缓存命中率，掉下去就报警；预估改用最近一段时间的真实命中率加权，而不是一律假定命中。</dd></dl>
+    </div>
+    <div class="pit" id="p-replicas"><b><em>6</em>每个副本各开一个本地桶<a class="rootmark" href="#m-ours">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>单副本压测一切正常，上线扩到 3 个副本，429 一片。</dd><dt>根源</dt><dd>3 个副本各自以为自己有 36 万，加起来 108 万。</dd><dt>做法</dt><dd class="fix">桶放在一个共享的地方：AI 网关只部署一组并在网关里限（下下页）；或者桶放进 Redis，用一段 Lua 脚本原子地补令牌和扣令牌。</dd></dl>
+    </div>
+    <div class="pit" id="p-ramp"><b><em>7</em>开闸时一下子放满<a class="rootmark" href="#m-provider">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>20:00 整点，用量从几乎为零跳到满额，额度没超也收到 429。</dd><dt>根源</dt><dd>文档写明用量猛涨会触发 ramp limit，建议每分钟最多加一档地放量；缓存读的 token 不算进 ramp。</dd><dt>做法</dt><dd class="fix">大促前半小时开始预热，或者桶的速率从一半起、每分钟往上加一档。</dd></dl>
+    </div>
+    <div class="pit" id="p-maxtok"><b><em>8</em>把 max_tokens 设小来“省额度”<a class="rootmark" href="#m-provider">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>报告时不时在半句话处断掉，额度却一点没省。</dd><dt>根源</dt><dd>OTPM 只按真生成的 token 扣，和 <code>max_tokens</code> 无关；设小只会截断。</dd><dt>做法</dt><dd class="fix"><code>max_tokens</code> 按“最长的正常回答”设；要省输出，改提示词让它写短。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <ul class="rules-list">
+    <li><b>按 token 限，桶只开一个</b>：防请求大小不一打穿额度、防死分浪费。</li>
+    <li><b>桶的速率 = 额度 × 0.9，容量 = 几秒的量</b>：防误差和突发撞墙。</li>
+    <li><b>预扣 + 按 usage 补差，大请求允许欠账</b>：防大请求永远等不到。</li>
+    <li><b>排队顺序：优先级第一，权重第二</b>：防 P0 被别的团队的 P2 挡住。</li>
+    <li><b>worker 并发上限 = 额度 ÷ 每个任务的用量</b>：防多出来的 worker 只会排队，还在扩容时被误当成“扩不够”。</li>
+    <li><b>余额、429 次数、缓存命中率进看板</b>：防额度问题只在出事以后才被发现。</li>
+  </ul>
+
+  <h3>第三圈 · 优化和深处</h3>
+  <div class="two">
+    <div class="card" data-role="of"><h4>分布式的桶：Redis 加一段 Lua</h4><p>多副本共享一个桶，最常见的是把“上次补令牌的时间”和“余额”放在 Redis 一个键里，Lua 脚本里补、判、扣一步做完。另一种写法 GCRA 只存一个“理论到达时间”，省一次读写。不管哪种，每次调用都多一次网络往返（亚毫秒到 1 毫秒），比起几秒的模型调用可以忽略。</p></div>
+    <div class="card" data-role="bk"><h4>按响应头自适应</h4><p>供应商在每个成功的响应里报余额和补满时间。可以像 TCP 那样做加性增、乘性减：余额充足时把自己的速率慢慢往上调，收到 429 就砍一半。好处是额度变了（提额、降档、别的服务在抢）也不用改配置；代价是会在边界上来回试探。</p></div>
+    <div class="card" data-role="pd"><h4>额度按模型分</h4><p>额度是按模型类别给的，备用模型有自己的一份。下一页降级到备用模型时，要给它也开一个桶，而且通常小得多：全景里切到备用模型后每分钟只能做 5 个。</p></div>
+    <div class="card" data-role="g2"><h4>不急的活走批处理</h4><p>Message Batches 有自己的一套额度，所有模型共用，而且不受 ramp limit 管。离线评测、批量打标签这类活从实时额度里搬出去，大促夜的实时额度就全留给调查。</p></div>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>Redis + Lua 的分布式令牌桶：三个网关副本共享一个桶，测一次调用多花多少延迟。</li>
+    <li>加性增、乘性减：让桶跟着响应头里的余额自己调速。</li>
+    <li>按“钱”限而不是按 token 限：每个团队每天的预算，超了降级到小模型。</li>
+    <li>长上下文请求（几十万 token）怎么在桶里排队，才不会一次饿死一大片小请求。</li>
+  </ul>
+</section>
+
+<section id="loop" data-role="other">
+  <div class="mech-h"><h2><span class="sn">↺</span>回到⑤：改一改</h2></div>
+  <ol class="rules-list">
+    <li><b>让供应商允许攒满一分钟</b>：把 <code>fake_provider.py</code> 的 <code>WINDOW</code> 从 10 改成 60，再跑。先猜 A 的 429 会少多少、E 有没有变化。（坑 3）</li>
+    <li><b>不留余量</b>：E 的全局桶从 36 万改成 40 万，看 429 是不是从 0 变成几个、做完快了多少。（坑 4）</li>
+    <li><b>换一种预估</b>：D 里不假定前缀命中，按“前缀 + 这一轮”预扣。做对了会看到 429 降到 0，代价是缓存正常时也多扣、并发变小。（坑 5）</li>
+    <li><b>日志再大一倍</b>：搜索的大日志从 4 万涨到 8 万 token，B 和 E 各会怎样？</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>按 token 限、只开一个全局桶、速率留一成余量、容量只放几秒；额度紧时按团队权重和优先级排队，不紧时谁要谁用；并发上限 = 额度 ÷ 每个任务的用量。</p></details>
+    <details><summary>2. 只靠 SDK 的自动重试，到底缺什么？</summary><p>重试是“撞了墙再说”，16 个 worker 会一起撞、一起等、再一起撞，重试次数用完就失败（⑤ 里 32 个事件）；而且谁流量大谁被拒得多，分不出 P0 和 P2、交易和搜索。</p></details>
+    <details><summary>3. 为什么限请求数在这里不管用？</summary><p>供应商最先卡住的通常是输入 token 的桶，一个请求的输入能差 10 倍。请求数没超，token 早超了。</p><p class="from">从 ④ 机制 1 推出。</p></details>
+    <details><summary>4. 预测：前缀缓存命中率从 100% 掉到 0，能同时跑的调查从几个变成几个？</summary><p>每个调查每分钟的未缓存输入从 3 万变成 5.4 万，36 万 ÷ 5.4 万 = 6.67，只能跑 6 个，砍掉一半。缓存读不算 ITPM，所以缓存既是钱的问题，也是吞吐的问题。</p><p class="from">从 ④ 机制 1、4 推出。</p></details>
+    <details><summary>5. 预测：把 worker 从 16 个加到 32 个，用做法 E，这一夜会快多少？</summary><p>几乎不会快：并发上限是 12，多出来的 worker 都在全局桶前面排队。反而是每个调查从领到任务到做完的时间变长了，因为更多调查在“半路等令牌”。</p><p class="from">从 ④ 机制 4 推出。</p></details>
+    <details><summary>6. 放回全景：第 ④ 站前后是什么？如果第 ④ 站的桶配成了 40 万、容量一整分钟，第 ⑥、⑦ 站会怎样？</summary><p>前面是第 ③ 站的 worker 领到任务，后面是第 ⑤ 站网关选模型、第 ⑥ 站可靠性层、第 ⑦ 站供应商。桶不留余量又攒满一分钟，20:00 开闸的头几秒就会把一整分钟的量放出去，撞上供应商的短窗口和 ramp limit；第 ⑦ 站回一串 429，第 ⑥ 站按 retry-after 重试，重试又和新请求一起撞。看板上 429 突增，P0 的报告也被拖慢。</p><p class="from">从全景第 ④⑥⑦ 站和 ④ 机制 1、2 推出。</p></details>
+  </div>
+</section>
+</main>
+
+<footer>
+  <p>档位：标准。本机跑过（2026-11-28，2 核 ARM，Python 3.13.18，anthropic 2.12.0，FastAPI 0.165.0）：⑤ 的 5 种做法，A、B、C 各三遍，E、D 各两遍；假供应商的规则是照文档写的模拟，不是真实的供应商，数字只用来比较几种做法。按文档（已核对原文）：Claude API rate-limits 页（令牌桶连续补充、可能按更短间隔执行、三种额度、缓存读不算 ITPM、写缓存算、OTPM 只算真生成的且与 max_tokens 无关、ramp limit、额度按模型类别、工作区限额、响应头和 RFC 3339 的 reset、Message Batches 有自己的额度且不受 ramp 管），2026-11-28 查；SDK 2.12.0 的重试逻辑看的是本地源码（<code>_base_client.py</code>：默认 2 次，先读 <code>retry-after-ms</code> 再读 <code>retry-after</code>，没有就从 0.5 秒起指数退避、最多 8 秒）。额度 40 万和单价是全景页的场景设定。</p>
+  <p>相关：<a href="pano-10-promo-night.html">全景：大促夜里 1000 个告警同时涌进来</a> · <a href="long-task-queue.html">长任务架构</a> · <a href="api-errors-retry.html">429、529 和超时怎么重试</a> · <a href="api-prompt-cache-batch.html">提示词缓存</a> · <a href="../arch/rate-limit-algorithms.html">限流算法</a></p>
+</footer>
+<script>
+/*SIM-START*/
+// 纯函数，不碰 DOM。和全景页同一套设定：每个调查 6 轮、每轮输入 9k（前缀 4k）、输出 400，调查本身 1 分钟。
+const PRI = [[6, 10, 11], [3, 9, 12], [0, 6, 11], [0, 3, 7], [0, 2, 4], [0, 1, 1], [0, 0, 1]]; // 每分钟到达的 P0/P1/P2
+function capacity(o) {
+  const unc = 6 * (9000 - (o.hit ? 4000 : 0));          // 一个调查每分钟要的未缓存输入
+  const budget = o.itpm * (1 - o.reserve);
+  return { unc, budget, conc: Math.max(0, Math.floor(budget / unc)) };
+}
+function night(conc) {
+  const q = [[], [], []], lat = [];
+  let m = 0, last = 0;
+  for (; m < 120 && lat.length < 87; m++) {
+    if (PRI[m]) PRI[m].forEach((n, p) => { for (let i = 0; i < n; i++) q[p].push(m); });
+    let c = conc;
+    for (let p = 0; p < 3; p++) while (c > 0 && q[p].length) { const a = q[p].shift(); lat.push({ p, l: m - a + 1 }); c--; last = m + 1; }
+  }
+  if (lat.length < 87) return { done: Infinity, p95: Infinity, p2: Infinity, p0: Infinity };
+  const L = lat.map(x => x.l).sort((a, b) => a - b);
+  const p2 = lat.filter(x => x.p === 2).map(x => x.l);
+  return { done: last, p95: L[Math.ceil(0.95 * 87) - 1], p2: p2.reduce((a, b) => a + b, 0) / p2.length,
+           p0: Math.max(...lat.filter(x => x.p === 0).map(x => x.l)) };
+}
+function cost(o) {                                         // 每个调查多少美元：输入 $3、缓存读 $0.30、输出 $15（每百万）
+  const unc = 6 * (9000 - (o.hit ? 4000 : 0)), read = o.hit ? 6 * 4000 : 0;
+  return (unc * 3 + read * 0.3 + 2400 * 15) / 1e6;
+}
+function simulate(o) { const c = capacity(o); return { ...c, ...night(c.conc), cost: cost(o) }; }
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const fmt = n => n >= 1e4 ? (n / 1e4).toFixed(n % 1e4 ? 1 : 0) + " 万" : String(n);
+  function opts() { return { itpm: +$("#k-itpm").value, reserve: +$("#k-res").value, hit: $("#k-hit").value === "1" }; }
+  function draw() {
+    const o = opts(), r = simulate(o);
+    const done = isFinite(r.done) ? r.done + " 分钟" : "两小时内做不完";
+    $("#lab-tiles").innerHTML =
+      '<div class="tile" data-role="pd"><small>一个调查每分钟</small><b>' + fmt(r.unc) + '</b><span>未缓存输入</span></div>' +
+      '<div class="tile" data-role="done"><small>同时能跑</small><b>' + r.conc + '</b><span>个 = ' + fmt(r.budget) + ' ÷ ' + fmt(r.unc) + '</span></div>' +
+      '<div class="tile" data-role="of"><small>87 个全部做完</small><b>' + done + '</b><span>P95 ' + (isFinite(r.p95) ? r.p95 + " 分钟" : "—") + '</span></div>' +
+      '<div class="tile" data-role="g2"><small>每个调查</small><b>$' + r.cost.toFixed(3) + '</b><span>P2 平均 ' + (isFinite(r.p2) ? r.p2.toFixed(1) + " 分钟" : "—") + '</span></div>';
+    const base = simulate({ itpm: 400000, reserve: 0.1, hit: true });
+    let s = "额度 " + fmt(o.itpm) + "、" + (o.reserve ? "留" + (o.reserve * 10) + "成余量" : "不留余量") + "、缓存" + (o.hit ? "命中" : "不中") + "：同时能跑 " + r.conc + " 个调查，87 个" + (isFinite(r.done) ? "到 20:" + String(r.done).padStart(2, "0") + " 做完。" : "两小时内做不完。");
+    if (r.conc < base.conc) s += "比全景那一夜（" + base.conc + " 个、" + base.done + " 分钟）慢，瓶颈是额度，加 worker 没用。";
+    else if (r.conc > base.conc) s += "比全景那一夜（" + base.conc + " 个）多，worker 也要跟着加到 " + r.conc + " 个以上，不然额度用不满。";
+    if (!o.reserve) s += "不留余量：估算一有偏差、或者别的服务也在用这份额度，就开始吃 429。";
+    $("#lab-sum").textContent = s;
+  }
+  ["#k-itpm", "#k-res", "#k-hit"].forEach(id => $(id).addEventListener("change", draw));
+  const ANSWER = "b";
+  $$("#lab-guess .opts button").forEach(btn => btn.addEventListener("click", () => {
+    $$("#lab-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", "false"); });
+    btn.setAttribute("aria-pressed", "true");
+    const ok = btn.dataset.g === ANSWER;
+    btn.classList.add(ok ? "right" : "wrong");
+    if (!ok) $('#lab-guess [data-g="' + ANSWER + '"]').classList.add("right");
+    $("#k-itpm").value = "200000"; $("#k-res").value = "0.1"; $("#k-hit").value = "1";
+    const r = simulate(opts());
+    const g = $("#lab-guess-res"); g.hidden = false;
+    g.textContent = (ok ? "猜对了。" : "不是这个。") + "并发上限 = 额度 ÷ 每个调查的用量：18 万 ÷ 3 万 = " + r.conc + " 个，减半了；87 个要到第 " + r.done + " 分钟才做完，P95 " + r.p95 + " 分钟。worker 没变，吞吐照样减半。";
+    draw();
+  }));
+  draw();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
