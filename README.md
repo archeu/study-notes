@@ -103,6 +103,7 @@
 | 90 | [限流和配额：供应商的速率上限、自己的令牌桶](https://study.ainiya.de/agent/prod-rate-limit.html) | 供应商的 RPM、ITPM、OTPM 三个桶（缓存读不算）、预扣加补差和欠账、份额是保底不是天花板、并发上限等于额度除以用量，假供应商加官方 SDK 30 倍速重演五种做法的实测，额度计算器 |
 | 91 | [可靠性：超时、重试、熔断、降级到备用模型](https://study.ainiya.de/agent/prod-reliability.html) | 截止时间往下传、重试只放一层（27 倍放大）、熔断器关开半开、降级菜单和备用模型评测，20:03 故障 30 倍速重演四种做法的实测，熔断器一生分步动画 |
 | 92 | [AI 网关：模型管理、token 限流、工具过滤](https://study.ainiya.de/agent/ai-gateway.html) | 普通 API 网关缺什么、LiteLLM / Envoy AI Gateway / Higress 怎么选（含 LiteLLM 投毒事件）、九层过滤链、读懂请求体和流式 usage、虚拟 key、工具过滤做两次，200 行最小网关加官方 SDK 的实测，九层分步动画 |
+| 93 | [成本和延迟：缓存、模型路由、流式、并行](https://study.ainiya.de/agent/prod-cost-latency.html) | 一次调查的账本（每轮重发历史）、历史也缓存、工具结果瘦身、小模型先分诊、并行和流式只省时间、瓶颈从 ITPM 挪到 OTPM，五刀叠加的计算，一刀一刀叠上去实验台 |
 
 # Java 后端架构（补给库）
 

@@ -1,0 +1,876 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<title>成本和延迟：缓存、模型路由、流式、并行</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap">
+<style>
+/* 本页：成本和延迟（设计思想型六步）。角色色：pd 固定前缀和缓存、of 告警和卡片、g2 历史和实验台、bad 基线的代价、other 老办法。交互只有 ④ 的“一刀一刀叠上去”实验台（和 ledger.py 同一套算法）。 */
+/* learn 六步页的基础样式（固定一份，不要从别的页面抄）。配色：pd bk cg g2 rn of 六个角色色，warn / bad / good / neutral 含义固定。
+   组件写法见 assets/skeleton.html。本页特有的样式写在文件末尾的标记后面，不改上面的规则。 */
+:root{--paper:#F1F2F4; --card:#FFFFFF; --ink:#18202A; --muted:#5A6473; --line:#D8DDE5; --line-strong:#A8B2C1;
+  --pd:#3150C4; --pd-tint:#E2E7FA;
+  --bk:#0D7A69; --bk-tint:#DCF0EB;
+  --cg:#6A3FC0; --cg-tint:#ECE5FA;
+  --g2:#8A5A2B; --g2-tint:#F3E6D8;
+  --rn:#A8327A; --rn-tint:#F7E1EE;
+  --of:#A26A00; --of-tint:#FBEFCC;
+  --warn:#C2410C; --warn-tint:#FDE6D8;
+  --neutral:#4A5568; --neutral-tint:#E4E8EE;
+  --bad:#C43838; --bad-tint:#F9DEDD;
+  --good:#23824A; --good-tint:#DCF1E3;
+  --on-accent:#FFFFFF;
+  --code-bg:#F7F8FA; --console-bg:#1B2230; --console-fg:#E6EBF2; --console-dim:#8D99AD; --console-hi:#F2C94C;
+  --font-display:"ZCOOL KuaiLe","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-body:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+    --pd:#90A4FF; --pd-tint:#1D2650;
+    --bk:#40C6B0; --bk-tint:#12352F;
+    --cg:#B9A0FF; --cg-tint:#2A2148;
+    --g2:#D9A26B; --g2-tint:#3A2A1A;
+    --rn:#F08BC6; --rn-tint:#3D1A30;
+    --of:#F2C94C; --of-tint:#3A3212;
+    --warn:#FB923C; --warn-tint:#3A2214;
+    --neutral:#B4BFCE; --neutral-tint:#232C38;
+    --bad:#FF7B78; --bad-tint:#3D1B1C;
+    --good:#5FD08A; --good-tint:#163524;
+    --on-accent:#0F141A;
+    --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+    color-scheme:dark;}
+}
+:root[data-theme="dark"]{--paper:#10141A; --card:#182029; --ink:#E6EBF2; --muted:#9AA6B8; --line:#2A3340; --line-strong:#4A5870;
+  --pd:#90A4FF; --pd-tint:#1D2650;
+  --bk:#40C6B0; --bk-tint:#12352F;
+  --cg:#B9A0FF; --cg-tint:#2A2148;
+  --g2:#D9A26B; --g2-tint:#3A2A1A;
+  --rn:#F08BC6; --rn-tint:#3D1A30;
+  --of:#F2C94C; --of-tint:#3A3212;
+  --warn:#FB923C; --warn-tint:#3A2214;
+  --neutral:#B4BFCE; --neutral-tint:#232C38;
+  --bad:#FF7B78; --bad-tint:#3D1B1C;
+  --good:#5FD08A; --good-tint:#163524;
+  --on-accent:#0F141A;
+  --code-bg:#0F151C; --console-bg:#0A0E13; --console-fg:#E6EBF2; --console-dim:#7D889B; --console-hi:#F2C94C;
+  color-scheme:dark;}
+*{box-sizing:border-box}
+body{background:var(--paper); color:var(--ink);
+  font-family:var(--font-body); font-size:16px; line-height:1.65;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;}
+main{max-width:1040px;margin:0 auto;padding-block:40px 72px;display:flex;flex-direction:column;gap:84px}
+h1,h2,h3,h4{font-family:var(--font-display);font-weight:400;line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px)}
+h2{font-size:clamp(28px,4vw,40px)}
+h3{font-size:24px}
+h4{font-size:19px}
+p{margin:0}
+a{color:var(--pd)}
+code{font-family:var(--font-mono);font-size:.86em}
+.lead{color:var(--muted);max-width:44em;margin-top:8px}
+button{font:inherit;color:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible,[tabindex]:focus-visible,input:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+section{display:flex;flex-direction:column;gap:24px}
+.sub{display:flex;flex-direction:column;gap:20px;padding-top:12px}
+.sub > h3{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sub > h3 small{font-family:var(--font-body);font-size:14px;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){
+  *{transition:none!important;scroll-behavior:auto!important}
+}
+html{scroll-behavior:smooth}
+section[id],.sub[id],.pit[id],figure[id]{scroll-margin-top:64px}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--paper);border-bottom:1px solid var(--line);margin-left:calc(-1 * max(16px, env(safe-area-inset-left, 0px)));margin-right:calc(-1 * max(16px, env(safe-area-inset-right, 0px)));padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.tb-in{max-width:1040px;margin:0 auto;display:flex;align-items:center;gap:8px;padding-block:10px;font-size:14px;color:var(--muted);min-width:0}
+.tb-home{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-weight:500;flex:none}
+.tb-home:hover{border-color:var(--ink)}
+.tb-here{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+[data-role="pd"]{--rc:var(--pd);--rt:var(--pd-tint)}
+[data-role="bk"]{--rc:var(--bk);--rt:var(--bk-tint)}
+[data-role="cg"]{--rc:var(--cg);--rt:var(--cg-tint)}
+[data-role="g2"]{--rc:var(--g2);--rt:var(--g2-tint)}
+[data-role="rn"]{--rc:var(--rn);--rt:var(--rn-tint)}
+[data-role="of"]{--rc:var(--of);--rt:var(--of-tint)}
+[data-role="warn"]{--rc:var(--warn);--rt:var(--warn-tint)}
+[data-role="other"]{--rc:var(--neutral);--rt:var(--neutral-tint)}
+[data-role="bad"]{--rc:var(--bad);--rt:var(--bad-tint)}
+[data-role="done"]{--rc:var(--good);--rt:var(--good-tint)}
+.hero{display:flex;flex-direction:column;gap:12px}
+.kicker{font-family:var(--font-mono);font-size:12.5px;letter-spacing:.08em;color:var(--muted)}
+.hero .lead{font-size:17.5px;color:var(--ink)}
+.hero .lead b{color:var(--of)}
+.route{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:6px 2px 10px;margin-top:6px;scrollbar-width:thin}
+.route a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);text-decoration:none;font-size:14px;white-space:nowrap}
+.route a:hover{border-color:var(--ink)}
+.route a b{font-family:var(--font-display);font-weight:400;font-size:18px;line-height:1;color:var(--of)}
+.route i{flex:none;color:var(--line-strong);font-style:normal;font-size:13px}
+.scene{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-radius:14px;background:var(--card);border:1.5px dashed var(--line-strong);font-size:14.5px;max-width:54em}
+.scene b{flex:none;font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--of)}
+.sn{font-family:var(--font-display);color:var(--of);margin-right:.25em}
+figure{margin:0;display:flex;flex-direction:column;gap:10px}
+figcaption{font-size:14px;color:var(--muted);max-width:54em}
+.fig-box{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:12px;overflow-x:auto}
+.fig-box svg{display:block;width:100%;height:auto}
+.fig-box.wide svg{min-width:660px}
+.sv text{font-family:var(--font-body)}
+.t-h{font-size:15px;font-weight:700;fill:var(--ink)}
+.t-s{font-size:12.5px;fill:var(--ink)}
+.t-b{font-size:12.5px;font-weight:700;fill:var(--ink)}
+.t-xs{font-size:10.5px;fill:var(--muted)}
+.t-mono{font-family:var(--font-mono)!important;font-size:11.5px;fill:var(--ink)}
+.t-monos{font-family:var(--font-mono)!important;font-size:10.5px;fill:var(--muted)}
+.t-of{font-size:12px;font-weight:700;fill:var(--of)}
+.t-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.t-bk{font-size:12px;font-weight:700;fill:var(--bk)}
+.t-good{font-size:12px;font-weight:700;fill:var(--good)}
+.b-pd{fill:var(--pd-tint);stroke:var(--pd);stroke-width:2}
+.b-bk{fill:var(--bk-tint);stroke:var(--bk);stroke-width:2}
+.b-cg{fill:var(--cg-tint);stroke:var(--cg);stroke-width:2}
+.b-g2{fill:var(--g2-tint);stroke:var(--g2);stroke-width:2}
+.b-of{fill:var(--of-tint);stroke:var(--of);stroke-width:2}
+.b-warn{fill:var(--warn-tint);stroke:var(--warn);stroke-width:2}
+.b-good{fill:var(--good-tint);stroke:var(--good);stroke-width:2}
+.b-neu{fill:var(--neutral-tint);stroke:var(--neutral);stroke-width:1.5}
+.b-card{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.b-bad{fill:var(--bad-tint);stroke:var(--bad);stroke-width:2.5}
+.b-dash{fill:none;stroke:var(--line-strong);stroke-width:1.5;stroke-dasharray:5 4}
+.f-ink{fill:var(--ink)}
+.f-of{fill:var(--of)}
+.f-cg{fill:var(--cg)}
+.f-g2{fill:var(--g2)}
+.f-bad{fill:var(--bad)}
+.f-pd{fill:var(--pd)}
+.f-bk{fill:var(--bk)}
+.f-good{fill:var(--good)}
+.f-rn{fill:var(--rn)}
+.e-ink{stroke:var(--ink);stroke-width:2;fill:none}
+.e-mut{stroke:var(--line-strong);stroke-width:2;fill:none}
+.e-of{stroke:var(--of);stroke-width:2.5;fill:none}
+.e-good{stroke:var(--good);stroke-width:2.5;fill:none}
+.e-bad{stroke:var(--bad);stroke-width:2.5;fill:none}
+.pick-line{font-size:16px;padding:12px 16px;border-radius:14px;background:var(--bk);color:var(--on-accent)}
+.pick-line b{font-weight:700}
+.pick-line code{color:inherit}
+.codebox{border:1.5px solid var(--line);border-radius:16px;background:var(--code-bg);overflow:hidden;min-width:0}
+.code-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1.5px solid var(--line);font-size:14px;color:var(--muted)}
+.code-bar code,.code-bar b{color:var(--ink)}
+.code-bar .n{font-family:var(--font-display);font-size:17px;color:var(--of)}
+pre{margin:0;padding:14px 18px;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.65;color:var(--ink)}
+pre code{font-size:inherit}
+.cm{color:var(--muted)}
+pre.console{background:var(--console-bg);color:var(--console-dim)}
+pre.console b{color:var(--console-hi);font-weight:600}
+pre.console .w{color:var(--console-fg)}
+pre.console .r{color:#FF9B98}
+.tip{font-size:14px;color:var(--muted)}
+.tip code{color:var(--ink);overflow-wrap:anywhere}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.tag-real{font-family:var(--font-mono);font-size:11.5px;color:var(--bk);border:1.5px solid var(--bk);border-radius:999px;padding:0 7px;white-space:nowrap}
+.tbl-wrap{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card)}
+table.t{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;line-height:1.55}
+.t th,.t td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.t thead th{font-family:var(--font-display);font-weight:400;font-size:17px;white-space:nowrap}
+.t tbody th{font-weight:600;white-space:nowrap}
+.t tbody tr:last-child > *{border-bottom:0}
+.t td code{font-size:12.5px;overflow-wrap:anywhere}
+.t .bad{color:var(--bad);font-weight:700}
+.t .good{color:var(--good);font-weight:700}
+.design{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.design.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.pains{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14.5px}
+.pains li{position:relative;padding-left:28px}
+.pains li::before{content:"✕";position:absolute;left:0;top:0;width:22px;color:var(--bad);font-weight:700;text-align:center}
+.pains li.ok::before{content:"✓";color:var(--good)}
+.pains li.mid::before{content:"•";color:var(--muted)}
+.pains code{overflow-wrap:anywhere}
+.verdict{font-size:14.5px;padding:10px 14px;border-radius:12px;background:var(--rt);border:2px solid var(--rc)}
+.mech-h .sn{font-size:20px}
+.lab{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.presets button{text-align:left;border:1.5px solid var(--line-strong);border-radius:12px;background:var(--card);padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0}
+.presets button b{font-family:var(--font-display);font-weight:400;font-size:17px}
+.presets button span{font-size:12.5px;color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--of);background:var(--of-tint);box-shadow:inset 0 0 0 1px var(--of)}
+.guess{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:14px;background:var(--neutral-tint)}
+.guess > p{font-size:15px}
+.guess .opts{display:flex;flex-wrap:wrap;gap:8px}
+.guess .opts button{border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:6px 12px;font-size:14px;cursor:pointer;text-align:left}
+.guess .opts button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.guess .opts button.right{border-color:var(--good);background:var(--good-tint)}
+.guess .opts button.wrong{border-color:var(--bad);background:var(--bad-tint)}
+.guess .res{font-size:14.5px;padding:8px 12px;border-radius:10px;border-left:4px solid var(--rc);background:var(--card)}
+.ctl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.ctl{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ctl.span{grid-column:1 / -1}
+.ctl > .lbl{font-size:13px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.ctl > .lbl output{font-family:var(--font-mono);color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--of)}
+.tile{border-radius:12px;padding:8px 10px;background:var(--rt);border:1.5px solid var(--rc);display:flex;flex-direction:column;min-width:0}
+.tile small{font-size:12px;color:var(--muted)}
+.tile b{font-family:var(--font-display);font-weight:400;font-size:24px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile span{font-size:12px}
+.lab-res{font-size:14.5px;padding:10px 14px;border-radius:12px;border-left:5px solid var(--rc);background:var(--rt)}
+.lab-res ul{margin:6px 0 0;padding-left:1.2em;display:flex;flex-direction:column;gap:3px}
+.round{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.round .rb{font-family:var(--font-mono);font-size:12.5px;padding:3px 10px;border-radius:999px;background:var(--ink);color:var(--paper)}
+.pits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.pit{display:flex;flex-direction:column;gap:6px;padding:14px 16px;background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--bad);border-radius:14px;min-width:0}
+.pit > b{font-size:16px;line-height:1.45}
+.pit > b em{font-style:normal;font-family:var(--font-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.root{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1.5px solid var(--of);color:var(--ink);background:var(--of-tint);text-decoration:none;margin-left:6px;vertical-align:2px;white-space:nowrap}
+.root.env{border-color:var(--neutral);background:var(--neutral-tint)}
+.pit dl{margin:0;display:grid;grid-template-columns:2.6em minmax(0,1fr);gap:4px 8px;font-size:14px}
+.pit dt{color:var(--muted);font-size:13px;padding-top:1px}
+.pit dd{margin:0;min-width:0}
+.pit dd code{overflow-wrap:anywhere}
+.pit dd.fix{color:var(--good)}
+.pit dd.fix code{color:var(--ink)}
+.pit .seen{font-size:11.5px;font-family:var(--font-mono);color:var(--bk);margin-left:4px}
+.rules-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.faq{display:flex;flex-direction:column;gap:8px}
+details{background:var(--card);border:1.5px solid var(--line);border-radius:12px;padding:10px 14px}
+details summary{cursor:pointer;font-weight:600;font-size:15px}
+details[open] summary{margin-bottom:8px}
+details p,details li{font-size:14.5px}
+details p + p{margin-top:6px}
+details ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+details .from{font-size:13px;color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px;margin:0;padding:0;list-style:none}
+.next li{font-size:14.5px;padding-left:1.2em;position:relative}
+.next li::before{content:"↗";position:absolute;left:0;color:var(--of)}
+footer{font-size:13px;color:var(--muted);border-top:1.5px dashed var(--line-strong);padding-top:16px;display:flex;flex-direction:column;gap:6px}
+@media (max-width:980px){
+  .presets{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ctl-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .design.three{grid-template-columns:1fr}
+}
+@media (max-width:860px){
+  .two,.design,.pits,.rules-list,.next{grid-template-columns:1fr}
+}
+@media (max-width:520px){
+  .presets,.ctl-grid{grid-template-columns:1fr}
+  .tile b{font-size:21px}
+}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--line-strong);background:var(--card);border-radius:10px;padding:7px 14px;font-size:14.5px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.b-rn{fill:var(--rn-tint);stroke:var(--rn);stroke-width:2}
+.where{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--muted)}
+.know{background:var(--card);border:1.5px dashed var(--line-strong);border-radius:14px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;font-size:14.5px;max-width:54em}
+.know > b{font-family:var(--font-display);font-weight:400;font-size:17px;color:var(--muted)}
+.know ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px}
+table.t td.bad,table.t th.bad{color:var(--bad);font-weight:700}
+table.t td.good{color:var(--good);font-weight:700}
+.t tr.pick td,.t tr.pick th{background:var(--bk-tint)}
+.rootmark{display:inline-block;font-size:11.5px;font-family:var(--font-mono);padding:0 7px;border-radius:999px;border:1.5px solid var(--line-strong);color:var(--muted);text-decoration:none;margin-left:6px;white-space:nowrap}
+.rootmark:hover{border-color:var(--ink);color:var(--ink)}
+.s{color:var(--of)}
+.t-pd{font-size:12px;font-weight:700;fill:var(--pd)}
+.t-rn{font-size:12px;font-weight:700;fill:var(--rn)}
+.e-rn{stroke:var(--rn);stroke-width:2.5;fill:none}
+.e-bk{stroke:var(--bk);stroke-width:2.5;fill:none}
+.e-pd{stroke:var(--pd);stroke-width:2.5;fill:none}
+.e-cg{stroke:var(--cg);stroke-width:2;fill:none}
+.e-dash{stroke:var(--bad);stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+pre.out{background:var(--console-bg);color:var(--console-fg);margin:0;padding:12px 14px;font-size:12.5px;overflow-x:auto}
+.guess .opts button.skip{border-style:dashed;color:var(--muted)}
+#s6 h4{font-size:22px}
+.card{background:var(--card);border:2px solid var(--rc);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card h3{font-size:18px;color:var(--rc)}
+.card ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.card p{font-size:14.5px}
+.cap{font-size:13.5px;color:var(--muted)}
+.steps-out{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.steps-out li{display:grid;grid-template-columns:7.5em minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-radius:10px;border-left:5px solid var(--rc);background:var(--rt);font-size:14px}
+.steps-out li > b{font-weight:700;color:var(--rc)}
+.steps-out li > span{min-width:0}
+.steps-out li code{overflow-wrap:anywhere}
+@media (max-width:560px){
+  .steps-out li{grid-template-columns:minmax(0,1fr)}
+}
+.try{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--neutral);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;font-size:14.5px}
+.try h4{font-size:18px}
+.try code{overflow-wrap:anywhere}
+.stepper{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.stepper:focus-visible{outline:3px solid var(--pd);outline-offset:2px}
+.st-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.st-ctl .pos{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:auto}
+pre.console .hi{color:#7EE2A8;font-weight:600}
+pre.console .c{color:var(--console-dim);font-style:italic}
+pre.console{color:var(--console-fg)}
+.tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){
+  .tiles4{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+.e-cg{stroke:var(--cg);stroke-width:2.5;fill:none}
+.tag-real{display:inline-block;font-size:11px;font-family:var(--font-mono);padding:1px 6px;border-radius:6px;background:var(--good-tint);color:var(--good);border:1px solid var(--good);margin-left:6px;vertical-align:middle}
+.t td.bad{color:var(--bad)}
+.t td.fix{color:var(--good)}
+.pains li .note-p{display:block;font-size:13px}
+ol.steps-out{padding-left:1.5em;list-style:decimal}
+ol.steps-out li{display:list-item;line-height:1.75}
+.lab input[type=range]{width:100%;accent-color:var(--of)}
+.x-box{fill:var(--card);stroke:var(--line-strong);stroke-width:1.5}
+.x-zone{fill:none;stroke:var(--line-strong);stroke-width:1.3;stroke-dasharray:6 5}
+.x-zl{font-size:12px;fill:var(--muted)}
+.x-r{fill:var(--rt);stroke:var(--rc);stroke-width:1.8}
+.x-rs{fill:var(--card);stroke:var(--rc);stroke-width:1.8}
+.x-fill{fill:var(--rc)}
+.x-t{font-size:13px;fill:var(--ink)}
+.x-tb{font-size:13.5px;font-weight:700;fill:var(--ink)}
+.x-ts{font-size:11.5px;fill:var(--muted)}
+.x-tc{font-size:12px;font-weight:700;fill:var(--rc)}
+.x-mono{font-family:var(--font-mono);font-size:11px;fill:var(--ink)}
+.x-mono.dim{fill:var(--muted)}
+.x-mono.bad{fill:var(--bad);font-weight:600}
+.x-bad{font-size:12px;font-weight:700;fill:var(--bad)}
+.x-ed{stroke:var(--line-strong);stroke-width:1.6;fill:none}
+.x-ed.dash{stroke-dasharray:5 4}
+.x-ed.bad{stroke:var(--bad)}
+.x-ed.c{stroke:var(--rc);stroke-width:2}
+.x-mk{fill:var(--line-strong)}
+.x-mkb{fill:var(--bad)}
+.fig-box{overflow-x:auto;border:1.5px solid var(--line);border-radius:16px;background:var(--card);padding:10px}
+.fig-box > svg{min-width:760px;width:100%;display:block}
+.swipe{display:none;font-size:13px;color:var(--muted);margin:0 0 4px}
+@media (max-width:800px){
+  .swipe{display:block}
+}
+.ids{font-family:var(--font-mono);font-size:12.5px;overflow-wrap:anywhere}
+.ids .a{color:var(--cg);font-weight:600}
+.ids .b{color:var(--of);font-weight:600}
+.verdict-box{font-size:14.5px;padding:10px 14px;border-radius:12px;border:2px solid var(--rc);background:var(--rt)}
+.knob-row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end}
+.knob-row label{display:flex;flex-direction:column;gap:4px;font-size:13.5px;color:var(--muted)}
+.knob-row select{font:inherit;font-size:14px;padding:4px 8px;border-radius:8px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink)}
+@media (max-width:640px){
+  .ctl-grid{grid-template-columns:1fr!important}
+}
+.codebox pre .bad{color:var(--bad);font-weight:600}
+.codebox pre .ok{color:var(--good);font-weight:600}
+.st-cap{font-size:15px;padding:10px 14px;border-radius:12px;background:var(--rt);border-left:5px solid var(--rc);min-height:5.2em}
+.st-cap b.h{display:block;font-family:var(--font-display);font-weight:400;font-size:19px;color:var(--rc);margin-bottom:2px}
+.st-cap code{overflow-wrap:anywhere}
+.sv .fade{opacity:.25;transition:opacity .25s}
+.sv .lit{opacity:1;transition:opacity .25s}
+.sv .lit .x-rs,.sv .lit .x-r{stroke-width:3}
+/* ===== 本页特有的样式写在这一行下面 ===== */
+.knob-row label.ck{flex-direction:row;align-items:center;gap:6px;color:var(--ink);font-size:14px}
+.knob-row label.ck input{width:16px;height:16px;accent-color:var(--g2)}
+</style>
+<style id="tocx-css">
+/* tocx：顶栏里的跳转导航，由 learn skill 的 add_toc.py 注入（wrap.py 会自动调用）。
+   有六步路线条（main nav.route）的页面：把路线条复制进顶栏，滚动时高亮当前一步；窄屏只留序号。
+   没有路线条的老页面：顶栏右侧加“目录 ▾”，下拉列出各个 h2，滚动时高亮当前一节。
+   只用各页都有的颜色变量：--paper --card --ink --muted --line --line-strong。 */
+.tocx-steps{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;overflow-x:auto;scrollbar-width:none;max-width:100%}
+.tocx-steps::-webkit-scrollbar{display:none}
+.tocx-steps a{flex:none;display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1.5px solid transparent;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.4;white-space:nowrap}
+.tocx-steps a b{font-weight:700;color:var(--ink)}
+.tocx-steps a:hover{border-color:var(--line-strong);color:var(--ink)}
+.tocx-steps a.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.tocx-steps a.on b{color:var(--paper)}
+.tocx-dd{margin-left:auto;flex:none;position:relative}
+.tocx-btn{font:inherit;font-size:13.5px;line-height:1.4;padding:4px 12px;border-radius:999px;border:1.5px solid var(--line-strong);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+.tocx-btn:hover,.tocx-btn[aria-expanded="true"]{border-color:var(--ink)}
+.tocx-panel{position:absolute;right:0;top:calc(100% + 9px);width:min(360px,calc(100vw - 32px));max-height:min(70vh,560px);overflow:auto;background:var(--card);border:1.5px solid var(--line-strong);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:6px;z-index:40}
+.tocx-panel a{display:flex;gap:8px;padding:7px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:14px;line-height:1.45}
+.tocx-panel a i{flex:none;width:1.7em;font-style:normal;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;padding-top:2px}
+.tocx-panel a:hover{background:var(--line)}
+.tocx-panel a.on{background:var(--ink);color:var(--paper)}
+.tocx-panel a.on i{color:var(--paper)}
+.tocx-steps a:focus-visible,.tocx-btn:focus-visible,.tocx-panel a:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+@media (max-width:1180px){.tocx-steps a span{display:none}.tocx-steps a{padding:3px 8px}}
+.tb-in > span{white-space:nowrap}
+@media (max-width:640px){.tb-in > span:not(.tb-here){display:none}.tocx-on .tb-in > span{display:none}.tocx-steps{flex:0 1 auto;min-width:0}.tocx-steps a{padding:3px 6px}}
+</style>
+</head>
+<body>
+<nav class="topbar" aria-label="页面导航"><div class="tb-in"><a class="tb-home" href="../">← 返回目录</a><span aria-hidden="true">/</span><span>AI Agent 工程师</span><span aria-hidden="true">/</span><span class="tb-here">成本和延迟</span></div></nav>
+<main>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs><marker id="xa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="x-mk"/></marker></defs>
+</svg>
+
+<header class="hero">
+  <p class="kicker">前缀和历史缓存 · 工具结果瘦身 · 小模型分诊 · 并行工具 · 流式 · 一次调查的账本</p>
+  <h1>成本和延迟：缓存、模型路由、流式、并行</h1>
+  <p class="lead">一次调查 6 轮，每一轮都把前面所有的东西重发一遍，所以<b>钱几乎全花在重复发送的输入上</b>（基线里输入占九成）。精华是按“哪块最大先砍哪块”的顺序动手：<b>先让历史也命中缓存</b>，再<b>给工具结果瘦身</b>，再<b>让小模型先挡掉一部分</b>；<b>并行和流式只省时间，不省钱</b>。每砍一刀，瓶颈都会挪到下一个地方。</p>
+  <nav class="route" aria-label="六步学习路线">
+<a href="#s1"><b>①</b>要解决的问题</a><i aria-hidden="true">→</i>
+<a href="#s2"><b>②</b>不用它会怎样</a><i aria-hidden="true">→</i>
+<a href="#s3"><b>③</b>几种流派</a><i aria-hidden="true">→</i>
+<a href="#s4"><b>④</b>核心取舍</a><i aria-hidden="true">→</i>
+<a href="#s5"><b>⑤</b>套进场景</a><i aria-hidden="true">→</i>
+<a href="#s6"><b>⑥</b>反例和误用</a><i aria-hidden="true">→</i>
+<a href="#loop"><b>↺</b>回到⑤</a>
+</nav>
+  <p class="where"><span>全景：<a href="pano-10-promo-night.html#s-10">大促夜里 1000 个告警同时涌进来 · 第 ⑤、⑦、⑩ 站</a></span><span>地图：<a href="roadmap.html#st10">站 10 · 成本和延迟</a></span><span>深度：懂设计</span></p>
+  <p class="scene"><b>这一页的位置</b><span>站 10 第 5 个下钻知识点。站 03 的 <a href="api-prompt-cache-batch.html">提示词缓存</a> 讲了缓存本身怎么计费；这一页把一次调查从头到尾记一本账，看几种做法叠起来各省了什么。全景里“每轮 9k、并发 12”是简化，这一页按历史真实增长来算。</span></p>
+</header>
+
+<section id="s1" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">①</span>要解决的问题：87 个调查，钱和时间都花在哪</h2></div>
+  <p>在全景第 ⑤、⑦、⑩ 站，这一步要解决：第二天看板上要答“这一夜花了多少、花在哪、能不能更快”。先把一次调查拆开：系统提示和工具说明 4k、告警 500，每轮工具结果追加进历史（日志 3k、GC 1.5k、线程栈 6k、知识库 1k、建单 200），下一轮把全部再发一遍。</p>
+  <figure>
+    <p class="swipe" aria-hidden="true">图比屏幕宽，左右滑动看全图 →</p>
+    <div class="fig-box">
+      <svg class="sv" viewBox="0 0 960 250" role="img" aria-label="基线的 6 轮输入：4500、7650、9300、15450、16600、16950 token，每轮都包含同样的 4000 固定前缀和 500 告警，其余是越来越长的历史。6 轮合计 70450 输入、1350 输出，约 0.23 美元">
+        <text class="x-zl" x="12" y="18">每一轮发给模型的输入（token）</text>
+        <g data-role="pd"><rect class="x-r" x="120" y="30" width="106" height="20" rx="3"/></g><g data-role="of"><rect class="x-r" x="226" y="30" width="13" height="20" rx="3"/></g>
+        <text class="x-ts" x="12" y="45">第 1 轮</text><text class="x-mono" x="248" y="45">4,500</text>
+        <g data-role="pd"><rect class="x-r" x="120" y="58" width="106" height="20" rx="3"/></g><g data-role="of"><rect class="x-r" x="226" y="58" width="13" height="20" rx="3"/></g><g data-role="g2"><rect class="x-r" x="239" y="58" width="84" height="20" rx="3"/></g>
+        <text class="x-ts" x="12" y="73">第 2 轮</text><text class="x-mono" x="332" y="73">7,650</text>
+        <g data-role="pd"><rect class="x-r" x="120" y="86" width="106" height="20" rx="3"/></g><g data-role="of"><rect class="x-r" x="226" y="86" width="13" height="20" rx="3"/></g><g data-role="g2"><rect class="x-r" x="239" y="86" width="128" height="20" rx="3"/></g>
+        <text class="x-ts" x="12" y="101">第 3 轮</text><text class="x-mono" x="376" y="101">9,300</text>
+        <g data-role="pd"><rect class="x-r" x="120" y="114" width="106" height="20" rx="3"/></g><g data-role="of"><rect class="x-r" x="226" y="114" width="13" height="20" rx="3"/></g><g data-role="g2"><rect class="x-r" x="239" y="114" width="291" height="20" rx="3"/></g>
+        <text class="x-ts" x="12" y="129">第 4 轮</text><text class="x-mono" x="539" y="129">15,450（线程栈 6k 进来了）</text>
+        <g data-role="pd"><rect class="x-r" x="120" y="142" width="106" height="20" rx="3"/></g><g data-role="of"><rect class="x-r" x="226" y="142" width="13" height="20" rx="3"/></g><g data-role="g2"><rect class="x-r" x="239" y="142" width="321" height="20" rx="3"/></g>
+        <text class="x-ts" x="12" y="157">第 5 轮</text><text class="x-mono" x="569" y="157">16,600</text>
+        <g data-role="pd"><rect class="x-r" x="120" y="170" width="106" height="20" rx="3"/></g><g data-role="of"><rect class="x-r" x="226" y="170" width="13" height="20" rx="3"/></g><g data-role="g2"><rect class="x-r" x="239" y="170" width="330" height="20" rx="3"/></g>
+        <text class="x-ts" x="12" y="185">第 6 轮</text><text class="x-mono" x="578" y="185">16,950 → 写报告</text>
+        <g data-role="pd"><rect class="x-r" x="120" y="212" width="14" height="12" rx="2"/></g><text class="x-ts" x="140" y="222">固定前缀 4k（系统提示 + 工具说明）</text>
+        <g data-role="of"><rect class="x-r" x="360" y="212" width="14" height="12" rx="2"/></g><text class="x-ts" x="380" y="222">告警 500</text>
+        <g data-role="g2"><rect class="x-r" x="460" y="212" width="14" height="12" rx="2"/></g><text class="x-ts" x="480" y="222">历史：前几轮的工具调用和结果</text>
+        <text class="x-ts" x="120" y="244">6 轮合计输入 70,450、输出 1,350：同一段 4k 前缀发了 6 遍，第 1 轮的日志在后面又被发了 5 遍。</text>
+      </svg>
+    </div>
+    <figcaption>柱长按 token 数等比例画。数字来自 ⑤ 的账本（按假设的轨迹计算，不是实测）。</figcaption>
+  </figure>
+  <div class="tiles4">
+    <div class="tile" data-role="bad"><small>基线每个调查</small><b>$0.23</b><span>87 个约 $20</span></div>
+    <div class="tile" data-role="pd"><small>其中输入</small><b>91%</b><span>$0.211；输出只有 $0.020</span></div>
+    <div class="tile" data-role="of"><small>一个调查要</small><b>58 秒</b><span>报告第一个字要等 16.8 秒</span></div>
+    <div class="tile" data-role="other"><small>额度能撑</small><b>4 个</b><span>同时跑（36 万 ITPM）</span></div>
+  </div>
+</section>
+
+<section id="s2" data-role="other">
+  <div class="mech-h"><h2><span class="sn">②</span>不用它会怎样：凭感觉省钱</h2></div>
+  <p>最常见的三种“省钱直觉”，拿这本账对一下：</p>
+  <ul class="pains">
+    <li class="bad">“把 <code>max_tokens</code> 调小”：输出一共才 $0.020，占 9%；而且额度只按真生成的输出算，调小只会把报告截断。</li>
+    <li class="bad">“整个换成便宜模型”：单价降到三分之一，可小模型排障常常要多绕几轮，每多一轮就把越来越长的历史再发一遍；结论还可能变差，要评测才知道。</li>
+    <li class="bad">“开流式省时间”：报告的第一个字确实从 16.8 秒提前到 4.8 秒（剩下的 4.8 秒是读那 1.7 万输入的时间，缓存都开了以后是 0.7 秒），可钱一分没少，额度也一点没省，58 秒的调查还是 58 秒。</li>
+    <li class="ok">真正的大头是“每轮重发的历史”：6 轮 7 万输入里，只有 1.3 万是这一轮新加的，其余 5.75 万都是前面发过的。让它们命中缓存，是一刀砍在最大的那块上。</li>
+  </ul>
+  <div class="verdict" data-role="bad"><b>不懂精华时的典型误用</b>：没看账本就动手，先在看得见的地方（输出长度、单价）抠，最大的那块（重复发送的历史）一动没动。</div>
+</section>
+
+<section id="s3" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">③</span>几种流派：每个手段省的是什么</h2></div>
+  <div class="tbl-wrap">
+    <table class="t">
+      <thead><tr><th>手段</th><th>省钱</th><th>省额度</th><th>省时间</th><th>代价</th></tr></thead>
+      <tbody>
+        <tr class="pick"><th><b>缓存：前缀和历史</b></th><td class="good">能：读按 0.1 倍</td><td class="good">能：读的不算 ITPM</td><td class="good">能：少算一遍</td><td>前缀要一字不差；新写的部分按 1.25 倍</td></tr>
+        <tr class="pick"><th><b>工具结果瘦身</b></th><td class="good">能</td><td class="good">能</td><td>一点</td><td class="bad">砍多了丢证据，结论变错</td></tr>
+        <tr class="pick"><th><b>小模型先分诊</b>（级联）</th><td class="good">能</td><td class="good">能：用的是小模型自己的额度</td><td class="good">能：挡掉的不用深查</td><td class="bad">漏判；要评测，P0 不走这条</td></tr>
+        <tr><th>上下文压缩</th><td>能：长调查才明显</td><td>能</td><td>一点</td><td>压缩本身要调一次模型；可能丢细节（站 05 的 <a href="context-compaction.html">上下文压缩</a>）</td></tr>
+        <tr class="pick"><th><b>只读工具并行</b></th><td>一点：少两轮</td><td class="bad">不能：吞吐由额度定</td><td class="good">能：工具时间取最长的那个</td><td>只能并行互不依赖的只读工具</td></tr>
+        <tr class="pick"><th><b>流式</b></th><td class="bad">不能</td><td class="bad">不能</td><td class="good">只省“看到第一个字”的时间</td><td>界面要会一段段地显示</td></tr>
+        <tr><th>批处理接口</th><td class="good">能：五折</td><td class="good">能：有自己的额度</td><td class="bad">不能：最长等 24 小时</td><td>只适合不急的活（复盘、打标签）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="pick-line"><b>本页按顺序叠五刀</b>：历史缓存 → 工具结果瘦身 → 只读工具并行 → 小模型先分诊 → 报告流式。顺序的规则是“先砍最大、最不伤质量的”：缓存不改变模型看到的内容，零风险；瘦身和分诊会改变模型看到的东西，要先评测；并行和流式只动时间。</p>
+</section>
+
+<section id="s4" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">④</span>核心取舍：先砍最大的那块，再看瓶颈挪到哪</h2></div>
+  <div class="know">
+    <b>先知道这些</b>
+    <ul>
+      <li><b>前缀缓存怎么计费</b>：命中的部分按输入单价的一成左右（不同模型 5%～10%），新写进缓存的按 1.25 倍；命中的不算 ITPM。站 03：<a href="api-prompt-cache-batch.html">提示词缓存</a>。本页按 0.1 倍算。</li>
+      <li><b>一轮里调好几个工具</b>：模型可以在一次回复里提议多个 <code>tool_use</code>，你的代码可以同时执行。站 04：<a href="parallel-tool-calls.html">并行工具调用</a>。</li>
+      <li><b>额度按模型类别给</b>：小模型和主模型各有一份（<a href="prod-rate-limit.html">限流和配额</a>）。</li>
+    </ul>
+  </div>
+
+  <h3 id="m-where">机制 1 · 钱花在哪：每一轮都把历史重发一遍</h3>
+  <p>模型不记得上一轮（站 03 的比方：无状态 HTTP + session），所以第 n 轮的输入 = 前缀 + 告警 + 前 n−1 轮的全部历史。轮数越多，越后面的轮越贵，总输入大约随轮数的平方增长。基线 6 轮里，最后两轮各要 1.6 万多，是第一轮的 3.7 倍。这决定了两件事：<b>缓存和瘦身都要盯着历史</b>，以及<b>少一轮比单价便宜一点更值钱</b>。</p>
+
+  <h3 id="m-cache">机制 2 · 让历史也命中缓存：断点跟着往后挪</h3>
+  <p>只缓存固定前缀，每轮省的只是那 4k（基线 $0.23 → $0.17）。把缓存断点打在<b>每次请求的末尾</b>，下一轮请求的开头就和这一轮一字不差，前面整段都能读缓存，只有这一轮新加的工具调用和结果要新写。6 轮里读缓存 5.75 万、新写 1.3 万，每个调查降到 $0.086；更要紧的是计入 ITPM 的从 7 万降到 1.3 万，同样的额度能同时跑的调查从 6 个变成 20 个。</p>
+
+  <h3 id="m-trim">机制 3 · 最大的一块是工具结果</h3>
+  <p>开了历史缓存以后，剩下要新算的几乎全是工具结果：线程栈 6k、日志 3k。模型真正要的往往只是“阻塞在哪几个线程、哪几行报错”。在工具那一侧就把结果裁到需要的部分（线程栈只留阻塞的栈顶 1.5k，日志只留报错前后 1k），每个调查再降到 $0.053，计入 ITPM 的只剩 5.75k。代价是<b>可能砍掉了证据</b>：裁剪规则要跟着评测集一起改，原始结果存起来、在报告里留引用，人要看时能翻到。</p>
+
+  <h3 id="m-route">机制 4 · 小模型先分诊：便宜的先挡一刀</h3>
+  <p>每个事件先让小模型读一遍告警（一轮，单价是主模型的三分之一）：已知的老问题、P2 里“重启就好”的那类，直接给结论，不进深查。假设挡掉四成，平均每个事件降到 $0.035。两点要守住：<b>P0 一律深查</b>，分诊只用来给 P1、P2 减负；<b>分诊错了的代价</b>要在评测里量出来（站 09 的 <a href="eval-dataset.html">评测集</a>）。另外，分诊用的是小模型自己那份额度，主模型的额度全留给深查。</p>
+
+  <h3 id="m-time">机制 5 · 并行和流式：只省时间</h3>
+  <ul class="pains">
+    <li class="mid"><b>并行</b>：查日志、解析 GC、看线程栈互不依赖，让模型在第一轮一次提议三个，worker 同时执行，6 轮变 4 轮，工具时间从 6 秒变 2 秒，一个调查从 42 秒降到 36.8 秒。但额度用量几乎不变：每分钟能做完的调查数（吞吐）还是由额度定，算下来 52.8 对 52.1，没变。</li>
+    <li class="mid"><b>流式</b>：报告 600 token 要生成 12 秒；不流式，值班的人要等整篇生成完才看到第一个字（缓存都开着时 12.7 秒），流式只要 0.7 秒。没开缓存时流式的首字是 4.8 秒：要先把 1.7 万输入读完。钱、额度、总时长一样没动。</li>
+  </ul>
+
+  <div class="lab" data-role="g2" id="lab">
+    <h3 style="margin:0">实验台：一刀一刀叠上去</h3>
+    <div class="guess" id="lab-guess">
+      <p>先猜：在基线上只打开“报告流式”，每个调查的钱会少多少？</p>
+      <div class="opts">
+        <button type="button" data-g="a">一分没少</button>
+        <button type="button" data-g="b">少一成左右</button>
+        <button type="button" data-g="c">少一半</button>
+      </div>
+      <p class="res" id="lab-guess-res" hidden></p>
+    </div>
+    <div class="knob-row" id="lab-knobs">
+      <label class="ck"><input type="checkbox" id="k-prefix"><span>前缀缓存</span></label>
+      <label class="ck"><input type="checkbox" id="k-history"><span>历史也缓存</span></label>
+      <label class="ck"><input type="checkbox" id="k-trim"><span>工具结果瘦身</span></label>
+      <label class="ck"><input type="checkbox" id="k-parallel"><span>只读工具并行</span></label>
+      <label class="ck"><input type="checkbox" id="k-triage"><span>小模型先分诊</span></label>
+      <label class="ck"><input type="checkbox" id="k-stream"><span>报告流式</span></label>
+    </div>
+    <div class="tiles4" id="lab-tiles"></div>
+    <p class="verdict-box" data-role="g2" id="lab-sum"></p>
+    <p class="tip">和 ⑤ 的 <code>ledger.py</code> 是同一套算法（按假设的 token 轨迹、单价和速度计算，不是实测）。“历史也缓存”要和“前缀缓存”一起开才有意义，这里勾上它会自动把前缀缓存也算进去。并发上限只算主模型：自己的桶 36 万 ITPM、7.2 万 OTPM（供应商额度的九成）。</p>
+  </div>
+
+  <h3 id="m-design">为什么这样设计</h3>
+  <div class="design">
+    <div class="card" data-role="pd"><h3>先改结构：缓存、瘦身、少几轮</h3><ul class="pains">
+      <li class="ok">砍在最大的那块上：重复发送的历史和大块的工具结果，占了基线的大头。</li>
+      <li class="ok">缓存不改变模型看到的内容，质量零风险；同时把额度也省了，并发从 6 个变成 20 个。</li>
+      <li class="mid">代价：前缀要守规矩（一字不差、变量放后面）；瘦身要跟着评测改。</li>
+    </ul></div>
+    <div class="card" data-role="other"><h3>先换便宜模型</h3><ul class="pains">
+      <li class="ok">改一行配置，单价立刻降到三分之一。</li>
+      <li class="bad">结构没变，每轮照样重发历史；小模型多绕一两轮，省下的单价又被轮数吃回去。</li>
+      <li class="bad">结论质量变了，要整套重新评测；P0 也跟着降级。</li>
+    </ul></div>
+  </div>
+  <div class="verdict" data-role="pd"><b>决定胜负的约束</b>：模型是无状态的，每轮都要把历史重发一遍，所以输入的量随轮数快速增长，远大于输出；而供应商对“读缓存”既打折又不算额度。这两条决定了“先缓存、再瘦身、再少轮数”的顺序，换模型放在最后、并且要评测。</div>
+
+  <div class="two">
+    <div class="codebox"><div class="code-bar"><b>断点打在请求末尾</b><span>细节放到 ⑥</span></div><pre><code>def with_cache_tail(messages):
+    <span class="cm"># 最后一条消息的最后一个块打断点：下一轮开头和这一轮一字不差</span>
+    last = messages[-1]
+    if isinstance(last["content"], str):
+        last["content"] = [{"type": "text", "text": last["content"]}]
+    last["content"][-1]["cache_control"] = {"type": "ephemeral"}
+    return messages
+
+resp = client.messages.create(
+    model="investigate", max_tokens=1024,
+    system=[{"type": "text", "text": SOP, "cache_control": {"type": "ephemeral"}}],
+    tools=TOOLS,                       <span class="cm"># 工具列表顺序固定，别每次排序不同</span>
+    messages=with_cache_tail(history))</code></pre></div>
+    <div class="card" data-role="of"><h4>Java 老朋友：PreparedStatement 和分页</h4><p><b>像</b>：地图上的比方“提示词缓存 ≈ PreparedStatement 复用”，相同的部分不再重新算；“少一轮”像把 N+1 查询改成一次 IN 查询，省的是往返次数。</p><p><b>不像</b>：PreparedStatement 认的是 SQL 模板，参数随便变；缓存认的是<b>一字不差的前缀</b>，前面改一个字，后面全部失效。另外数据库查一次不会越查越贵，这里每多一轮，输入都比上一轮更长。</p></div>
+  </div>
+</section>
+
+<section id="s5" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑤</span>套进场景：给一次调查记一本账，叠五刀</h2></div>
+  <p>设计类的题目没法“跑一下看结果”，能做的是拿一个具体系统，按几种做法各推演一遍。<code>ledger.py</code> 按全景的假设（单价：主模型输入每百万 $3、输出 $15，小模型 $1、$5；生成 50 token/秒；没缓存的输入每秒算 4000 token；一个工具 2 秒）和缓存的计费规则，把每一轮的 token、钱、秒数逐项算出来。</p>
+  <div class="codebox"><div class="code-bar"><span class="n">⑤</span><b>ledger.py · 每一轮怎么记账（节选）</b><a href="https://github.com/archeu/study-labs/tree/main/agent/prod-cost-latency">完整代码 →</a></div><pre><code>for tools in plan(o):                       <span class="cm"># 并行时 4 轮，否则 6 轮</span>
+    total_in = PREFIX + ALERT + history     <span class="cm"># 每轮都重发全部历史</span>
+    if o.history_cache:                     <span class="cm"># 断点在末尾：读上一轮写下的，新写这一轮加的</span>
+        read = PREFIX if cached_upto == 0 else cached_upto
+        write = total_in - read; cached_upto = total_in
+    elif o.prefix_cache:
+        read, write = PREFIX, 0
+    fresh = total_in - read - write
+    out = REPORT_OUT if not tools else CALL_OUT * len(tools)
+    usd = (fresh*pi + write*pi*1.25 + read*pi*0.1 + out*po) / 1e6
+    b.itpm += fresh + write                 <span class="cm"># 计入 ITPM 的：没命中的 + 新写的</span>
+    history += out + sum(sizes[t] for t in tools)</code></pre></div>
+  <ol class="steps-out">
+    <li><b>1 跑</b><span>在 study-labs 的 <code>agent/</code> 下 <code>uv run python prod-cost-latency/ledger.py</code>，不到一秒。</span></li>
+    <li><b>2 改</b><span>开头那几行常量就是全部假设：换成你自己的单价、工具结果大小、轮数，再跑一遍。</span></li>
+  </ol>
+  <div class="codebox"><div class="code-bar"><b>ledger.py 的输出</b><span>按计费规则计算，不是实测 · 每一行在上一行基础上再加一刀</span></div><pre class="console">做法                   计入ITPM  缓存读  输出 调用  每个事件  87个   耗时  报告首字  并发上限    每分钟做完
+<span class="r">✗</span> 0 基线                  70450       0  1350    6  $0.2316 $20.15  58.2s  16.8s    4（ITPM）    4.1
+  1 + 前缀缓存             46450   24000  1350    6  $0.1668 $14.51  52.2s  15.8s    6（ITPM）    6.9
+  2 + 历史也缓存           12950   57500  1350    6  $0.0861  $7.49  43.8s  12.7s   20（ITPM）   27.4
+  3 + 工具结果瘦身          5750   38400  1350    6  $0.0533  $4.64  42.0s  12.7s   37（OTPM）   52.8
+  4 + 只读工具并行          5750   26150  1350    4  $0.0497  $4.32  36.8s  12.7s   32（OTPM）   52.1
+  5 + 小模型先分诊          7950   15690   960  3.4  $0.0350  $3.05  26.8s  12.7s   32（OTPM）   86.9
+<span class="hi">✓</span> 6 + 报告流式            7950   15690   960  3.4  $0.0350  $3.05  26.8s   0.7s   32（OTPM）   86.9
+<span class="c">第 5、6 行的“计入 ITPM”是两个模型合计（分诊那 4500 算在小模型名下）；并发上限只算主模型</span></pre></div>
+  <div class="lab-res" data-role="pd"><b>读出来的结论</b><ul>
+    <li>最大的一刀是“历史也缓存”：钱减半（$0.167 → $0.086），计入 ITPM 的降到原来的五分之一多一点，能同时跑的调查从 6 个变成 20 个。</li>
+    <li>瘦身之后，瓶颈从 ITPM 挪到了 OTPM：输入省到每个调查只有 5.75k，输出 1350 没变，这时候报告写得长不长才开始要紧（⑥ 坑 8）。</li>
+    <li>并行让单个调查快了 5 秒，每分钟做完的数量却没变（52.8 对 52.1）：吞吐由额度定，不由 worker 快慢定。</li>
+    <li>流式只改了一列：报告首字从 12.7 秒变成 0.7 秒，其他数字一个没动。</li>
+    <li>五刀叠完，87 个事件从 $20 降到 $3，每个调查的平均耗时从 58 秒降到 27 秒。全景页的 $11.6 用的是“每轮平均 9k、只缓存前缀”的简化，落在这张表的第 1、2 行之间。</li>
+  </ul></div>
+  <div class="verdict" data-role="done"><b>到这里已经能交差了</b>：一本按轮记的账，知道钱花在哪、哪一刀砍下去省多少、瓶颈挪到了哪。<br><b>已知还没处理的细节</b>：前缀里混进变量（<a href="#p-prefixvar">坑 1</a>）、工具列表顺序在变（<a href="#p-toolorder">坑 2</a>）、瘦身砍掉证据（<a href="#p-trimloss">坑 3</a>）、分诊漏判（<a href="#p-triagemiss">坑 4</a>）、输出变成瓶颈（<a href="#p-output">坑 8</a>）。</div>
+</section>
+
+<section id="s6" data-role="pd">
+  <div class="mech-h"><h2><span class="sn">⑥</span>反例和误用</h2></div>
+  <h3>第一圈 · 注意事项</h3>
+  <div class="pits">
+    <div class="pit" id="p-prefixvar"><b><em>1</em>前缀里混进了变量<a class="rootmark" href="#m-cache">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>开了缓存，<code>cache_read_input_tokens</code> 一直是 0，每次还多付 1.25 倍的写入费。</dd><dt>根源</dt><dd>缓存只认一字不差的前缀；系统提示开头的时间、请求号、随机排序的示例，每次都不一样。</dd><dt>做法</dt><dd class="fix">变的东西一律放到最后一个断点后面；看板盯着缓存命中率。站 03 有实测：<a href="api-prompt-cache-batch.html">提示词缓存</a>。</dd></dl>
+    </div>
+    <div class="pit" id="p-toolorder"><b><em>2</em>工具列表的顺序在变<a class="rootmark" href="#m-cache">← ④ 机制 2</a></b>
+      <dl><dt>现象</dt><dd>同一个团队的调查，命中率时高时低。</dd><dt>根源</dt><dd>工具说明也在前缀里；代码里用集合拼工具列表，或者网关按白名单过滤时顺序不固定，前缀就变了。</dd><dt>做法</dt><dd class="fix">工具列表按名字排好、固定下来；不同团队的白名单不同，就接受“每个团队一份前缀”，但同一个团队内部要稳定。</dd></dl>
+    </div>
+    <div class="pit" id="p-trimloss"><b><em>3</em>瘦身砍掉了证据<a class="rootmark" href="#m-trim">← ④ 机制 3</a></b>
+      <dl><dt>现象</dt><dd>省了钱，报告里的结论却从“连接池满了”变成了“像是 GC”，因为关键那几行日志被裁掉了。</dd><dt>根源</dt><dd>裁剪规则改变了模型看到的东西，和换提示词一样会改结果。</dd><dt>做法</dt><dd class="fix">裁剪规则进版本管理、过评测再上线；原始结果存起来，在工具结果里留引用（“完整日志见 log://9527”），模型需要时可以再调一次工具去取。</dd></dl>
+    </div>
+    <div class="pit" id="p-triagemiss"><b><em>4</em>小模型分诊漏判<a class="rootmark" href="#m-route">← ④ 机制 4</a></b>
+      <dl><dt>现象</dt><dd>一个看起来像“老问题”的 P1，其实是新故障，分诊直接给了“重启就好”。</dd><dt>根源</dt><dd>级联省钱的前提是“挡掉的那部分判断对”，这只能靠评测量出来。</dd><dt>做法</dt><dd class="fix">P0 不走分诊；分诊结论里带置信度和依据，低于阈值就升级深查；每周抽查被挡掉的事件。</dd></dl>
+    </div>
+    <div class="pit" id="p-streamcost"><b><em>5</em>以为流式能省钱或省额度<a class="rootmark" href="#m-time">← ④ 机制 5</a></b>
+      <dl><dt>现象</dt><dd>开了流式，看板上的花费和 429 一点没变。</dd><dt>根源</dt><dd>流式只是把同样的输出分段送回来，token 一个不少。</dd><dt>做法</dt><dd class="fix">流式是给人看的：报告、对话界面用；后台 worker 之间的调用不需要流式（除非要尽早解析工具调用）。</dd></dl>
+    </div>
+    <div class="pit" id="p-parwrite"><b><em>6</em>把写工具也并行了<a class="rootmark" href="#m-time">← ④ 机制 5</a></b>
+      <dl><dt>现象</dt><dd>“建工单”和“发通知”同时执行，通知里引用的工单号还不存在。</dd><dt>根源</dt><dd>并行只对互不依赖的操作成立，写操作之间往往有先后。</dd><dt>做法</dt><dd class="fix">只并行只读工具；写工具按模型给的顺序串行执行，并且要过人工审批（站 08）。</dd></dl>
+    </div>
+    <div class="pit" id="p-cheaprounds"><b><em>7</em>换了便宜模型，反而更贵<a class="rootmark" href="#m-where">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>主模型换成小模型，单价是三分之一，每个调查的花费却只降了一点，有的还更贵。</dd><dt>根源</dt><dd>小模型多绕了几轮；每多一轮，就把越来越长的历史再发一遍。</dd><dt>做法</dt><dd class="fix">比较模型时看“每个调查的总花费和成功率”，不看单价；轮数进看板。</dd></dl>
+    </div>
+    <div class="pit" id="p-output"><b><em>8</em>输入省下来以后，输出成了瓶颈<a class="rootmark" href="#m-where">← ④ 机制 1</a></b>
+      <dl><dt>现象</dt><dd>缓存和瘦身都做了，并发却卡在三十几个上不去，429 说的是输出 token。</dd><dt>根源</dt><dd>输入砍到 5.75k 以后，输出的 1350 成了每分钟用得最快的那份额度（⑤ 第 3 行起，瓶颈从 ITPM 换成了 OTPM）。</dd><dt>做法</dt><dd class="fix">报告规定结构和长度（“结论一句、证据三条”）；中间轮的工具调用别让模型写长篇推理；需要时再申请提高输出额度。</dd></dl>
+    </div>
+  </div>
+
+  <h3>第二圈 · 使用规范</h3>
+  <ul class="rules-list">
+    <li><b>先记账，再动手</b>：每次调用把 <code>usage</code> 的四个数（输入、缓存读、缓存写、输出）记下来，按调查汇总。防凭感觉砍错地方。</li>
+    <li><b>不变的放前面、变的放最后，断点跟着请求末尾走</b>：防缓存白开。</li>
+    <li><b>工具结果在工具那一侧裁剪，原文留引用</b>：防上下文被大块结果撑爆，也防证据找不回来。</li>
+    <li><b>分诊只给 P1、P2 用，带置信度</b>：防省钱省到 P0 头上。</li>
+    <li><b>只并行只读工具</b>：防写操作乱序。</li>
+    <li><b>比模型看“每个调查的总花费 + 成功率”</b>：防只看单价。</li>
+  </ul>
+
+  <h3>第三圈 · 优化和深处</h3>
+  <div class="two">
+    <div class="card" data-role="of"><h4>缓存的 5 分钟和 1 小时</h4><p>5 分钟档每次命中都会续期，大促夜流量不断，一直是热的；白天告警稀疏、两次调查间隔十几分钟，就该用 1 小时档（写入 2 倍，命中两次以上才划算）。站 03 那页有一张对比表。</p></div>
+    <div class="card" data-role="bk"><h4>调查太长时：压缩，而不是一直缓存</h4><p>历史缓存让每轮只为新内容付全价，但历史本身还在变长，迟早顶到上下文窗口。轮数到十几轮时，把前面的工具结果压成摘要（站 05 的 <a href="context-compaction.html">上下文压缩</a>），代价是压缩那一次的调用和丢细节的风险。</p></div>
+    <div class="card" data-role="pd"><h4>给每个调查一个 token 预算</h4><p>和截止时间一样，每个事件给一个 token 上限（P2 少、P0 多），用完就停下写报告。它同时是成本的护栏和死循环的护栏（站 04 的 <a href="agent-stop-conditions.html">停止条件</a>）。</p></div>
+    <div class="card" data-role="g2"><h4>不急的活走批处理</h4><p>第二天给 87 份报告打标签、重跑评测，交给批处理接口：价格减半，有自己的额度，不和实时的调查抢。</p></div>
+  </div>
+
+  <h3>下一圈</h3>
+  <ul class="next">
+    <li>用真实的 <code>usage</code> 替换账本里的假设：从网关的审计日志（上一页）里汇总出每个调查的真实轨迹。</li>
+    <li>级联的阈值怎么定：用评测集画“挡掉比例 × 漏判率”曲线，挑一个点。</li>
+    <li>投机执行：模型还在写第一个工具调用时，先预取最可能要的日志。</li>
+    <li>按团队的成本看板：把这本账接进第 ⑩ 站，按天出“每个团队每个调查多少钱”。</li>
+  </ul>
+</section>
+
+<section id="loop" data-role="other">
+  <div class="mech-h"><h2><span class="sn">↺</span>回到⑤：改一改</h2></div>
+  <ol class="rules-list">
+    <li><b>前缀里加时间</b>：在 <code>ledger.py</code> 里让历史缓存第一轮读不到前缀（<code>read = 0</code>），看第 2 行的钱和并发变了多少。（坑 1）</li>
+    <li><b>分诊挡得更多</b>：<code>TRIAGE_STOP</code> 从 0.4 改成 0.7，钱降了多少？如果漏判率跟着从 2% 涨到 10%，值不值？（坑 4）</li>
+    <li><b>报告写长了</b>：<code>REPORT_OUT</code> 从 600 改成 2000，看哪一行开始瓶颈变成 OTPM、并发掉到多少。（坑 8）</li>
+    <li><b>更长的调查</b>：把 <code>plan()</code> 改成 12 轮（每个工具调两次），比较基线和“历史也缓存”的差距是变大还是变小。</li>
+  </ol>
+  <h3>自测</h3>
+  <div class="faq">
+    <details><summary>1. 用一句话说出这一页的精华</summary><p>每轮都重发历史，所以钱主要花在重复的输入上；先让历史命中缓存，再给工具结果瘦身、让小模型先挡一部分；并行和流式只省时间；每砍一刀都看瓶颈挪到了哪。</p></details>
+    <details><summary>2. 为什么调小 max_tokens 基本省不了钱？</summary><p>基线里输出只占 9%；而且额度只按真生成的输出算，max_tokens 只是上限，调小只会截断回答。</p></details>
+    <details><summary>3. 为什么“历史也缓存”比“只缓存前缀”省得多？</summary><p>到了后几轮，前缀只占输入的四分之一，大头是前几轮的历史；断点跟着请求末尾走，下一轮就能把前面整段都读缓存，只为这一轮新加的部分付全价。</p><p class="from">从 ④ 机制 1、2 推出。</p></details>
+    <details><summary>4. 预测：只读工具并行以后，87 个事件能更快做完吗？</summary><p>单个调查快了 5 秒，但每分钟能做完的数量几乎不变，因为吞吐由额度定。只有额度还有富余、瓶颈在 worker 数或工具时间时，并行才会让整夜更快做完。</p><p class="from">从 ④ 机制 5 和上一页“并发上限 = 额度 ÷ 用量”推出。</p></details>
+    <details><summary>5. 预测：开了历史缓存，但调查之间间隔 10 分钟、5 分钟档，第 1 轮的前缀能命中吗？</summary><p>不能：5 分钟没人用就过期了，第 1 轮的前缀要重新写；但同一个调查的第 2～6 轮相隔只有几秒，照样命中。所以稀疏流量下主要损失的是那 4k 前缀，可以换 1 小时档。</p><p class="from">从 ④ 机制 2 和站 03 的缓存规则推出。</p></details>
+    <details><summary>6. 放回全景：第 ⑦ 站的缓存命中率从 80% 掉到 0，第 ④、⑩ 站会看到什么？</summary><p>第 ⑦ 站：每个调查计入 ITPM 的 token 成倍增加；第 ④ 站的令牌桶放行变慢，第 ② 站积压上涨，P95 拉长；如果预扣还按“命中”估，第 ⑦ 站还会冒出 429（限流页的做法 D）。第 ⑩ 站：每个调查的花费上涨、缓存命中率那条线掉到底，这是最早能看到的信号。</p><p class="from">从全景第 ②④⑦⑩ 站和 ④ 机制 2 推出。</p></details>
+  </div>
+</section>
+</main>
+
+<footer>
+  <p>档位：标准。⑤ 和实验台都是按计费规则<b>计算</b>出来的，不是实测：token 轨迹、单价（主模型 $3 / $15、小模型 $1 / $5、缓存读 0.1 倍、写 1.25 倍）、速度（生成 50 token/秒、没缓存的输入 4000 token/秒）都是本页的假设，写在 <code>ledger.py</code> 开头；Python 版和页面里的 JS 版逐行对过，7 种组合的输出一致。按文档（已核对）：缓存读不算 ITPM、写缓存算（Claude API rate-limits 页，2026-11-28 查）；缓存的倍数和 1 小时档见站 03 那页的核对。</p>
+  <p>相关：<a href="pano-10-promo-night.html">全景：大促夜里 1000 个告警同时涌进来</a> · <a href="api-prompt-cache-batch.html">提示词缓存</a> · <a href="parallel-tool-calls.html">并行工具调用</a> · <a href="prod-rate-limit.html">限流和配额</a> · <a href="ai-gateway.html">AI 网关</a></p>
+</footer>
+<script>
+/*SIM-START*/
+// 纯函数，不碰 DOM。和 study-labs 的 prod-cost-latency/ledger.py 一行对一行。
+const PRICE = { main: [3, 15], small: [1, 5] }, READ = 0.1, WRITE = 1.25, PREFIX = 4000, ALERT = 500;
+const TOOLS = { search_logs: 3000, parse_gc_log: 1500, thread_dump: 6000, search_notes: 1000, create_ticket: 200 };
+const TRIMMED = { search_logs: 1000, parse_gc_log: 800, thread_dump: 1500, search_notes: 1000, create_ticket: 200 };
+const CALL_OUT = 150, REPORT_OUT = 600, DECODE_TPS = 50, PREFILL_TPS = 4000, BASE_S = 0.6, TOOL_S = 2, TRIAGE_STOP = 0.4;
+function plan(o) {
+  return o.parallel ? [["search_logs", "parse_gc_log", "thread_dump"], ["search_notes"], ["create_ticket"], []]
+    : [["search_logs"], ["parse_gc_log"], ["thread_dump"], ["search_notes"], ["create_ticket"], []];
+}
+function investigate(o) {
+  const sizes = o.trim ? TRIMMED : TOOLS, [pi, po] = PRICE.main;
+  const b = { itpm: 0, read: 0, out: 0, usd: 0, seconds: 0, calls: 0, ttft: 0, rounds: [] };
+  let history = 0, cached = 0;
+  for (const tools of plan(o)) {
+    const total = PREFIX + ALERT + history;
+    let read = 0, write = 0;
+    if (o.history) { read = cached === 0 ? PREFIX : cached; write = total - read; cached = total; }
+    else if (o.prefix) { read = PREFIX; }
+    const fresh = total - read - write, out = tools.length ? CALL_OUT * tools.length : REPORT_OUT;
+    const usd = (fresh * pi + write * pi * WRITE + read * pi * READ + out * po) / 1e6;
+    const prefill = BASE_S + (fresh + write) / PREFILL_TPS, gen = out / DECODE_TPS;
+    const toolS = o.parallel ? (tools.length ? TOOL_S : 0) : TOOL_S * tools.length;
+    b.itpm += fresh + write; b.read += read; b.out += out; b.usd += usd; b.calls += 1; b.seconds += prefill + gen + toolS;
+    if (!tools.length) b.ttft = o.stream ? prefill : prefill + gen;
+    b.rounds.push({ total, read, write, fresh, out, usd });
+    history += out + tools.reduce((s, t) => s + sizes[t], 0);
+  }
+  return b;
+}
+function perIncident(o) {
+  const inv = investigate(o);
+  if (!o.triage) return inv;
+  const [pi, po] = PRICE.small, tIn = PREFIX + ALERT, k = 1 - TRIAGE_STOP;
+  const tri = { itpm: tIn, out: CALL_OUT, usd: (tIn * pi + CALL_OUT * po) / 1e6, seconds: BASE_S + tIn / PREFILL_TPS + CALL_OUT / DECODE_TPS };
+  return { itpm: tri.itpm + k * inv.itpm, read: k * inv.read, out: tri.out + k * inv.out, usd: tri.usd + k * inv.usd,
+           seconds: tri.seconds + k * inv.seconds, calls: 1 + Math.round(k * inv.calls * 10) / 10, ttft: inv.ttft, rounds: inv.rounds };
+}
+function concurrency(inv, itpmBudget = 360000, otpmBudget = 72000) {
+  const minutes = inv.seconds / 60, byIn = itpmBudget / (inv.itpm / minutes), byOut = otpmBudget / (inv.out / minutes);
+  return byIn <= byOut ? { n: Math.floor(byIn), by: "ITPM" } : { n: Math.floor(byOut), by: "OTPM" };
+}
+function simulate(o) {
+  const inv = investigate(o), b = perIncident(o), c = concurrency(inv);
+  const perMin = c.n / (inv.seconds / 60) / (o.triage ? 1 - TRIAGE_STOP : 1);
+  return { ...b, conc: c.n, by: c.by, perMin, night: 87 * b.usd, nightMin: 87 / perMin };
+}
+/*SIM-END*/
+
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const KEYS = ["prefix", "history", "trim", "parallel", "triage", "stream"];
+  const NAMES = { prefix: "前缀缓存", history: "历史缓存", trim: "工具瘦身", parallel: "并行", triage: "小模型分诊", stream: "流式" };
+  function opts() {
+    const o = {}; KEYS.forEach(k => { o[k] = $("#k-" + k).checked; });
+    if (o.history) o.prefix = true;
+    return o;
+  }
+  function draw() {
+    const o = opts(), r = simulate(o), base = simulate({});
+    const pct = x => Math.round(x * 100) + "%";
+    $("#lab-tiles").innerHTML =
+      '<div class="tile" data-role="pd"><small>每个事件</small><b>$' + r.usd.toFixed(3) + '</b><span>基线的 ' + pct(r.usd / base.usd) + '；87 个 $' + r.night.toFixed(2) + '</span></div>' +
+      '<div class="tile" data-role="of"><small>一个事件平均耗时</small><b>' + r.seconds.toFixed(1) + ' 秒</b><span>报告首字 ' + r.ttft.toFixed(1) + ' 秒</span></div>' +
+      '<div class="tile" data-role="done"><small>主模型能同时跑</small><b>' + r.conc + '</b><span>卡在 ' + r.by + '</span></div>' +
+      '<div class="tile" data-role="g2"><small>每分钟能做完</small><b>' + r.perMin.toFixed(1) + '</b><span>个事件（基线 ' + base.perMin.toFixed(1) + '）</span></div>';
+    const on = KEYS.filter(k => o[k] && !(k === "prefix" && o.history)).map(k => NAMES[k]);
+    let s = (on.length ? "打开了" + on.join("、") + "：" : "基线：") + "每个事件 $" + r.usd.toFixed(3) + "，是基线的 " + pct(r.usd / base.usd) + "；主模型同时能跑 " + r.conc + " 个，瓶颈在 " + r.by + "。";
+    if (o.stream && !o.prefix && !o.trim && !o.parallel && !o.triage) s += "只开流式：钱和额度一点没变，变的只有报告首字。";
+    else if (r.by === "OTPM") s += "输入已经省下来了，现在是输出额度先用完：报告和中间推理写得长不长开始要紧。";
+    else if (r.conc < 10) s += "瓶颈还在输入额度上：最大的那块（重复发送的历史）还没缓存。";
+    $("#lab-sum").textContent = s;
+  }
+  KEYS.forEach(k => $("#k-" + k).addEventListener("change", draw));
+  const ANSWER = "a";
+  $$("#lab-guess .opts button").forEach(btn => btn.addEventListener("click", () => {
+    $$("#lab-guess .opts button").forEach(x => { x.classList.remove("right", "wrong"); x.setAttribute("aria-pressed", "false"); });
+    btn.setAttribute("aria-pressed", "true");
+    const ok = btn.dataset.g === ANSWER;
+    btn.classList.add(ok ? "right" : "wrong");
+    if (!ok) $('#lab-guess [data-g="' + ANSWER + '"]').classList.add("right");
+    KEYS.forEach(k => { $("#k-" + k).checked = k === "stream"; });
+    const a = simulate({}), b = simulate({ stream: true });
+    const g = $("#lab-guess-res"); g.hidden = false;
+    g.textContent = (ok ? "猜对了。" : "不是这个。") + "流式前后每个事件都是 $" + b.usd.toFixed(4) + "（基线 $" + a.usd.toFixed(4) + "）；变的只有报告首字：" + a.ttft.toFixed(1) + " 秒 → " + b.ttft.toFixed(1) + " 秒。再把其他几刀一个个勾上看看。";
+    draw();
+  }));
+  draw();
+})();
+</script>
+
+<script id="tocx-js">
+(function () {
+  var bar = document.querySelector('nav.topbar .tb-in');
+  if (!bar || bar.querySelector('.tocx-steps, .tocx-dd')) return;
+  var route = document.querySelector('main nav.route');
+  var items = [], btn = null, panel = null;
+
+  function margin(t) {
+    try { if (getComputedStyle(t).scrollMarginTop === '0px') t.style.scrollMarginTop = '64px'; } catch (e) {}
+  }
+  if (route) {
+    var nav = document.createElement('nav');
+    nav.className = 'tocx-steps';
+    nav.setAttribute('aria-label', '六步跳转');
+    [].forEach.call(route.querySelectorAll('a[href^="#"]'), function (r) {
+      var id = r.getAttribute('href').slice(1), t = document.getElementById(id);
+      if (!t) return;
+      var b = r.querySelector('b'), num = b ? b.textContent.trim() : '';
+      var label = r.textContent.replace(num, '').trim();
+      var a = document.createElement('a');
+      a.href = '#' + id; a.title = (num + ' ' + label).trim();
+      a.innerHTML = '<b></b><span></span>';
+      a.firstChild.textContent = num; a.lastChild.textContent = label;
+      nav.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    if (!items.length) return;
+    bar.appendChild(nav);
+    document.documentElement.classList.add('tocx-on');
+  } else {
+    var hs = document.querySelectorAll('main h2');
+    if (hs.length < 3) return;
+    var dd = document.createElement('div');
+    dd.className = 'tocx-dd';
+    dd.innerHTML = '<button type="button" class="tocx-btn" aria-expanded="false" aria-controls="tocx-panel">目录 ▾</button><div class="tocx-panel" id="tocx-panel" hidden></div>';
+    btn = dd.firstChild; panel = dd.lastChild;
+    var used = {};
+    [].forEach.call(hs, function (h, i) {
+      var t = h.closest('section[id]');
+      if (!t || used[t.id]) t = h;
+      if (!t.id) t.id = 'tocx-' + (i + 1);
+      used[t.id] = 1;
+      var c = h.cloneNode(true);
+      [].forEach.call(c.querySelectorAll('small, .sn'), function (x) { x.parentNode.removeChild(x); });
+      var a = document.createElement('a');
+      a.href = '#' + t.id;
+      a.innerHTML = '<i></i><span></span>';
+      a.firstChild.textContent = (i < 9 ? '0' : '') + (i + 1);
+      a.lastChild.textContent = c.textContent.replace(/\s+/g, ' ').trim();
+      panel.appendChild(a); items.push({ a: a, t: t }); margin(t);
+    });
+    bar.appendChild(dd);
+    function open(v) {
+      panel.hidden = !v; btn.setAttribute('aria-expanded', String(v));
+      if (v && cur >= 0) { var a = items[cur].a; panel.scrollTop = a.offsetTop - panel.clientHeight / 2; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); open(panel.hidden); });
+    panel.addEventListener('click', function (e) { if (e.target.closest('a')) open(false); });
+    document.addEventListener('click', function (e) { if (!panel.hidden && !dd.contains(e.target)) open(false); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) { open(false); btn.focus(); } });
+  }
+
+  var cur = -1, ticking = false, top = bar.parentNode;
+  function spy() {
+    ticking = false;
+    var y = top.getBoundingClientRect().bottom + 24, k = -1;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].t.getBoundingClientRect().top <= y) k = i; else break;
+    }
+    var de = document.documentElement;
+    if (k >= 0 && window.innerHeight + window.pageYOffset >= de.scrollHeight - 4) k = items.length - 1;
+    if (k === cur) return;
+    if (cur >= 0) { items[cur].a.classList.remove('on'); items[cur].a.removeAttribute('aria-current'); }
+    cur = k;
+    if (k < 0) return;
+    var a = items[k].a;
+    a.classList.add('on'); a.setAttribute('aria-current', 'true');
+    if (route) {
+      var n = a.parentNode, nr = n.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < nr.left) n.scrollLeft -= nr.left - ar.left + 8;
+      else if (ar.right > nr.right) n.scrollLeft += ar.right - nr.right + 8;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+  window.addEventListener('resize', spy);
+  spy();
+})();
+</script>
+</body>
+</html>
